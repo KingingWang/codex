@@ -10443,6 +10443,8 @@ impl ChatWidget {
             /*effort*/ None,
             /*developer_instructions*/ None,
         );
+        // Also update config.model to ensure the model change takes effect immediately
+        self.config.model = Some(model.to_string());
         if self.collaboration_modes_enabled()
             && let Some(mask) = self.active_collaboration_mask.as_mut()
         {

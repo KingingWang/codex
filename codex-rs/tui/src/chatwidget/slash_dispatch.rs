@@ -9,6 +9,8 @@ use super::*;
 use crate::app_event::ThreadGoalSetMode;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands;
+use codex_protocol::openai_models::ReasoningEffort;
+use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -568,6 +570,41 @@ impl ChatWidget {
                         self.add_error_message("Usage: /fast [on|off|status]".to_string());
                     }
                 }
+            }
+            SlashCommand::Model if !trimmed.is_empty() => {
+                // Parse args: /model <model_name> [reasoning_effort]
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                let model_name = parts[0].to_string();
+                let explicit_effort = parts.get(1).and_then(|s| ReasoningEffort::from_str(s).ok());
+
+                // First try the model catalog for metadata (reasoning effort etc.)
+                let catalog_match = self
+                    .model_catalog
+                    .try_list_models()
+                    .ok()
+                    .and_then(|models| {
+                        models.into_iter().find(|p| {
+                            p.model.eq_ignore_ascii_case(&model_name)
+                                || p.id.eq_ignore_ascii_case(&model_name)
+                                || p.display_name.eq_ignore_ascii_case(&model_name)
+                        })
+                    });
+
+                let (final_model, final_effort) = if let Some(preset) = catalog_match {
+                    // Catalog model: use explicit effort if provided, else catalog default
+                    let effort = explicit_effort.or(Some(preset.default_reasoning_effort));
+                    (preset.model.clone(), effort)
+                } else {
+                    // Custom model: use explicit effort if provided, else preserve existing
+                    let effort = explicit_effort.or(self.config.model_reasoning_effort);
+                    (model_name.clone(), effort)
+                };
+
+                self.apply_model_and_effort(final_model.clone(), final_effort);
+                self.add_info_message(
+                    format!("Switched to model: {final_model}"),
+                    /*hint*/ None,
+                );
             }
             SlashCommand::Mcp => match trimmed.to_ascii_lowercase().as_str() {
                 "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),

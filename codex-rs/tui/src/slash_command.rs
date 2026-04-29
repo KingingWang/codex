@@ -100,7 +100,7 @@ impl SlashCommand {
             SlashCommand::Stop => "stop all background terminals",
             SlashCommand::MemoryDrop => "DO NOT USE",
             SlashCommand::MemoryUpdate => "DO NOT USE",
-            SlashCommand::Model => "choose what model and reasoning effort to use",
+            SlashCommand::Model => "choose a model; /model <name> [effort] to switch",
             SlashCommand::Fast => {
                 "toggle Fast mode to enable fastest inference with increased plan usage"
             }
@@ -150,6 +150,7 @@ impl SlashCommand {
                 | SlashCommand::Side
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::Model
         )
     }
 

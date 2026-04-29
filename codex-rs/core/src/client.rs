@@ -33,6 +33,9 @@ use std::sync::atomic::Ordering;
 
 use codex_api::ApiError;
 use codex_api::AuthProvider;
+use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
+use codex_api::ChatCompletionsRequest;
+use codex_api::ChatMessage;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::Compression;
@@ -84,6 +87,9 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
+use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ToolSpec;
+use codex_tools::create_tools_json_for_chat_completions;
 use codex_tools::create_tools_json_for_responses_api;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
@@ -97,6 +103,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
+use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -1552,6 +1559,19 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Chat => {
+                self.stream_chat_completions_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    turn_metadata_header,
+                    inference_trace,
+                )
+                .await
+            }
         }
     }
 
@@ -1572,6 +1592,464 @@ impl ModelClientSession {
         self.websocket_session = WebsocketSession::default();
         activated
     }
+
+    /// Streams a turn via the OpenAI Chat Completions API.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_chat_completions_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "chat_completions_http",
+            http.method = "POST",
+            api.path = "chat/completions"
+        )
+    )]
+    async fn stream_chat_completions_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        _summary: ReasoningSummaryConfig,
+        _service_tier: Option<ServiceTier>,
+        _turn_metadata_header: Option<&str>,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        let mut retry_count: u32 = 0;
+        let mut auth_retry_count: u32 = 0;
+        const MAX_AUTH_RETRIES: u32 = 10;
+        let base_delay = Duration::from_secs(5);
+        let max_delay = Duration::from_secs(600); // 10 minutes
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                pending_retry,
+            );
+            let (_, _sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint("/chat/completions"),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+
+            let request = self.build_chat_completions_request(prompt, model_info, effort)?;
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.record_started(&request);
+            let chat_stream = self.client.state.provider.info().chat_stream;
+            let client = ApiChatCompletionsClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+                chat_stream,
+            );
+            let stream_result = client.request(request, ApiHeaderMap::new()).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        inference_trace_attempt,
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    match handle_unauthorized(
+                        unauthorized_transport,
+                        &mut auth_recovery,
+                        session_telemetry,
+                    )
+                    .await
+                    {
+                        Ok(recovery) => {
+                            pending_retry = PendingUnauthorizedRetry::from_recovery(recovery);
+                            retry_count = 0;
+                            auth_retry_count = 0;
+                            continue;
+                        }
+                        Err(err) => {
+                            // Custom API providers can't refresh tokens, but 401s
+                            // may be transient. Retry with backoff up to 10 times.
+                            if auth_retry_count < MAX_AUTH_RETRIES {
+                                let delay = base_delay
+                                    .saturating_mul(
+                                        1u32.checked_shl(auth_retry_count.min(20))
+                                            .unwrap_or(u32::MAX),
+                                    )
+                                    .min(max_delay);
+                                warn!(
+                                    auth_retry_count,
+                                    delay_ms = delay.as_millis(),
+                                    "Chat Completions received 401, retrying after backoff"
+                                );
+                                sleep(delay).await;
+                                auth_retry_count += 1;
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    let delay = match &err {
+                        ApiError::Retryable { delay: Some(d), .. } => *d,
+                        _ => {
+                            // Exponential backoff: 5s, 10s, 20s, 40s, ..., capped at 10 min
+                            let multiplier =
+                                1u32.checked_shl(retry_count.min(20)).unwrap_or(u32::MAX);
+                            let base = base_delay.saturating_mul(multiplier);
+                            std::cmp::min(base, max_delay)
+                        }
+                    };
+                    warn!(
+                        retry_count,
+                        delay_ms = delay.as_millis(),
+                        error = %err,
+                        "Chat Completions request failed, retrying after backoff"
+                    );
+                    sleep(delay).await;
+                    retry_count += 1;
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Builds a ChatCompletionsRequest from a Prompt.
+    fn build_chat_completions_request(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+    ) -> Result<ChatCompletionsRequest> {
+        let instructions = &prompt.base_instructions.text;
+        let input = prompt.get_formatted_input();
+
+        // Convert instructions to a system message
+        let mut messages = Vec::new();
+        if !instructions.is_empty() {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(serde_json::Value::String(instructions.clone())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning: None,
+            });
+        }
+
+        // Convert ResponseItems to ChatMessages
+        // First pass: collect reasoning content by anchor index
+        let mut reasoning_by_index: HashMap<usize, String> = HashMap::new();
+        for (idx, item) in input.iter().enumerate() {
+            if let ResponseItem::Reasoning {
+                content: Some(items),
+                ..
+            } = item
+            {
+                let mut text = String::new();
+                for entry in items {
+                    match entry {
+                        codex_protocol::models::ReasoningItemContent::ReasoningText {
+                            text: segment,
+                        }
+                        | codex_protocol::models::ReasoningItemContent::Text { text: segment } => {
+                            text.push_str(segment)
+                        }
+                    }
+                }
+                if !text.trim().is_empty() {
+                    // Attach reasoning to the next assistant message or function call
+                    // Find the next relevant item index
+                    let mut attached = false;
+                    // Try to attach to previous assistant message
+                    if idx > 0 {
+                        for prev_idx in (0..idx).rev() {
+                            if let ResponseItem::Message { role, .. } = &input[prev_idx] {
+                                if role == "assistant" {
+                                    reasoning_by_index
+                                        .entry(prev_idx)
+                                        .and_modify(|v| {
+                                            v.push('\n');
+                                            v.push_str(&text)
+                                        })
+                                        .or_insert(text.clone());
+                                    attached = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // If not attached, try next item
+                    if !attached && idx + 1 < input.len() {
+                        reasoning_by_index
+                            .entry(idx + 1)
+                            .and_modify(|v| {
+                                v.push('\n');
+                                v.push_str(&text)
+                            })
+                            .or_insert(text.clone());
+                    }
+                }
+            }
+        }
+
+        // Second pass: build messages with reasoning attached.
+        // Consecutive assistant-turn items (Message with role=assistant, FunctionCall,
+        // CustomToolCall, Reasoning) must be merged into a single ChatMessage because
+        // the Chat Completions API requires all tool_calls and content from one
+        // assistant turn to appear on the same message, with tool results immediately
+        // following. If we emit separate messages for text and tool_calls, providers
+        // that validate message ordering will reject the request with a 400 error.
+        let mut pending_assistant: Option<ChatMessage> = None;
+        for (idx, item) in input.iter().enumerate() {
+            let reasoning = reasoning_by_index.get(&idx).cloned();
+            match item {
+                ResponseItem::Message { role, content, .. } => {
+                    let mapped_role = match role.as_str() {
+                        "developer" | "system" => "system",
+                        "assistant" => "assistant",
+                        "user" => "user",
+                        other => other,
+                    };
+                    let text = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            codex_protocol::models::ContentItem::OutputText { text, .. } => {
+                                Some(text.clone())
+                            }
+                            codex_protocol::models::ContentItem::InputText { text, .. } => {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    if mapped_role == "assistant" {
+                        if let Some(msg) = pending_assistant.as_mut() {
+                            // Merge content into existing pending assistant message.
+                            // This handles the case where FunctionCall items appear
+                            // before the Message item in the ResponseItem list.
+                            if !text.is_empty() {
+                                msg.content = Some(serde_json::Value::String(text));
+                            }
+                            if msg.reasoning.is_none() && reasoning.is_some() {
+                                msg.reasoning = reasoning;
+                            }
+                        } else {
+                            // Start a new pending assistant message.
+                            let msg_reasoning = if reasoning.is_some() { reasoning } else { None };
+                            pending_assistant = Some(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: if text.is_empty() {
+                                    None
+                                } else {
+                                    Some(serde_json::Value::String(text))
+                                },
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning: msg_reasoning,
+                            });
+                        }
+                    } else {
+                        // Non-assistant message: flush pending assistant first.
+                        if let Some(msg) = pending_assistant.take() {
+                            messages.push(msg);
+                        }
+                        let msg_content: Option<serde_json::Value> = if text.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::Value::String(text))
+                        };
+                        messages.push(ChatMessage {
+                            role: mapped_role.to_string(),
+                            content: msg_content,
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning: None,
+                        });
+                    }
+                }
+                ResponseItem::FunctionCall {
+                    name,
+                    arguments,
+                    call_id,
+                    ..
+                } => {
+                    let tool_call = codex_api::ChatToolCall {
+                        id: call_id.clone(),
+                        r#type: "function".to_string(),
+                        function: codex_api::ChatFunctionCall {
+                            name: name.clone(),
+                            arguments: Some(arguments.clone()),
+                        },
+                    };
+                    match pending_assistant.as_mut() {
+                        Some(msg) => {
+                            // Append to existing pending assistant message.
+                            msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
+                            if msg.reasoning.is_none() && reasoning.is_some() {
+                                msg.reasoning = reasoning;
+                            }
+                        }
+                        None => {
+                            // No pending assistant — start one with just this tool call.
+                            pending_assistant = Some(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: None,
+                                tool_calls: Some(vec![tool_call]),
+                                tool_call_id: None,
+                                reasoning: reasoning,
+                            });
+                        }
+                    }
+                }
+                ResponseItem::CustomToolCall {
+                    call_id,
+                    name,
+                    input: tool_input,
+                    ..
+                } => {
+                    let tool_call = codex_api::ChatToolCall {
+                        id: call_id.clone(),
+                        r#type: "function".to_string(),
+                        function: codex_api::ChatFunctionCall {
+                            name: name.clone(),
+                            arguments: Some(tool_input.clone()),
+                        },
+                    };
+                    match pending_assistant.as_mut() {
+                        Some(msg) => {
+                            msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
+                            if msg.reasoning.is_none() && reasoning.is_some() {
+                                msg.reasoning = reasoning;
+                            }
+                        }
+                        None => {
+                            pending_assistant = Some(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: None,
+                                tool_calls: Some(vec![tool_call]),
+                                tool_call_id: None,
+                                reasoning: reasoning,
+                            });
+                        }
+                    }
+                }
+                ResponseItem::FunctionCallOutput { call_id, output } => {
+                    // Tool result: flush pending assistant, then push tool message.
+                    if let Some(msg) = pending_assistant.take() {
+                        messages.push(msg);
+                    }
+                    let content_str = output.body.to_text().unwrap_or_default();
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(serde_json::Value::String(content_str)),
+                        tool_calls: None,
+                        tool_call_id: Some(call_id.clone()),
+                        reasoning: None,
+                    });
+                }
+                ResponseItem::CustomToolCallOutput {
+                    call_id,
+                    name: _,
+                    output,
+                } => {
+                    // Tool result: flush pending assistant, then push tool message.
+                    if let Some(msg) = pending_assistant.take() {
+                        messages.push(msg);
+                    }
+                    let content_str = output.body.to_text().unwrap_or_default();
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(serde_json::Value::String(content_str)),
+                        tool_calls: None,
+                        tool_call_id: Some(call_id.clone()),
+                        reasoning: None,
+                    });
+                }
+                _ => {
+                    // Skip items that don't map cleanly to chat format.
+                    // Flush pending assistant before skipping unknown items.
+                    if let Some(msg) = pending_assistant.take() {
+                        messages.push(msg);
+                    }
+                }
+            }
+        }
+        // Flush any remaining pending assistant message.
+        if let Some(msg) = pending_assistant.take() {
+            messages.push(msg);
+        }
+
+        // Convert tools and build namespace map for MCP tool resolution
+        let tools = create_tools_json_for_chat_completions(&prompt.tools)?;
+        let tool_namespace_map = build_tool_namespace_map(&prompt.tools);
+
+        // Determine reasoning_effort for models that support reasoning
+        let reasoning_effort = if model_info.supports_reasoning_summaries {
+            effort.or(model_info.default_reasoning_level)
+        } else {
+            None
+        };
+
+        let request = ChatCompletionsRequest {
+            model: model_info.slug.clone(),
+            messages,
+            tools,
+            tool_choice: Some(serde_json::Value::String("auto".to_string())),
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            reasoning_effort,
+            parallel_tool_calls: Some(prompt.parallel_tool_calls),
+            service_tier: None, // TODO: wire through from config or turn settings
+            tool_namespace_map,
+        };
+        Ok(request)
+    }
+}
+
+/// Builds a map from flat tool name to namespace prefix for MCP tools.
+/// When the Chat Completions API returns a tool call with a flat name like
+/// `ast_grep_search`, this map lets us look up the namespace (e.g. `omx_code_intel__`)
+/// so the resulting `ResponseItem::FunctionCall` carries the correct namespace
+/// for tool resolution.
+fn build_tool_namespace_map(tools: &[ToolSpec]) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for tool in tools {
+        if let ToolSpec::Namespace(ns) = tool {
+            for ns_tool in &ns.tools {
+                let ResponsesApiNamespaceTool::Function(func) = ns_tool;
+                map.insert(func.name.clone(), ns.name.clone());
+            }
+        }
+    }
+    map
 }
 
 /// Parses per-turn metadata into an HTTP header value.
