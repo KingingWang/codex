@@ -197,6 +197,7 @@ async fn convert_response_to_events(
     // When the API returns HTTP 200 with empty content, the stream
     // completes with no real output, which should trigger a retry.
     let mut output_emitted = false;
+    let mut last_finish_reason: Option<String> = None;
 
     let token_usage = response.usage.map(|u| TokenUsage {
         input_tokens: u.prompt_tokens,
@@ -369,6 +370,10 @@ async fn convert_response_to_events(
                 return;
             }
         }
+
+        if let Some(reason) = &choice.finish_reason {
+            last_finish_reason = Some(reason.clone());
+        }
     }
 
     // If no output was emitted (empty response from the API),
@@ -384,11 +389,16 @@ async fn convert_response_to_events(
     }
 
     // Emit completion event
+    let end_turn = match last_finish_reason.as_deref() {
+        Some("stop") | Some("length") => Some(true),
+        Some("tool_calls") => Some(false),
+        _ => None,
+    };
     let _ = tx
         .send(Ok(ResponseEvent::Completed {
             response_id,
             token_usage,
-            end_turn: None,
+            end_turn,
         }))
         .await;
 }
