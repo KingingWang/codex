@@ -235,7 +235,9 @@ pub async fn process_chat_completions_sse(
         // Process choices
         for choice in &event.choices {
             if let Some(fr) = &choice.finish_reason {
-                last_finish_reason = Some(fr.clone());
+                if !fr.is_empty() {
+                    last_finish_reason = Some(fr.clone());
+                }
             }
             if let Err(_e) = process_chat_choice(
                 choice,
@@ -311,9 +313,13 @@ async fn process_chat_choice(
                 .entry(index)
                 .or_insert((None, None, None));
 
-            // Update ID if present
+            // Update ID if present and non-empty.
+            // Some providers (e.g. qwen) send {"id": ""} in subsequent chunks,
+            // which would overwrite the real call_id with an empty string.
             if let Some(id) = &tool_call_delta.id {
-                entry.0 = Some(id.clone());
+                if !id.is_empty() {
+                    entry.0 = Some(id.clone());
+                }
             }
 
             // Update function name if present and non-empty.
@@ -334,8 +340,12 @@ async fn process_chat_choice(
         }
     }
 
-    // Handle finish reason
+    // Handle finish reason — skip empty strings sent by some providers
+    // (e.g. qwen) in intermediate chunks, which are not real finish signals.
     if let Some(finish_reason) = &choice.finish_reason {
+        if finish_reason.is_empty() {
+            return Ok(());
+        }
         // Emit OutputItemDone for the assistant text message if we added one.
         if *text_item_added && !*text_item_done && finish_reason == "stop" {
             let done_item = ResponseItem::Message {
