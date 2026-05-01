@@ -70,6 +70,10 @@ pub async fn process_chat_completions_sse(
     // Accumulated text content from all OutputTextDelta events, used to build
     // the OutputItemDone message.
     let mut accumulated_text = String::new();
+    // Accumulated reasoning content for models that support reasoning/thinking mode.
+    let mut accumulated_reasoning = String::new();
+    // Whether an OutputItemAdded for reasoning has been emitted.
+    let mut reasoning_item_added = false;
     // The last finish_reason seen across all choices, used to infer
     // end_turn for the Completed event.
     let mut last_finish_reason: Option<String> = None;
@@ -111,6 +115,23 @@ pub async fn process_chat_completions_sse(
 
         // Handle the [DONE] marker
         if data == "[DONE]" {
+            // Emit OutputItemDone for reasoning if we started one.
+            if reasoning_item_added {
+                let reasoning_done = ResponseItem::Reasoning {
+                    id: String::new(),
+                    summary: Vec::new(),
+                    content: Some(vec![
+                        codex_protocol::models::ReasoningItemContent::ReasoningText {
+                            text: accumulated_reasoning.clone(),
+                        },
+                    ]),
+                    encrypted_content: None,
+                };
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
+                    .await;
+            }
+
             // Emit any remaining tool calls with the proper event sequence
             // (OutputItemAdded -> ToolCallInputDelta -> OutputItemDone) so the
             // turn processor can establish the active tool before receiving deltas.
@@ -243,6 +264,8 @@ pub async fn process_chat_completions_sse(
                 choice,
                 &tx_event,
                 &mut accumulated_tool_calls,
+                &mut accumulated_reasoning,
+                &mut reasoning_item_added,
                 &mut text_item_added,
                 &mut text_item_done,
                 &mut accumulated_text,
@@ -263,6 +286,8 @@ async fn process_chat_choice(
     choice: &ChatCompletionChoice,
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     accumulated_tool_calls: &mut HashMap<i64, ToolCallAccumulator>,
+    accumulated_reasoning: &mut String,
+    reasoning_item_added: &mut bool,
     text_item_added: &mut bool,
     text_item_done: &mut bool,
     accumulated_text: &mut String,
@@ -301,6 +326,40 @@ async fn process_chat_choice(
         let _ = tx_event
             .send(Ok(ResponseEvent::OutputTextDelta(content.clone())))
             .await;
+    }
+
+    // Handle reasoning delta (e.g., DeepSeek thinking mode)
+    if let Some(reasoning) = &delta.reasoning {
+        let reasoning_text = match reasoning {
+            serde_json::Value::String(s) => s.clone(),
+            _ => String::new(),
+        };
+        if !reasoning_text.is_empty() {
+            if !*reasoning_item_added {
+                let reasoning_added = ResponseItem::Reasoning {
+                    id: String::new(),
+                    summary: Vec::new(),
+                    content: Some(vec![
+                        codex_protocol::models::ReasoningItemContent::ReasoningText {
+                            text: String::new(),
+                        },
+                    ]),
+                    encrypted_content: None,
+                };
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::OutputItemAdded(reasoning_added)))
+                    .await;
+                *reasoning_item_added = true;
+            }
+            accumulated_reasoning.push_str(&reasoning_text);
+            *output_emitted = true;
+            let _ = tx_event
+                .send(Ok(ResponseEvent::ReasoningContentDelta {
+                    delta: reasoning_text,
+                    content_index: choice.index,
+                }))
+                .await;
+        }
     }
 
     // Handle tool calls delta
@@ -347,7 +406,9 @@ async fn process_chat_choice(
             return Ok(());
         }
         // Emit OutputItemDone for the assistant text message if we added one.
-        if *text_item_added && !*text_item_done && finish_reason == "stop" {
+        // This must happen BEFORE tool call events so the TUI can finalize the
+        // stream_controller while it is still active, preventing duplicate rendering.
+        if *text_item_added && !*text_item_done {
             let done_item = ResponseItem::Message {
                 id: None,
                 role: "assistant".to_string(),
@@ -360,6 +421,23 @@ async fn process_chat_choice(
                 .send(Ok(ResponseEvent::OutputItemDone(done_item)))
                 .await;
             *text_item_done = true;
+        }
+
+        // Emit OutputItemDone for reasoning if we started one.
+        if *reasoning_item_added {
+            let reasoning_done = ResponseItem::Reasoning {
+                id: String::new(),
+                summary: Vec::new(),
+                content: Some(vec![
+                    codex_protocol::models::ReasoningItemContent::ReasoningText {
+                        text: accumulated_reasoning.clone(),
+                    },
+                ]),
+                encrypted_content: None,
+            };
+            let _ = tx_event
+                .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
+                .await;
         }
 
         // Emit accumulated tool calls with the proper event sequence
@@ -536,5 +614,74 @@ mod tests {
             )) if name == "shell"
         ));
         assert!(matches!(&events[3], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn text_then_tool_calls_emits_item_done_before_tools() {
+        // When a response has both text content AND tool calls, the OutputItemDone
+        // for the text message must be emitted BEFORE the tool call events.
+        // This ensures the TUI can finalize the stream_controller while it is still
+        // active, preventing duplicate rendering of the text content.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me check that.\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        // Expected sequence:
+        // 1. OutputItemAdded(Message) - for text
+        // 2. OutputTextDelta("Let me check that.")
+        // 3. OutputItemDone(Message) - text finalized BEFORE tool calls
+        // 4. OutputItemAdded(FunctionCall) - tool call begins
+        // 5. ToolCallInputDelta - tool arguments
+        // 6. OutputItemDone(FunctionCall) - tool call finalized
+        // 7. Completed
+        assert_eq!(events.len(), 7);
+
+        // 1. OutputItemAdded(Message)
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+
+        // 2. OutputTextDelta
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputTextDelta(s)) if s == "Let me check that."
+        ));
+
+        // 3. OutputItemDone(Message) - text MUST be finalized before tool calls
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+
+        // 4. OutputItemAdded(FunctionCall)
+        assert!(matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
+
+        // 5. ToolCallInputDelta
+        assert!(matches!(
+            &events[4],
+            Ok(ResponseEvent::ToolCallInputDelta { delta, .. })
+            if delta == "{\"cmd\":\"pwd\"}"
+        ));
+
+        // 6. OutputItemDone(FunctionCall)
+        assert!(matches!(
+            &events[5],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
+
+        // 7. Completed
+        assert!(matches!(&events[6], Ok(ResponseEvent::Completed { .. })));
     }
 }

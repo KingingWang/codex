@@ -1756,6 +1756,7 @@ impl ModelClientSession {
                 content: Some(serde_json::Value::String(instructions.clone())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
                 reasoning: None,
             });
         }
@@ -1781,36 +1782,43 @@ impl ModelClientSession {
                     }
                 }
                 if !text.trim().is_empty() {
-                    // Attach reasoning to the next assistant message or function call
-                    // Find the next relevant item index
+                    // Attach reasoning to the next assistant output in this turn.
+                    // In thinking mode (e.g., DeepSeek), reasoning precedes the
+                    // assistant's content or tool calls, so it should be attached
+                    // to the *next* relevant item (Message with role=assistant or
+                    // FunctionCall), not a previous assistant message from an
+                    // earlier turn.
                     let mut attached = false;
-                    // Try to attach to previous assistant message
-                    if idx > 0 {
-                        for prev_idx in (0..idx).rev() {
-                            if let ResponseItem::Message { role, .. } = &input[prev_idx] {
-                                if role == "assistant" {
-                                    reasoning_by_index
-                                        .entry(prev_idx)
-                                        .and_modify(|v| {
-                                            v.push('\n');
-                                            v.push_str(&text)
-                                        })
-                                        .or_insert(text.clone());
-                                    attached = true;
-                                    break;
-                                }
+                    for next_idx in (idx + 1)..input.len() {
+                        match &input[next_idx] {
+                            ResponseItem::Message { role, .. } if role == "assistant" => {
+                                reasoning_by_index
+                                    .entry(next_idx)
+                                    .and_modify(|v| {
+                                        v.push('\n');
+                                        v.push_str(&text)
+                                    })
+                                    .or_insert(text.clone());
+                                attached = true;
+                                break;
                             }
+                            ResponseItem::FunctionCall { .. } => {
+                                reasoning_by_index
+                                    .entry(next_idx)
+                                    .and_modify(|v| {
+                                        v.push('\n');
+                                        v.push_str(&text)
+                                    })
+                                    .or_insert(text.clone());
+                                attached = true;
+                                break;
+                            }
+                            // Stop searching if we hit a non-assistant boundary
+                            ResponseItem::Message { role, .. } if role != "assistant" => break,
+                            ResponseItem::FunctionCallOutput { .. } => break,
+                            ResponseItem::CustomToolCallOutput { .. } => break,
+                            _ => {}
                         }
-                    }
-                    // If not attached, try next item
-                    if !attached && idx + 1 < input.len() {
-                        reasoning_by_index
-                            .entry(idx + 1)
-                            .and_modify(|v| {
-                                v.push('\n');
-                                v.push_str(&text)
-                            })
-                            .or_insert(text.clone());
                     }
                 }
             }
@@ -1857,6 +1865,7 @@ impl ModelClientSession {
                                 msg.content = Some(serde_json::Value::String(text));
                             }
                             if msg.reasoning.is_none() && reasoning.is_some() {
+                                msg.reasoning_content = reasoning.clone();
                                 msg.reasoning = reasoning;
                             }
                         } else {
@@ -1871,6 +1880,7 @@ impl ModelClientSession {
                                 },
                                 tool_calls: None,
                                 tool_call_id: None,
+                                reasoning_content: msg_reasoning.clone(),
                                 reasoning: msg_reasoning,
                             });
                         }
@@ -1889,6 +1899,7 @@ impl ModelClientSession {
                             content: msg_content,
                             tool_calls: None,
                             tool_call_id: None,
+                            reasoning_content: None,
                             reasoning: None,
                         });
                     }
@@ -1912,6 +1923,7 @@ impl ModelClientSession {
                             // Append to existing pending assistant message.
                             msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
                             if msg.reasoning.is_none() && reasoning.is_some() {
+                                msg.reasoning_content = reasoning.clone();
                                 msg.reasoning = reasoning;
                             }
                         }
@@ -1922,6 +1934,7 @@ impl ModelClientSession {
                                 content: None,
                                 tool_calls: Some(vec![tool_call]),
                                 tool_call_id: None,
+                                reasoning_content: reasoning.clone(),
                                 reasoning: reasoning,
                             });
                         }
@@ -1945,6 +1958,7 @@ impl ModelClientSession {
                         Some(msg) => {
                             msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
                             if msg.reasoning.is_none() && reasoning.is_some() {
+                                msg.reasoning_content = reasoning.clone();
                                 msg.reasoning = reasoning;
                             }
                         }
@@ -1954,6 +1968,7 @@ impl ModelClientSession {
                                 content: None,
                                 tool_calls: Some(vec![tool_call]),
                                 tool_call_id: None,
+                                reasoning_content: reasoning.clone(),
                                 reasoning: reasoning,
                             });
                         }
@@ -1970,6 +1985,7 @@ impl ModelClientSession {
                         content: Some(serde_json::Value::String(content_str)),
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
+                        reasoning_content: None,
                         reasoning: None,
                     });
                 }
@@ -1988,6 +2004,7 @@ impl ModelClientSession {
                         content: Some(serde_json::Value::String(content_str)),
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
+                        reasoning_content: None,
                         reasoning: None,
                     });
                 }
@@ -2003,6 +2020,17 @@ impl ModelClientSession {
         // Flush any remaining pending assistant message.
         if let Some(msg) = pending_assistant.take() {
             messages.push(msg);
+        }
+
+        // DeepSeek thinking mode requires reasoning_content on ALL assistant messages
+        // when the model is in thinking mode. Even if a non-thinking model was used
+        // mid-session, switching back to DeepSeek requires reasoning_content to be
+        // present on every assistant message in the conversation history.
+        // Fill in "No reasoning required" for any assistant message missing this field.
+        for msg in &mut messages {
+            if msg.role == "assistant" && msg.reasoning_content.is_none() {
+                msg.reasoning_content = Some("No reasoning required".to_string());
+            }
         }
 
         // Convert tools and build namespace map for MCP tool resolution
