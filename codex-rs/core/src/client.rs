@@ -1761,6 +1761,47 @@ impl ModelClientSession {
             });
         }
 
+        // First pass: identify warning messages that need reordering
+        // Warning messages are inserted before tool results, but should come after
+        // the corresponding tool result. We track them by their original index.
+        let mut pending_warnings: Vec<(usize, ChatMessage)> = Vec::new();
+        for (idx, item) in input.iter().enumerate() {
+            if let ResponseItem::Message { role, content, .. } = item {
+                if role == "user" {
+                    let text = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            codex_protocol::models::ContentItem::OutputText { text, .. } => {
+                                Some(text.clone())
+                            }
+                            codex_protocol::models::ContentItem::InputText { text, .. } => {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if text.starts_with("Warning:") {
+                        pending_warnings.push((
+                            idx,
+                            ChatMessage {
+                                role: "user".to_string(),
+                                content: Some(serde_json::Value::String(text)),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                                reasoning: None,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        // Sort warnings by their original index
+        pending_warnings.sort_by_key(|(idx, _)| *idx);
+        let warning_indices: std::collections::HashSet<usize> =
+            pending_warnings.iter().map(|(idx, _)| *idx).collect();
+
         // Convert ResponseItems to ChatMessages
         // First pass: collect reasoning content by anchor index
         let mut reasoning_by_index: HashMap<usize, String> = HashMap::new();
@@ -1888,6 +1929,10 @@ impl ModelClientSession {
                         // Non-assistant message: flush pending assistant first.
                         if let Some(msg) = pending_assistant.take() {
                             messages.push(msg);
+                        }
+                        // Skip warning messages - they will be added after all tool results
+                        if mapped_role == "user" && text.starts_with("Warning:") {
+                            continue;
                         }
                         let msg_content: Option<serde_json::Value> = if text.is_empty() {
                             None
@@ -2037,12 +2082,87 @@ impl ModelClientSession {
         let tools = create_tools_json_for_chat_completions(&prompt.tools)?;
         let tool_namespace_map = build_tool_namespace_map(&prompt.tools);
 
+        // Check if there are tool_calls but no tools defined
+        let has_tool_calls = messages.iter().any(|m| m.tool_calls.is_some());
+        if has_tool_calls && tools.is_empty() {
+            return Err(CodexErr::InvalidRequest(
+                "Request has tool_calls but no tools defined. This will cause a 400 error from the API."
+                    .to_string(),
+            ));
+        }
+
         // Determine reasoning_effort for models that support reasoning
         let reasoning_effort = if model_info.supports_reasoning_summaries {
             effort.or(model_info.default_reasoning_level)
         } else {
             None
         };
+
+        // Insert warning messages after their corresponding tool results
+        // Find each warning's preceding tool result and insert the warning right after it
+        // Sort warnings by their original index to maintain order
+        pending_warnings.sort_by_key(|(idx, _)| *idx);
+
+        // Build a mapping: for each warning, find the index of its preceding tool result
+        // The warning should come right after the tool result in the messages list
+        let mut warning_insertions: Vec<(usize, ChatMessage)> = Vec::new();
+
+        for (warning_orig_idx, warning_msg) in pending_warnings {
+            // Find the last FunctionCallOutput before this warning in the original input
+            let mut tool_result_msg_idx: Option<usize> = None;
+
+            for (input_idx, item) in input.iter().enumerate() {
+                if input_idx >= warning_orig_idx {
+                    break;
+                }
+                if matches!(
+                    item,
+                    ResponseItem::FunctionCallOutput { .. }
+                        | ResponseItem::CustomToolCallOutput { .. }
+                ) {
+                    tool_result_msg_idx = Some(input_idx);
+                }
+            }
+
+            // Find the corresponding message index in the built messages list
+            // We need to count how many tool results we've seen before this warning's position
+            if let Some(tool_result_input_idx) = tool_result_msg_idx {
+                // Count tool results up to and including this one
+                let mut tool_result_count = 0;
+                for (idx, item) in input.iter().enumerate() {
+                    if idx > tool_result_input_idx {
+                        break;
+                    }
+                    if matches!(
+                        item,
+                        ResponseItem::FunctionCallOutput { .. }
+                            | ResponseItem::CustomToolCallOutput { .. }
+                    ) {
+                        tool_result_count += 1;
+                    }
+                }
+
+                // Find the position in messages (after counting tool messages)
+                let mut tool_msg_counter = 0;
+                for (msg_idx, msg) in messages.iter().enumerate() {
+                    if msg.role == "tool" {
+                        tool_msg_counter += 1;
+                        if tool_msg_counter == tool_result_count {
+                            // Insert after this tool message
+                            warning_insertions.push((msg_idx + 1, warning_msg));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Insert warnings at their designated positions
+        // Process in reverse order to maintain correct insertion positions
+        warning_insertions.sort_by_key(|(pos, _)| *pos);
+        for (pos, warning_msg) in warning_insertions.into_iter().rev() {
+            messages.insert(pos, warning_msg);
+        }
 
         let request = ChatCompletionsRequest {
             model: model_info.slug.clone(),
