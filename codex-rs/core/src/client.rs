@@ -1761,47 +1761,6 @@ impl ModelClientSession {
             });
         }
 
-        // First pass: identify warning messages that need reordering
-        // Warning messages are inserted before tool results, but should come after
-        // the corresponding tool result. We track them by their original index.
-        let mut pending_warnings: Vec<(usize, ChatMessage)> = Vec::new();
-        for (idx, item) in input.iter().enumerate() {
-            if let ResponseItem::Message { role, content, .. } = item {
-                if role == "user" {
-                    let text = content
-                        .iter()
-                        .filter_map(|c| match c {
-                            codex_protocol::models::ContentItem::OutputText { text, .. } => {
-                                Some(text.clone())
-                            }
-                            codex_protocol::models::ContentItem::InputText { text, .. } => {
-                                Some(text.clone())
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if text.starts_with("Warning:") {
-                        pending_warnings.push((
-                            idx,
-                            ChatMessage {
-                                role: "user".to_string(),
-                                content: Some(serde_json::Value::String(text)),
-                                tool_calls: None,
-                                tool_call_id: None,
-                                reasoning_content: None,
-                                reasoning: None,
-                            },
-                        ));
-                    }
-                }
-            }
-        }
-        // Sort warnings by their original index
-        pending_warnings.sort_by_key(|(idx, _)| *idx);
-        let warning_indices: std::collections::HashSet<usize> =
-            pending_warnings.iter().map(|(idx, _)| *idx).collect();
-
         // Convert ResponseItems to ChatMessages
         // First pass: collect reasoning content by anchor index
         let mut reasoning_by_index: HashMap<usize, String> = HashMap::new();
@@ -1829,7 +1788,6 @@ impl ModelClientSession {
                     // to the *next* relevant item (Message with role=assistant or
                     // FunctionCall), not a previous assistant message from an
                     // earlier turn.
-                    let mut attached = false;
                     for next_idx in (idx + 1)..input.len() {
                         match &input[next_idx] {
                             ResponseItem::Message { role, .. } if role == "assistant" => {
@@ -1840,7 +1798,6 @@ impl ModelClientSession {
                                         v.push_str(&text)
                                     })
                                     .or_insert(text.clone());
-                                attached = true;
                                 break;
                             }
                             ResponseItem::FunctionCall { .. } => {
@@ -1851,7 +1808,6 @@ impl ModelClientSession {
                                         v.push_str(&text)
                                     })
                                     .or_insert(text.clone());
-                                attached = true;
                                 break;
                             }
                             // Stop searching if we hit a non-assistant boundary
@@ -1873,6 +1829,11 @@ impl ModelClientSession {
         // following. If we emit separate messages for text and tool_calls, providers
         // that validate message ordering will reject the request with a 400 error.
         let mut pending_assistant: Option<ChatMessage> = None;
+        // Warning messages are recorded before the tool result they describe.
+        // Queue them until the current assistant tool-result block is complete,
+        // or we reach a non-tool boundary.
+        let mut pending_warnings: Vec<ChatMessage> = Vec::new();
+        let mut pending_tool_outputs_in_turn = 0usize;
         for (idx, item) in input.iter().enumerate() {
             let reasoning = reasoning_by_index.get(&idx).cloned();
             match item {
@@ -1898,6 +1859,12 @@ impl ModelClientSession {
                         .join("\n");
 
                     if mapped_role == "assistant" {
+                        if pending_assistant.is_none()
+                            && pending_tool_outputs_in_turn == 0
+                            && !pending_warnings.is_empty()
+                        {
+                            messages.append(&mut pending_warnings);
+                        }
                         if let Some(msg) = pending_assistant.as_mut() {
                             // Merge content into existing pending assistant message.
                             // This handles the case where FunctionCall items appear
@@ -1926,13 +1893,23 @@ impl ModelClientSession {
                             });
                         }
                     } else {
-                        // Non-assistant message: flush pending assistant first.
+                        if mapped_role == "user" && text.starts_with("Warning:") {
+                            pending_warnings.push(ChatMessage {
+                                role: "user".to_string(),
+                                content: Some(serde_json::Value::String(text)),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                                reasoning: None,
+                            });
+                            continue;
+                        }
                         if let Some(msg) = pending_assistant.take() {
                             messages.push(msg);
                         }
-                        // Skip warning messages - they will be added after all tool results
-                        if mapped_role == "user" && text.starts_with("Warning:") {
-                            continue;
+                        pending_tool_outputs_in_turn = 0;
+                        if !pending_warnings.is_empty() {
+                            messages.append(&mut pending_warnings);
                         }
                         let msg_content: Option<serde_json::Value> = if text.is_empty() {
                             None
@@ -1963,6 +1940,12 @@ impl ModelClientSession {
                             arguments: Some(arguments.clone()),
                         },
                     };
+                    if pending_assistant.is_none()
+                        && pending_tool_outputs_in_turn == 0
+                        && !pending_warnings.is_empty()
+                    {
+                        messages.append(&mut pending_warnings);
+                    }
                     match pending_assistant.as_mut() {
                         Some(msg) => {
                             // Append to existing pending assistant message.
@@ -1984,6 +1967,7 @@ impl ModelClientSession {
                             });
                         }
                     }
+                    pending_tool_outputs_in_turn += 1;
                 }
                 ResponseItem::CustomToolCall {
                     call_id,
@@ -1999,6 +1983,12 @@ impl ModelClientSession {
                             arguments: Some(tool_input.clone()),
                         },
                     };
+                    if pending_assistant.is_none()
+                        && pending_tool_outputs_in_turn == 0
+                        && !pending_warnings.is_empty()
+                    {
+                        messages.append(&mut pending_warnings);
+                    }
                     match pending_assistant.as_mut() {
                         Some(msg) => {
                             msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
@@ -2018,6 +2008,7 @@ impl ModelClientSession {
                             });
                         }
                     }
+                    pending_tool_outputs_in_turn += 1;
                 }
                 ResponseItem::FunctionCallOutput { call_id, output } => {
                     // Tool result: flush pending assistant, then push tool message.
@@ -2033,6 +2024,10 @@ impl ModelClientSession {
                         reasoning_content: None,
                         reasoning: None,
                     });
+                    pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
+                    if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
+                        messages.append(&mut pending_warnings);
+                    }
                 }
                 ResponseItem::CustomToolCallOutput {
                     call_id,
@@ -2052,6 +2047,14 @@ impl ModelClientSession {
                         reasoning_content: None,
                         reasoning: None,
                     });
+                    pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
+                    if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
+                        messages.append(&mut pending_warnings);
+                    }
+                }
+                ResponseItem::Reasoning { .. } => {
+                    // Reasoning belongs to the current assistant turn, so it should not flush a
+                    // pending assistant message or pending warning queue on its own.
                 }
                 _ => {
                     // Skip items that don't map cleanly to chat format.
@@ -2059,12 +2062,19 @@ impl ModelClientSession {
                     if let Some(msg) = pending_assistant.take() {
                         messages.push(msg);
                     }
+                    pending_tool_outputs_in_turn = 0;
+                    if !pending_warnings.is_empty() {
+                        messages.append(&mut pending_warnings);
+                    }
                 }
             }
         }
         // Flush any remaining pending assistant message.
         if let Some(msg) = pending_assistant.take() {
             messages.push(msg);
+        }
+        if !pending_warnings.is_empty() {
+            messages.append(&mut pending_warnings);
         }
 
         // DeepSeek thinking mode requires reasoning_content on ALL assistant messages
@@ -2097,72 +2107,6 @@ impl ModelClientSession {
         } else {
             None
         };
-
-        // Insert warning messages after their corresponding tool results
-        // Find each warning's preceding tool result and insert the warning right after it
-        // Sort warnings by their original index to maintain order
-        pending_warnings.sort_by_key(|(idx, _)| *idx);
-
-        // Build a mapping: for each warning, find the index of its preceding tool result
-        // The warning should come right after the tool result in the messages list
-        let mut warning_insertions: Vec<(usize, ChatMessage)> = Vec::new();
-
-        for (warning_orig_idx, warning_msg) in pending_warnings {
-            // Find the last FunctionCallOutput before this warning in the original input
-            let mut tool_result_msg_idx: Option<usize> = None;
-
-            for (input_idx, item) in input.iter().enumerate() {
-                if input_idx >= warning_orig_idx {
-                    break;
-                }
-                if matches!(
-                    item,
-                    ResponseItem::FunctionCallOutput { .. }
-                        | ResponseItem::CustomToolCallOutput { .. }
-                ) {
-                    tool_result_msg_idx = Some(input_idx);
-                }
-            }
-
-            // Find the corresponding message index in the built messages list
-            // We need to count how many tool results we've seen before this warning's position
-            if let Some(tool_result_input_idx) = tool_result_msg_idx {
-                // Count tool results up to and including this one
-                let mut tool_result_count = 0;
-                for (idx, item) in input.iter().enumerate() {
-                    if idx > tool_result_input_idx {
-                        break;
-                    }
-                    if matches!(
-                        item,
-                        ResponseItem::FunctionCallOutput { .. }
-                            | ResponseItem::CustomToolCallOutput { .. }
-                    ) {
-                        tool_result_count += 1;
-                    }
-                }
-
-                // Find the position in messages (after counting tool messages)
-                let mut tool_msg_counter = 0;
-                for (msg_idx, msg) in messages.iter().enumerate() {
-                    if msg.role == "tool" {
-                        tool_msg_counter += 1;
-                        if tool_msg_counter == tool_result_count {
-                            // Insert after this tool message
-                            warning_insertions.push((msg_idx + 1, warning_msg));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Insert warnings at their designated positions
-        // Process in reverse order to maintain correct insertion positions
-        warning_insertions.sort_by_key(|(pos, _)| *pos);
-        for (pos, warning_msg) in warning_insertions.into_iter().rev() {
-            messages.insert(pos, warning_msg);
-        }
 
         let request = ChatCompletionsRequest {
             model: model_info.slug.clone(),
@@ -2198,6 +2142,575 @@ fn build_tool_namespace_map(tools: &[ToolSpec]) -> std::collections::HashMap<Str
         }
     }
     map
+}
+
+#[cfg(test)]
+mod chat_completions_request_tests {
+    use super::ModelClient;
+    use super::ModelClientSession;
+    use crate::client_common::Prompt;
+    use codex_api::ChatCompletionsRequest;
+    use codex_model_provider_info::WireApi;
+    use codex_model_provider_info::create_oss_provider_with_base_url;
+    use codex_protocol::ThreadId;
+    use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ReasoningItemReasoningSummary;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::openai_models::ModelInfo;
+    use codex_protocol::protocol::SessionSource;
+    use codex_tools::CommandToolOptions;
+    use codex_tools::create_exec_command_tool;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    fn test_model_client() -> ModelClient {
+        let provider =
+            create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+        ModelClient::new(
+            /*auth_manager*/ None,
+            ThreadId::new(),
+            /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+            provider,
+            SessionSource::Cli,
+            /*model_verbosity*/ None,
+            /*enable_request_compression*/ false,
+            /*include_timing_metrics*/ false,
+            /*beta_features_header*/ None,
+        )
+    }
+
+    fn test_model_info() -> ModelInfo {
+        serde_json::from_value(json!({
+            "slug": "gpt-test",
+            "display_name": "gpt-test",
+            "description": "desc",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "medium", "description": "medium"}
+            ],
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": 1,
+            "upgrade": null,
+            "base_instructions": "base instructions",
+            "model_messages": null,
+            "supports_reasoning_summaries": false,
+            "support_verbosity": false,
+            "default_verbosity": null,
+            "apply_patch_tool_type": null,
+            "truncation_policy": {"mode": "bytes", "limit": 10000},
+            "supports_parallel_tool_calls": false,
+            "supports_image_detail_original": false,
+            "context_window": 272000,
+            "auto_compact_token_limit": null,
+            "experimental_supported_tools": []
+        }))
+        .expect("deserialize test model info")
+    }
+
+    fn test_prompt(input: Vec<ResponseItem>) -> Prompt {
+        Prompt {
+            input,
+            tools: vec![create_exec_command_tool(CommandToolOptions {
+                allow_login_shell: false,
+                exec_permission_approvals_enabled: false,
+            })],
+            parallel_tool_calls: false,
+            base_instructions: BaseInstructions {
+                text: String::new(),
+            },
+            personality: None,
+            output_schema: None,
+            output_schema_strict: true,
+        }
+    }
+
+    fn build_request(input: Vec<ResponseItem>) -> ChatCompletionsRequest {
+        test_model_session()
+            .build_chat_completions_request(&test_prompt(input), &test_model_info(), None)
+            .expect("build chat completions request")
+    }
+
+    fn test_model_session() -> ModelClientSession {
+        test_model_client().new_session()
+    }
+
+    fn warning_item(message: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: message.to_string(),
+            }],
+            phase: None,
+        }
+    }
+
+    fn assistant_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+            phase: None,
+        }
+    }
+
+    fn reasoning_item(text: &str) -> ResponseItem {
+        ResponseItem::Reasoning {
+            id: "reasoning-id".to_string(),
+            summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                text: text.to_string(),
+            }],
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: text.to_string(),
+            }]),
+            encrypted_content: None,
+        }
+    }
+
+    fn function_call(call_id: &str, arguments: &str) -> ResponseItem {
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: arguments.to_string(),
+            call_id: call_id.to_string(),
+        }
+    }
+
+    fn function_call_output(call_id: &str, output: &str) -> ResponseItem {
+        ResponseItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload::from_text(output.to_string()),
+        }
+    }
+
+    fn custom_tool_call(call_id: &str, input: &str) -> ResponseItem {
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: call_id.to_string(),
+            name: "exec_command".to_string(),
+            input: input.to_string(),
+        }
+    }
+
+    fn custom_tool_call_output(call_id: &str, output: &str) -> ResponseItem {
+        ResponseItem::CustomToolCallOutput {
+            call_id: call_id.to_string(),
+            name: None,
+            output: FunctionCallOutputPayload::from_text(output.to_string()),
+        }
+    }
+
+    #[test]
+    fn chat_completions_request_moves_tool_warning_after_matching_tool_result() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            warning_item(
+                "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
+            ),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command."
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_warning_with_later_tool_result() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            function_call_output("call-1", "first"),
+            function_call("call-2", r#"{"cmd":"ls"}"#),
+            warning_item("Warning: tool pressure warning"),
+            function_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: tool pressure warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_flushes_warnings_after_last_tool_result_in_turn() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            function_call("call-2", r#"{"cmd":"ls"}"#),
+            warning_item("Warning: first tool warning"),
+            function_call_output("call-1", "first"),
+            warning_item("Warning: second tool warning"),
+            function_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: first tool warning"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: second tool warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_flushes_custom_tool_warnings_after_last_tool_result_in_turn() {
+        let request = build_request(vec![
+            custom_tool_call("call-1", "pwd"),
+            custom_tool_call("call-2", "ls"),
+            warning_item("Warning: custom tool warning"),
+            custom_tool_call_output("call-1", "first"),
+            custom_tool_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "pwd"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "ls"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: custom tool warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_flushes_mixed_tool_warnings_after_last_tool_result_in_turn() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            custom_tool_call("call-2", "ls"),
+            warning_item("Warning: mixed tool warning"),
+            function_call_output("call-1", "first"),
+            custom_tool_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "ls"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: mixed tool warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_assistant_text_before_tool_warning() {
+        let request = build_request(vec![
+            assistant_message("Running command"),
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            warning_item("Warning: merged assistant warning"),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Running command",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: merged assistant warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_assistant_text_after_tool_warning() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            assistant_message("Running command"),
+            warning_item("Warning: merged assistant warning"),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Running command",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: merged assistant warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_preserves_warning_before_new_assistant_turn() {
+        let request = build_request(vec![
+            warning_item("Warning: fallback model was used"),
+            assistant_message("Fallback complete"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "user",
+                    "content": "Warning: fallback model was used"
+                },
+                {
+                    "role": "assistant",
+                    "content": "Fallback complete",
+                    "reasoning_content": "No reasoning required"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_reasoning_between_assistant_text_and_tool_call() {
+        let request = build_request(vec![
+            assistant_message("Running command"),
+            reasoning_item("Need to call a tool"),
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Running command",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning": "Need to call a tool",
+                    "reasoning_content": "Need to call a tool"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                }
+            ])
+        );
+    }
 }
 
 /// Parses per-turn metadata into an HTTP header value.
