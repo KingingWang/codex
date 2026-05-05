@@ -16,7 +16,7 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 600
     defaults:
       run:
         working-directory: codex-rs
@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release -j 1
 
       - name: Set release version (date-based)
         id: version
