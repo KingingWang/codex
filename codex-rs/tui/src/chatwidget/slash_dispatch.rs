@@ -168,6 +168,9 @@ impl ChatWidget {
                 }
                 self.app_event_tx.compact();
             }
+            SlashCommand::Edit => {
+                self.open_history_edit_picker();
+            }
             SlashCommand::Review => {
                 self.open_review_popup();
             }
@@ -751,6 +754,9 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::ResumeSessionByIdOrName(args));
             }
+            SlashCommand::Edit if !trimmed.is_empty() => {
+                self.handle_edit_command_with_args(trimmed);
+            }
             SlashCommand::SandboxReadRoot if !trimmed.is_empty() => {
                 self.app_event_tx
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot { path: args });
@@ -917,7 +923,8 @@ impl ChatWidget {
             | SlashCommand::Skills
             | SlashCommand::Title
             | SlashCommand::Statusline
-            | SlashCommand::Theme => QueueDrain::Stop,
+            | SlashCommand::Theme
+            | SlashCommand::Edit => QueueDrain::Stop,
         }
     }
 

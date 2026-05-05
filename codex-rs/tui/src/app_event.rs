@@ -231,6 +231,12 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
     },
 
+
+    /// Open the history edit mode for a specific turn.
+    EditHistoryTurn {
+        turn_index: usize,
+        target: crate::chatwidget::EditTarget,
+    },
     /// Result of refreshing rate limits.
     RateLimitsLoaded {
         origin: RateLimitRefreshOrigin,
