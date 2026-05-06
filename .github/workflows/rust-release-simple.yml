@@ -16,7 +16,7 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 1200
     defaults:
       run:
         working-directory: codex-rs
