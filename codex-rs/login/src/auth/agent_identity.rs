@@ -7,7 +7,7 @@ use crate::default_client::build_reqwest_client;
 
 use super::storage::AgentIdentityAuthRecord;
 
-const PROD_AGENT_IDENTITY_AUTHAPI_BASE_URL: &str = "https://auth.openai.com/api/accounts";
+const PROD_AGENT_IDENTITY_AUTHAPI_BASE_URL: &str = "";
 const CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL_ENV_VAR: &str = "CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL";
 
 #[derive(Clone, Debug)]
