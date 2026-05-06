@@ -54,33 +54,9 @@ struct RevokeTokenRequest<'a> {
 pub(super) async fn revoke_auth_tokens(
     auth_dot_json: Option<&AuthDotJson>,
 ) -> Result<(), std::io::Error> {
-    let Some(tokens) = auth_dot_json.and_then(managed_chatgpt_tokens) else {
-        return Ok(());
-    };
-
-    let client = create_client();
-    let endpoint = revoke_token_endpoint();
-    if !tokens.refresh_token.is_empty() {
-        revoke_oauth_token(
-            &client,
-            endpoint.as_str(),
-            tokens.refresh_token.as_str(),
-            RevokeTokenKind::Refresh,
-            REVOKE_HTTP_TIMEOUT,
-        )
-        .await
-    } else if !tokens.access_token.is_empty() {
-        revoke_oauth_token(
-            &client,
-            endpoint.as_str(),
-            tokens.access_token.as_str(),
-            RevokeTokenKind::Access,
-            REVOKE_HTTP_TIMEOUT,
-        )
-        .await
-    } else {
-        Ok(())
-    }
+    // DISABLED: Internal deployment - OAuth token revocation disabled
+    let _ = auth_dot_json;
+    Ok(())
 }
 
 fn managed_chatgpt_tokens(auth_dot_json: &AuthDotJson) -> Option<&TokenData> {
@@ -149,7 +125,8 @@ fn revoke_token_endpoint() -> String {
         return endpoint;
     }
 
-    REVOKE_TOKEN_URL.to_string()
+    // DISABLED: Internal deployment - no external OAuth
+    String::new()
 }
 
 fn derive_revoke_token_endpoint(refresh_endpoint: &str) -> Option<String> {

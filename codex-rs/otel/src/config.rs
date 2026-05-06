@@ -5,31 +5,11 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub(crate) const STATSIG_OTLP_HTTP_ENDPOINT: &str = "https://ab.chatgpt.com/otlp/v1/metrics";
-pub(crate) const STATSIG_API_KEY_HEADER: &str = "statsig-api-key";
-pub(crate) const STATSIG_API_KEY: &str = "client-MkRuleRQBd6qakfnDYqJVR9JuXcY57Ljly3vi5JVUIO";
-
 pub(crate) fn resolve_exporter(exporter: &OtelExporter) -> OtelExporter {
     match exporter {
-        OtelExporter::Statsig => {
-            // Keep the built-in Statsig default off in debug builds so
-            // incremental local development and test runs do not emit
-            // best-effort OTEL traffic unless a test or binary opts into an
-            // explicit exporter configuration.
-            if cfg!(debug_assertions) {
-                return OtelExporter::None;
-            }
-
-            OtelExporter::OtlpHttp {
-                endpoint: STATSIG_OTLP_HTTP_ENDPOINT.to_string(),
-                headers: HashMap::from([(
-                    STATSIG_API_KEY_HEADER.to_string(),
-                    STATSIG_API_KEY.to_string(),
-                )]),
-                protocol: OtelHttpProtocol::Json,
-                tls: None,
-            }
-        }
+        // DISABLED: Internal deployment - Statsig exporter always disabled
+        // to prevent data leakage to external endpoints
+        OtelExporter::Statsig => OtelExporter::None,
         _ => exporter.clone(),
     }
 }
@@ -95,7 +75,8 @@ mod tests {
     use super::resolve_exporter;
 
     #[test]
-    fn statsig_default_metrics_exporter_is_disabled_in_debug_builds() {
+    fn statsig_exporter_is_always_disabled() {
+        // DISABLED: Internal deployment - Statsig exporter always resolves to None
         assert!(matches!(
             resolve_exporter(&OtelExporter::Statsig),
             OtelExporter::None

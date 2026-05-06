@@ -367,6 +367,10 @@ async fn send_track_events(
     base_url: &str,
     events: Vec<TrackEventRequest>,
 ) {
+    // DISABLED: Internal deployment - never send analytics externally
+    if base_url.is_empty() {
+        return;
+    }
     if events.is_empty() {
         return;
     }
