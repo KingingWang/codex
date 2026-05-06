@@ -315,3 +315,280 @@ impl Stream for ResponseStream {
         self.rx_event.poll_recv(cx)
     }
 }
+
+// Chat Completions API types
+
+/// Request for the OpenAI Chat Completions API (`/v1/chat/completions`).
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatCompletionsRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
+    /// Whether to enable parallel tool calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    /// Service tier for the request (e.g., "auto", "default", "priority").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Maps flat tool names (as sent to the Chat Completions API) to their
+    /// namespace prefix. Used when converting responses back to ResponseItems
+    /// so that MCP tool calls carry the correct namespace for tool resolution.
+    #[serde(skip)]
+    pub tool_namespace_map: std::collections::HashMap<String, String>,
+}
+
+/// A single message in the chat completions format.
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Reasoning content for assistant messages (e.g., o1, o3 models).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Reasoning content for models with thinking/reasoning mode (e.g., DeepSeek).
+    /// This field maps to the wire key `reasoning_content` as required by DeepSeek's
+    /// thinking mode API. When tool calls are present in an assistant message, the
+    /// API mandates passing this field back in subsequent requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+}
+
+/// A tool call in a chat message.
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub function: ChatFunctionCall,
+}
+
+/// A function call within a tool call.
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatFunctionCall {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// SSE event from the chat completions streaming API.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionsStreamEvent {
+    pub id: Option<String>,
+    pub object: Option<String>,
+    pub created: Option<i64>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub choices: Vec<ChatCompletionChoice>,
+    #[serde(default)]
+    pub usage: Option<ChatCompletionUsage>,
+}
+
+/// A choice in the chat completions response.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionChoice {
+    pub index: i64,
+    #[serde(default)]
+    pub delta: ChatCompletionDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+/// Delta content in a streaming chat completion choice.
+#[derive(Debug, Deserialize, Default)]
+pub struct ChatCompletionDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatToolCallDelta>>,
+    /// Reasoning content for models that support reasoning (e.g., o1, o3).
+    #[serde(alias = "reasoning_content", skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
+}
+
+/// A tool call delta in streaming.
+#[derive(Debug, Deserialize)]
+pub struct ChatToolCallDelta {
+    pub index: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<ChatFunctionCallDelta>,
+}
+
+/// A function call delta in streaming.
+#[derive(Debug, Deserialize)]
+pub struct ChatFunctionCallDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// Usage statistics for chat completions.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// Non-streaming response from the chat/completions API.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionsResponse {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub choices: Vec<ChatCompletionResponseChoice>,
+    #[serde(default)]
+    pub usage: Option<ChatCompletionUsage>,
+}
+
+/// A choice in a non-streaming chat completions response.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseChoice {
+    pub index: i64,
+    pub message: ChatCompletionResponseMessage,
+    pub finish_reason: Option<String>,
+}
+
+/// The message in a non-streaming chat completion choice.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseMessage {
+    pub role: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ChatCompletionResponseToolCall>>,
+    /// Reasoning content for models that support reasoning (e.g., o1, o3).
+    #[serde(default, alias = "reasoning_content")]
+    pub reasoning: Option<serde_json::Value>,
+}
+
+/// A tool call in a non-streaming chat completion message.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseToolCall {
+    pub id: String,
+    pub r#type: String,
+    pub function: ChatCompletionResponseFunction,
+}
+
+/// Function call in a non-streaming chat completion tool call.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[cfg(test)]
+mod chat_message_tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_content_serializes_when_some() {
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(serde_json::Value::String("Hello".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_content: Some("DeepSeek thinking...".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains("reasoning_content"),
+            "should contain reasoning_content key"
+        );
+        assert!(
+            json.contains("DeepSeek thinking..."),
+            "should contain the reasoning text"
+        );
+    }
+
+    #[test]
+    fn reasoning_content_omitted_when_none() {
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(serde_json::Value::String("Hello".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: None,
+            reasoning_content: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("reasoning_content"),
+            "should not contain reasoning_content when None"
+        );
+    }
+
+    #[test]
+    fn reasoning_still_serializes_independently() {
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(serde_json::Value::String("Hello".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: Some("high".to_string()),
+            reasoning_content: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("reasoning"), "should contain reasoning key");
+        assert!(
+            !json.contains("reasoning_content"),
+            "should not contain reasoning_content"
+        );
+    }
+
+    #[test]
+    fn both_fields_can_coexist() {
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ChatToolCall {
+                id: "call_1".to_string(),
+                r#type: "function".to_string(),
+                function: ChatFunctionCall {
+                    name: "shell".to_string(),
+                    arguments: Some("{}".to_string()),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning: Some("high".to_string()),
+            reasoning_content: Some("Step-by-step analysis...".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains("\"reasoning\":\"high\"") || json.contains("\"reasoning\": \"high\""),
+            "should contain reasoning: high"
+        );
+        assert!(
+            json.contains("\"reasoning_content\":\"Step-by-step analysis...\"")
+                || json.contains("\"reasoning_content\": \"Step-by-step analysis...\""),
+            "should contain reasoning_content"
+        );
+    }
+}
