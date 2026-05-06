@@ -80,4 +80,8 @@ pub use tool_spec::ConfiguredToolSpec;
 pub use tool_spec::ResponsesApiWebSearchFilters;
 pub use tool_spec::ResponsesApiWebSearchUserLocation;
 pub use tool_spec::ToolSpec;
+pub use tool_spec::WebSearchToolOptions;
+pub use tool_spec::create_image_generation_tool;
+pub use tool_spec::create_local_shell_tool;
+pub use tool_spec::create_tools_json_for_chat_completions;
 pub use tool_spec::create_tools_json_for_responses_api;
