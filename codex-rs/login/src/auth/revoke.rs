@@ -54,13 +54,9 @@ struct RevokeTokenRequest<'a> {
 pub(super) async fn revoke_auth_tokens(
     auth_dot_json: Option<&AuthDotJson>,
 ) -> Result<(), std::io::Error> {
-    let Some((token, kind)) = auth_dot_json.and_then(revocable_token) else {
-        return Ok(());
-    };
-
-    let client = create_client();
-    let endpoint = revoke_token_endpoint();
-    revoke_oauth_token(&client, endpoint.as_str(), token, kind, REVOKE_HTTP_TIMEOUT).await
+    // DISABLED: Internal deployment - OAuth token revocation disabled
+    let _ = auth_dot_json;
+    Ok(())
 }
 
 fn revocable_token(auth_dot_json: &AuthDotJson) -> Option<(&str, RevokeTokenKind)> {
@@ -140,7 +136,8 @@ fn revoke_token_endpoint() -> String {
         return endpoint;
     }
 
-    REVOKE_TOKEN_URL.to_string()
+    // DISABLED: Internal deployment - no external OAuth
+    String::new()
 }
 
 fn derive_revoke_token_endpoint(refresh_endpoint: &str) -> Option<String> {
