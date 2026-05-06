@@ -7963,7 +7963,7 @@ async fn legacy_profile_selection_is_rejected() -> std::io::Result<()> {
 }
 
 #[tokio::test]
-async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<()> {
+async fn metrics_exporter_defaults_to_none_when_missing() -> std::io::Result<()> {
     let fixture = create_test_fixture()?;
 
     let config = Config::load_from_base_config_with_overrides(
@@ -7976,7 +7976,8 @@ async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<
     )
     .await?;
 
-    assert_eq!(config.otel.metrics_exporter, OtelExporterKind::Statsig);
+    // DISABLED: Internal deployment - metrics exporter defaults to None
+    assert_eq!(config.otel.metrics_exporter, OtelExporterKind::None);
     Ok(())
 }
 
