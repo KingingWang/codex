@@ -408,7 +408,7 @@ pub struct ConfigToml {
 
     /// When `true`, checks for Codex updates on startup and surfaces update prompts.
     /// Set to `false` only if your Codex updates are centrally managed.
-    /// Defaults to `true`.
+    /// Defaults to `false` for internal deployments.
     pub check_for_update_on_startup: Option<bool>,
 
     /// When true, disables burst-paste detection for typed input entirely.
@@ -417,11 +417,11 @@ pub struct ConfigToml {
     pub disable_paste_burst: Option<bool>,
 
     /// When `false`, disables analytics across Codex product surfaces in this machine.
-    /// Defaults to `true`.
+    /// Defaults to `false` for internal deployments.
     pub analytics: Option<AnalyticsConfigToml>,
 
     /// When `false`, disables feedback collection across Codex product surfaces.
-    /// Defaults to `true`.
+    /// Defaults to `false` for internal deployments.
     pub feedback: Option<FeedbackConfigToml>,
 
     /// Settings for app-specific controls.

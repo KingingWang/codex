@@ -1,60 +1,66 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex CLI - Internal/Private Deployment
+
+> 本仓库基于 [OpenAI Codex CLI](https://github.com/openai/codex) 修改，专为企业内部和隐私敏感场景使用。
+
+## 与官方仓库的区别
+
+本仓库对官方 Codex CLI 进行了以下修改，确保**用户数据不会外发**：
+
+### 已禁用的外部服务
+
+| 服务 | 说明 |
+|------|------|
+| Sentry 崩溃/反馈上报 | DSN 已清空，不再向外部发送崩溃日志和用户反馈 |
+| OpenAI OAuth 登录 | 认证端点已清空，`codex login` 不会连接 OpenAI |
+| OpenAI Agent Identity | 认证 API 端点已清空 |
+| 版本更新检查 | 启动时不再检查 GitHub/npm/Homebrew 更新 |
+| 遥测/分析 | Analytics 默认关闭，不会发送使用数据 |
+| Cloud Tasks | 默认关闭，不连接外部任务服务 |
+| Statsig 指标 | 已硬编码禁用，不发送任何指标数据 |
+| 桌面端自动安装 | Mac DMG 和 Windows 安装包下载链接已清空 |
+| 内置 OpenAI/Bedrock 提供商 | 已移除，仅保留 Ollama 和 LM Studio（本地） |
+| OpenTelemetry Statsig 导出 | 已硬编码映射为 None |
+
+### User-Agent 伪装
+
+HTTP 请求的 User-Agent 已修改为 `RooCode/3.51.1`，不再暴露 Codex 版本号、操作系统架构等信息。
+
+### 安全说明
+
+- **零数据外发**：所有可能向外部发送用户代码、对话内容、系统信息的通道均已关闭
+- **本地模型支持**：内置 Ollama 和 LM Studio 提供商，可完全离线运行
+- **可信 LLM 提供商**：可配置 `base_url` 指向企业内部部署的 LLM 服务
+- **沙箱隔离**：保留原有的 bwrap/Linux 沙箱机制，限制子进程网络访问
+
+### 使用方式
+
+配置 `base_url` 指向你的内部 LLM 服务：
+
+```toml
+# ~/.codex/config.toml
+[model_provider]
+base_url = "https://your-internal-llm-service.example.com/v1"
+```
+
+或通过环境变量：
+
+```shell
+export CODEX_MODEL_PROVIDER_BASE_URL="https://your-internal-llm-service.example.com/v1"
+```
+
+## 变更记录
+
+基于官方仓库的修改提交（作者：kingingwang）：
+
+- 禁用内部部署的外部服务
+- Chat Completions API 类型及 SSE 流式传输支持
+- /model 命令及 end_turn 字段
+- User-Agent 伪装及外部 URL 清除
 
 ---
 
-## Quickstart
+## 官方文档
 
-### Installing and running Codex CLI
+完整的 Codex CLI 使用文档请参考官方仓库：[https://github.com/openai/codex](https://github.com/openai/codex)
 
-Install globally with your preferred package manager:
-
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
-
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+---
