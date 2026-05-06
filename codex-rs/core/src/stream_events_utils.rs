@@ -294,8 +294,9 @@ pub(crate) async fn handle_output_item_done(
                 .log_tool_failed("local_shell", msg);
             tracing::error!(msg);
 
+            let call_id = extract_call_id_from_item(&item).unwrap_or_default();
             let response = ResponseInputItem::FunctionCallOutput {
-                call_id: String::new(),
+                call_id,
                 output: FunctionCallOutputPayload {
                     body: FunctionCallOutputBody::Text(msg.to_string()),
                     ..Default::default()
@@ -316,8 +317,9 @@ pub(crate) async fn handle_output_item_done(
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::RespondToModel(message)) => {
+            let call_id = extract_call_id_from_item(&item).unwrap_or_default();
             let response = ResponseInputItem::FunctionCallOutput {
-                call_id: String::new(),
+                call_id,
                 output: FunctionCallOutputPayload {
                     body: FunctionCallOutputBody::Text(message),
                     ..Default::default()
@@ -462,6 +464,18 @@ fn completed_item_defers_mailbox_delivery_to_next_turn(
         }
         ResponseItem::ImageGenerationCall { .. } => true,
         _ => false,
+    }
+}
+
+/// Extract the `call_id` from a `ResponseItem` that represents a tool call.
+/// Returns `Some(call_id)` for known tool-call variants, `None` otherwise.
+fn extract_call_id_from_item(item: &ResponseItem) -> Option<String> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. } => Some(call_id.clone()),
+        ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.clone()),
+        ResponseItem::LocalShellCall { call_id, id, .. } => call_id.clone().or(id.clone()),
+        ResponseItem::ToolSearchCall { call_id, .. } => call_id.clone(),
+        _ => None,
     }
 }
 
