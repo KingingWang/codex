@@ -30,8 +30,8 @@ pub use feedback_diagnostics::FeedbackDiagnostics;
 /// Filename used for the redacted `codex doctor --json` feedback attachment.
 pub const DOCTOR_REPORT_ATTACHMENT_FILENAME: &str = "codex-doctor-report.json";
 const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
-const SENTRY_DSN: &str =
-    "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
+// DISABLED: Internal deployment - no external feedback collection
+const SENTRY_DSN: &str = "";
 const UPLOAD_TIMEOUT_SECS: u64 = 10;
 const FEEDBACK_TAGS_TARGET: &str = "feedback_tags";
 const MAX_FEEDBACK_TAGS: usize = 64;
@@ -414,6 +414,12 @@ impl FeedbackSnapshot {
 
     /// Upload feedback to Sentry with optional attachments.
     pub fn upload_feedback(&self, options: FeedbackUploadOptions<'_>) -> Result<()> {
+        if SENTRY_DSN.is_empty() {
+            // DISABLED: Internal deployment - no external feedback collection
+            let _ = options;
+            return Ok(());
+        }
+
         use std::str::FromStr;
         use std::sync::Arc;
 
