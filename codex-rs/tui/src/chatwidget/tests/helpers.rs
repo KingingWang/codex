@@ -268,6 +268,8 @@ pub(super) async fn make_chatwidget_manual(
         thread_id: None,
         dismissed_plan_mode_nudge_scopes: HashSet::new(),
         last_turn_id: None,
+        turn_snapshots: Vec::new(),
+        history_edit_context: None,
         budget_limited_turn_ids: HashSet::new(),
         thread_name: None,
         thread_rename_block_message: None,
