@@ -687,6 +687,9 @@ impl App {
             AppEvent::ClearThreadGoal { thread_id } => {
                 self.clear_thread_goal(app_server, thread_id).await;
             }
+            AppEvent::EditHistoryTurn { turn_index, target } => {
+                self.chat_widget.open_history_edit_mode(turn_index, target);
+            }
             AppEvent::SendAddCreditsNudgeEmail { credit_type } => {
                 if self
                     .chat_widget
