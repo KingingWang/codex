@@ -432,6 +432,28 @@ const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it l
 const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_STATUS_LINE_ITEMS: [&str; 2] = ["model-with-reasoning", "current-dir"];
+/// Snapshot of a completed turn for the /edit command.
+#[derive(Debug, Clone)]
+struct TurnSnapshot {
+    turn_id: String,
+    user_message: String,
+    agent_message: String,
+}
+
+/// Which part of a turn the user wants to edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditTarget {
+    UserMessage,
+    AgentMessage,
+}
+
+/// Context for an in-progress history edit operation.
+#[derive(Debug, Clone)]
+struct HistoryEditContext {
+    from_turn_index: usize,
+    target: EditTarget,
+}
+
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
@@ -935,6 +957,14 @@ pub(crate) struct ChatWidget {
     /// hidden for that thread instead of resurfacing it on every matching draft.
     dismissed_plan_mode_nudge_scopes: HashSet<PlanModeNudgeScope>,
     last_turn_id: Option<String>,
+    /// Snapshots of completed turns for the /edit command.
+    turn_snapshots: Vec<TurnSnapshot>,
+    /// Active history edit context (when user is editing a message).
+    history_edit_context: Option<HistoryEditContext>,
+    /// Tracks the user message text for the current turn (populated on submit, consumed on turn complete).
+    current_turn_user_message: String,
+    /// Tracks the agent message text for the current turn (populated during streaming, consumed on turn complete).
+    current_turn_agent_message: String,
     budget_limited_turn_ids: HashSet<String>,
     thread_name: Option<String>,
     thread_rename_block_message: Option<String>,
@@ -2350,6 +2380,9 @@ impl ChatWidget {
         let previous_thread_id = self.thread_id;
         self.thread_id = Some(event.session_id);
         if previous_thread_id != self.thread_id {
+            self.turn_snapshots.clear();
+            self.current_turn_user_message.clear();
+            self.current_turn_agent_message.clear();
             self.recent_auto_review_denials = RecentAutoReviewDenials::default();
         }
         self.refresh_plan_mode_nudge();
@@ -4731,6 +4764,15 @@ impl ChatWidget {
         if matches!(item.phase, Some(MessagePhase::FinalAnswer) | None) && !message.is_empty() {
             self.record_agent_markdown(&message);
         }
+        // Track the agent message text for the current turn so /edit can retrieve it later.
+        if !message.is_empty() {
+            if self.current_turn_agent_message.is_empty() {
+                self.current_turn_agent_message = message.clone();
+            } else {
+                self.current_turn_agent_message.push_str("\n\n");
+                self.current_turn_agent_message.push_str(&message);
+            }
+        }
         self.pending_status_indicator_restore = match item.phase {
             // Models that don't support preambles only output AgentMessageItems on turn completion.
             Some(MessagePhase::FinalAnswer) | None => !self.pending_steers.is_empty(),
@@ -5374,6 +5416,10 @@ impl ChatWidget {
             thread_id: None,
             dismissed_plan_mode_nudge_scopes: HashSet::new(),
             last_turn_id: None,
+            turn_snapshots: Vec::new(),
+            history_edit_context: None,
+            current_turn_user_message: String::new(),
+            current_turn_agent_message: String::new(),
             budget_limited_turn_ids: HashSet::new(),
             thread_name: None,
             thread_rename_block_message: None,
@@ -5639,6 +5685,11 @@ impl ChatWidget {
                             && user_message.local_images.is_empty()
                             && user_message.remote_image_urls.is_empty()
                         {
+                            return;
+                        }
+                        // Check if we are in history edit mode.
+                        if let Some(edit_ctx) = self.history_edit_context.take() {
+                            self.submit_history_edit(user_message.text, edit_ctx.from_turn_index);
                             return;
                         }
                         let should_submit_now =
@@ -6256,6 +6307,11 @@ impl ChatWidget {
             personality,
         );
 
+        // Track the user message text for the current turn so /edit can retrieve it later.
+        self.current_turn_user_message = text.clone();
+        // Reset agent tracking for the new turn to prevent stale partial content
+        // from an interrupted turn from leaking into this turn's snapshot.
+        self.current_turn_agent_message.clear();
         if !self.submit_op(op.clone()) {
             return (false, None);
         }
@@ -7079,6 +7135,20 @@ impl ChatWidget {
         notification: TurnCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        // Capture a snapshot of this turn for the /edit command.
+        if notification.turn.status == TurnStatus::Completed {
+            // Use the tracked messages instead of extracting from notification.turn.items,
+            // which is always empty for turn notifications (only populated on resume/fork).
+            let user_message = std::mem::take(&mut self.current_turn_user_message);
+            let agent_message = std::mem::take(&mut self.current_turn_agent_message);
+
+            self.turn_snapshots.push(TurnSnapshot {
+                turn_id: notification.turn.id.clone(),
+                user_message,
+                agent_message,
+            });
+        }
+
         match notification.turn.status {
             TurnStatus::Completed => {
                 self.last_non_retry_error = None;
@@ -7738,6 +7808,12 @@ impl ChatWidget {
             unreachable!("user message item should convert to a legacy user message");
         };
         if from_replay {
+            // Track user message during replay so /edit can retrieve it after fork/resume.
+            // Must capture before on_user_message_event consumes `event`.
+            if !event.message.is_empty() {
+                self.current_turn_user_message = event.message.clone();
+            self.current_turn_agent_message.clear();
+            }
             if !self.is_review_mode {
                 self.on_user_message_event(event);
             }
@@ -10443,6 +10519,8 @@ impl ChatWidget {
             /*effort*/ None,
             /*developer_instructions*/ None,
         );
+        // Also update config.model to ensure the model change takes effect immediately
+        self.config.model = Some(model.to_string());
         if self.collaboration_modes_enabled()
             && let Some(mask) = self.active_collaboration_mask.as_mut()
         {
@@ -11255,6 +11333,8 @@ impl ChatWidget {
         }
         let modal_or_popup_active = !self.bottom_pane.no_modal_or_popup_active();
         if self.bottom_pane.on_ctrl_c() == CancellationEvent::Handled {
+            // Cancel any active history edit mode when the composer is cleared.
+            self.history_edit_context = None;
             if DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
                 if modal_or_popup_active {
                     self.quit_shortcut_expires_at = None;
@@ -11961,7 +12041,225 @@ impl ChatWidget {
         );
         RenderableItem::Owned(Box::new(flex))
     }
+
+    // ---- Chat History Editing (/edit command) ----
+
+    /// Open an interactive picker showing recent turns for editing.
+    pub(super) fn open_history_edit_picker(&mut self) {
+        if self.turn_snapshots.is_empty() {
+            self.add_info_message(
+                "No conversation history to edit.".to_string(),
+                Some("Have a conversation first, then use /edit to modify messages.".to_string()),
+            );
+            return;
+        }
+
+        let items: Vec<SelectionItem> = self
+            .turn_snapshots
+            .iter()
+            .enumerate()
+            .map(|(idx, snap)| {
+                let turn_num = idx + 1;
+                let user_preview = truncate_str_for_edit(&snap.user_message, 60);
+                let agent_preview = truncate_str_for_edit(&snap.agent_message, 60);
+                let name = format!("Turn {}: {}", turn_num, user_preview);
+                let description = if agent_preview.is_empty() {
+                    None
+                } else {
+                    Some(format!("↳ {}", agent_preview))
+                };
+
+                let turn_idx = idx;
+                let actions = vec![
+                    Box::new(move |tx: &AppEventSender| {
+                        tx.send(AppEvent::EditHistoryTurn {
+                            turn_index: turn_idx,
+                            target: EditTarget::UserMessage,
+                        });
+                    }) as Box<dyn Fn(&AppEventSender) + Send + Sync>,
+                ];
+
+                SelectionItem {
+                    name,
+                    description,
+                    actions,
+                    dismiss_on_select: true,
+                    search_value: Some(format!("{} {}", turn_num, snap.user_message).to_lowercase()),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Select a turn to edit its user message".to_string()),
+            footer_hint: Some("Press Enter to edit, or use /edit <number> for direct access.".into()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search turns...".to_string()),
+            ..Default::default()
+        });
+        self.request_redraw();
+    }
+
+    /// Handle `/edit` with inline arguments.
+    pub(super) fn handle_edit_command_with_args(&mut self, args: &str) {
+        if self.turn_snapshots.is_empty() {
+            self.add_info_message(
+                "No conversation history to edit.".to_string(),
+                Some("Have a conversation first, then use /edit to modify messages.".to_string()),
+            );
+            return;
+        }
+
+        let trimmed = args.trim();
+
+        // Check for delete command: `/edit delete <number>`
+        if let Some(rest) = trimmed.strip_prefix("delete ") {
+            let num_str = rest.trim();
+            match num_str.parse::<usize>() {
+                Ok(n) if n >= 1 && n <= self.turn_snapshots.len() => {
+                    self.delete_history_turns(n - 1);
+                }
+                Ok(n) if n == 0 => {
+                    self.add_error_message("Turn numbers start at 1. Usage: /edit delete <number>".to_string());
+                }
+                Ok(n) => {
+                    self.add_error_message(format!(
+                        "Turn {} not found. There are {} turn(s).",
+                        n,
+                        self.turn_snapshots.len()
+                    ));
+                }
+                Err(_) => {
+                    self.add_error_message(format!("Invalid turn number: '{}'. Usage: /edit delete <number>", num_str));
+                }
+            }
+            return;
+        }
+
+        // Parse: `/edit <number> [agent]`
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            self.open_history_edit_picker();
+            return;
+        }
+
+        match parts[0].parse::<usize>() {
+            Ok(n) if n >= 1 && n <= self.turn_snapshots.len() => {
+                let target = if parts.get(1).map(|s| *s) == Some("agent") {
+                    EditTarget::AgentMessage
+                } else {
+                    EditTarget::UserMessage
+                };
+                self.open_history_edit_mode(n - 1, target);
+            }
+            Ok(n) if n == 0 => {
+                self.add_error_message("Turn numbers start at 1. Usage: /edit <number> [agent]".to_string());
+            }
+            Ok(n) => {
+                self.add_error_message(format!(
+                    "Turn {} not found. There are {} turn(s).",
+                    n,
+                    self.turn_snapshots.len()
+                ));
+            }
+            Err(_) => {
+                self.add_error_message(format!("Invalid turn number: '{}'. Usage: /edit <number> [agent] | /edit delete <number>", parts[0]));
+            }
+        }
+    }
+
+    /// Open the composer pre-filled with the selected message text for editing.
+    pub(crate) fn open_history_edit_mode(&mut self, turn_index: usize, target: EditTarget) {
+        let snap = &self.turn_snapshots[turn_index];
+        let text = match target {
+            EditTarget::UserMessage => snap.user_message.clone(),
+            EditTarget::AgentMessage => snap.agent_message.clone(),
+        };
+
+        if text.is_empty() {
+            let label = match target {
+                EditTarget::UserMessage => "user message",
+                EditTarget::AgentMessage => "agent message",
+            };
+            self.add_info_message(
+                format!("The {} for turn {} is empty.", label, turn_index + 1),
+                None,
+            );
+            return;
+        }
+
+        // Store the edit context so we know what to do when the user submits.
+        self.history_edit_context = Some(HistoryEditContext {
+            from_turn_index: turn_index,
+            target,
+        });
+
+        // Pre-fill the composer with the message text.
+        self.bottom_pane.apply_external_edit(text.clone());
+
+        let label = match target {
+            EditTarget::UserMessage => "user message",
+            EditTarget::AgentMessage => "agent message",
+        };
+        self.add_info_message(
+            format!("Editing {} for turn {}. Modify the text below and press Enter to submit.", label, turn_index + 1),
+            Some("Press Esc to cancel.".to_string()),
+        );
+
+        self.request_redraw();
+    }
+
+    /// Called when the user submits text while in history edit mode.
+    pub(super) fn submit_history_edit(&mut self, edited_text: String, from_turn_index: usize) {
+        let turn_num = from_turn_index + 1;
+        let removed_count = self.turn_snapshots.len() - from_turn_index;
+
+        // Truncate the turn snapshots.
+        self.turn_snapshots.truncate(from_turn_index);
+
+        // Clear the active cell and any in-progress state.
+        self.active_cell = None;
+
+        self.add_info_message(
+            format!("Edited turn {}. Removed {} turn(s). Resubmitting...", turn_num, removed_count),
+            None,
+        );
+
+        // Submit the edited text as a new user message.
+        self.submit_user_message(edited_text.into());
+    }
+
+    /// Delete a turn and all subsequent turns from history.
+    fn delete_history_turns(&mut self, from_turn_index: usize) {
+        let turn_num = from_turn_index + 1;
+        let removed_count = self.turn_snapshots.len() - from_turn_index;
+
+        self.turn_snapshots.truncate(from_turn_index);
+        self.active_cell = None;
+        self.add_info_message(
+            format!("Deleted turn {} and {} subsequent turn(s).", turn_num, removed_count - 1),
+            Some("You can continue the conversation with a new message.".to_string()),
+        );
+
+        self.request_redraw();
+    }
+
 }
+/// Truncate a string to a maximum length, adding "..." if truncated.
+fn truncate_str_for_edit(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let end = s.char_indices()
+            .take_while(|(i, _)| *i < max_len - 3)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}...", &s[..end])
+    }
+}
+
 
 #[cfg(not(target_os = "linux"))]
 impl ChatWidget {
