@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release -j 2
 
       - name: Set release version (date-based)
         id: version
