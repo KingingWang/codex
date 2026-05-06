@@ -14,12 +14,20 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
+  # ── 构建矩阵（同时编译 Ubuntu 22.04 与 latest）─────────
+  build:
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 1200
     defaults:
       run:
         working-directory: codex-rs
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-latest
+      fail-fast: false   # 一个 os 失败不影响另一个
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -34,21 +42,46 @@ jobs:
       - name: Build release binary
         run: cargo build --release -j 2
 
+      # 将二进制重命名为带 OS 标识的名字
+      - name: Prepare release artifact
+        run: |
+          mkdir -p dist
+          BINARY_NAME="codex-linux-x86_64-${{ matrix.os == 'ubuntu-22.04' && 'ubuntu22' || 'ubuntu24' }}"
+          cp target/release/codex "dist/${BINARY_NAME}"
+          echo "binary=${BINARY_NAME}" >> "$GITHUB_ENV"
+
+      # 上传 artifact 供后续 Release Job 使用
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-${{ matrix.os }}
+          path: codex-rs/dist
+
+  # ── 发布（只跑一次，收集所有构建产物）─────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: codex-*
+          merge-multiple: true
+
       - name: Set release version (date-based)
         id: version
         run: |
           VERSION="$(date '+%Y%m%d-%H%M%S')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Create release artifact
-        run: |
-          mkdir -p dist
-          cp target/release/codex dist/codex-linux-x86_64
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           name: ${{ steps.version.outputs.version }}
           tag_name: ${{ steps.version.outputs.version }}
-          files: codex-rs/dist/codex-linux-x86_64
+          files: release-assets/*
           prerelease: false
