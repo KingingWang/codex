@@ -231,7 +231,6 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
     },
 
-
     /// Open the history edit mode for a specific turn.
     EditHistoryTurn {
         turn_index: usize,
