@@ -6734,7 +6734,7 @@ impl ChatWidget {
             // Must capture before on_user_message_event consumes `event`.
             if !event.message.is_empty() {
                 self.current_turn_user_message = event.message.clone();
-            self.current_turn_agent_message.clear();
+                self.current_turn_agent_message.clear();
             }
             if !self.is_review_mode {
                 self.on_user_message_display(display);
@@ -11075,21 +11075,22 @@ impl ChatWidget {
                 };
 
                 let turn_idx = idx;
-                let actions = vec![
-                    Box::new(move |tx: &AppEventSender| {
-                        tx.send(AppEvent::EditHistoryTurn {
-                            turn_index: turn_idx,
-                            target: EditTarget::UserMessage,
-                        });
-                    }) as Box<dyn Fn(&AppEventSender) + Send + Sync>,
-                ];
+                let actions = vec![Box::new(move |tx: &AppEventSender| {
+                    tx.send(AppEvent::EditHistoryTurn {
+                        turn_index: turn_idx,
+                        target: EditTarget::UserMessage,
+                    });
+                })
+                    as Box<dyn Fn(&AppEventSender) + Send + Sync>];
 
                 SelectionItem {
                     name,
                     description,
                     actions,
                     dismiss_on_select: true,
-                    search_value: Some(format!("{} {}", turn_num, snap.user_message).to_lowercase()),
+                    search_value: Some(
+                        format!("{} {}", turn_num, snap.user_message).to_lowercase(),
+                    ),
                     ..Default::default()
                 }
             })
@@ -11097,7 +11098,9 @@ impl ChatWidget {
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Select a turn to edit its user message".to_string()),
-            footer_hint: Some("Press Enter to edit, or use /edit <number> for direct access.".into()),
+            footer_hint: Some(
+                "Press Enter to edit, or use /edit <number> for direct access.".into(),
+            ),
             items,
             is_searchable: true,
             search_placeholder: Some("Search turns...".to_string()),
@@ -11126,7 +11129,9 @@ impl ChatWidget {
                     self.delete_history_turns(n - 1);
                 }
                 Ok(n) if n == 0 => {
-                    self.add_error_message("Turn numbers start at 1. Usage: /edit delete <number>".to_string());
+                    self.add_error_message(
+                        "Turn numbers start at 1. Usage: /edit delete <number>".to_string(),
+                    );
                 }
                 Ok(n) => {
                     self.add_error_message(format!(
@@ -11136,7 +11141,10 @@ impl ChatWidget {
                     ));
                 }
                 Err(_) => {
-                    self.add_error_message(format!("Invalid turn number: '{}'. Usage: /edit delete <number>", num_str));
+                    self.add_error_message(format!(
+                        "Invalid turn number: '{}'. Usage: /edit delete <number>",
+                        num_str
+                    ));
                 }
             }
             return;
@@ -11159,7 +11167,9 @@ impl ChatWidget {
                 self.open_history_edit_mode(n - 1, target);
             }
             Ok(n) if n == 0 => {
-                self.add_error_message("Turn numbers start at 1. Usage: /edit <number> [agent]".to_string());
+                self.add_error_message(
+                    "Turn numbers start at 1. Usage: /edit <number> [agent]".to_string(),
+                );
             }
             Ok(n) => {
                 self.add_error_message(format!(
@@ -11208,7 +11218,11 @@ impl ChatWidget {
             EditTarget::AgentMessage => "agent message",
         };
         self.add_info_message(
-            format!("Editing {} for turn {}. Modify the text below and press Enter to submit.", label, turn_index + 1),
+            format!(
+                "Editing {} for turn {}. Modify the text below and press Enter to submit.",
+                label,
+                turn_index + 1
+            ),
             Some("Press Esc to cancel.".to_string()),
         );
 
@@ -11227,7 +11241,10 @@ impl ChatWidget {
         self.active_cell = None;
 
         self.add_info_message(
-            format!("Edited turn {}. Removed {} turn(s). Resubmitting...", turn_num, removed_count),
+            format!(
+                "Edited turn {}. Removed {} turn(s). Resubmitting...",
+                turn_num, removed_count
+            ),
             None,
         );
 
@@ -11243,20 +11260,24 @@ impl ChatWidget {
         self.turn_snapshots.truncate(from_turn_index);
         self.active_cell = None;
         self.add_info_message(
-            format!("Deleted turn {} and {} subsequent turn(s).", turn_num, removed_count - 1),
+            format!(
+                "Deleted turn {} and {} subsequent turn(s).",
+                turn_num,
+                removed_count - 1
+            ),
             Some("You can continue the conversation with a new message.".to_string()),
         );
 
         self.request_redraw();
     }
-
 }
 /// Truncate a string to a maximum length, adding "..." if truncated.
 fn truncate_str_for_edit(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        let end = s.char_indices()
+        let end = s
+            .char_indices()
             .take_while(|(i, _)| *i < max_len - 3)
             .last()
             .map(|(i, c)| i + c.len_utf8())
@@ -11264,7 +11285,6 @@ fn truncate_str_for_edit(s: &str, max_len: usize) -> String {
         format!("{}...", &s[..end])
     }
 }
-
 
 #[cfg(not(target_os = "linux"))]
 impl ChatWidget {
