@@ -1,6 +1,7 @@
 //! Client for the OpenAI Chat Completions API (`/v1/chat/completions`).
 //! Supports both non-streaming and SSE streaming modes, configurable via
 //! the `chat_stream` field in `ModelProviderInfo`.
+use std::time::Duration;
 
 use crate::auth::SharedAuthProvider;
 use crate::common::ChatCompletionsRequest;
@@ -95,7 +96,9 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
                 Self::path(),
                 extra_headers,
                 Some(body),
-                |_| {},
+                |req| {
+                    req.timeout = Some(Duration::from_secs(600));
+                },
             )
             .await?;
 
@@ -129,7 +132,9 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
                 Self::path(),
                 extra_headers,
                 Some(body),
-                |_| {},
+                |req| {
+                    req.timeout = Some(Duration::from_secs(600));
+                },
             )
             .await?;
 
