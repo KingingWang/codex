@@ -833,7 +833,6 @@ impl BottomPane {
         self.request_redraw();
     }
 
-
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.composer.set_footer_hint_override(items);
         self.request_redraw();
