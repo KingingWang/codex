@@ -226,6 +226,8 @@ pub(super) async fn make_chatwidget_manual(
         agent_turn_markdowns: Vec::new(),
         visible_user_turn_count: 0,
         copy_history_evicted_by_rollback: false,
+        current_turn_user_message: String::new(),
+        current_turn_agent_message: String::new(),
         latest_proposed_plan_markdown: None,
         saw_copy_source_this_turn: false,
         running_commands: HashMap::new(),
