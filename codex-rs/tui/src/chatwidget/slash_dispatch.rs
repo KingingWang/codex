@@ -623,11 +623,11 @@ impl ChatWidget {
                 let (final_model, final_effort) = if let Some(preset) = catalog_match {
                     // Catalog model: use explicit effort if provided, else catalog default
                     let effort = explicit_effort.or(Some(preset.default_reasoning_effort));
-                    (preset.model.clone(), effort)
+                    (preset.model, effort)
                 } else {
                     // Custom model: use explicit effort if provided, else preserve existing
                     let effort = explicit_effort.or(self.config.model_reasoning_effort);
-                    (model_name.clone(), effort)
+                    (model_name, effort)
                 };
 
                 self.apply_model_and_effort(final_model.clone(), final_effort);
