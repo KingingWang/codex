@@ -6745,8 +6745,8 @@ impl ChatWidget {
         if from_replay {
             // Track user message during replay so /edit can retrieve it after fork/resume.
             // Must capture before on_user_message_event consumes `event`.
-            if !event.message.is_empty() {
-                self.current_turn_user_message = event.message.clone();
+            if !display.message.is_empty() {
+                self.current_turn_user_message = display.message.clone();
                 self.current_turn_agent_message.clear();
             }
             if !self.is_review_mode {
