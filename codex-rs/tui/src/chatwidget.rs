@@ -5290,6 +5290,18 @@ impl ChatWidget {
             return;
         }
 
+        // Cancel active history edit mode when user presses Esc.
+        if matches!(key_event.code, KeyCode::Esc)
+            && key_event.kind == KeyEventKind::Press
+            && self.history_edit_context.is_some()
+        {
+            self.history_edit_context = None;
+            self.bottom_pane.clear_composer_for_ctrl_c();
+            self.add_info_message("Edit cancelled.".to_string(), None);
+            self.request_redraw();
+            return;
+        }
+
         if self.handle_plugins_popup_key_event(key_event) {
             return;
         }
@@ -11080,11 +11092,11 @@ impl ChatWidget {
                 let turn_num = idx + 1;
                 let user_preview = truncate_str_for_edit(&snap.user_message, 60);
                 let agent_preview = truncate_str_for_edit(&snap.agent_message, 60);
-                let name = format!("Turn {}: {}", turn_num, user_preview);
+                let name = format!("Turn {turn_num}: {user_preview}");
                 let description = if agent_preview.is_empty() {
                     None
                 } else {
-                    Some(format!("↳ {}", agent_preview))
+                    Some(format!("↳ {agent_preview}"))
                 };
 
                 let turn_idx = idx;
@@ -11155,8 +11167,7 @@ impl ChatWidget {
                 }
                 Err(_) => {
                     self.add_error_message(format!(
-                        "Invalid turn number: '{}'. Usage: /edit delete <number>",
-                        num_str
+                        "Invalid turn number: '{num_str}'. Usage: /edit delete <number>"
                     ));
                 }
             }
@@ -11172,7 +11183,7 @@ impl ChatWidget {
 
         match parts[0].parse::<usize>() {
             Ok(n) if n >= 1 && n <= self.turn_snapshots.len() => {
-                let target = if parts.get(1).map(|s| *s) == Some("agent") {
+                let target = if parts.get(1).copied() == Some("agent") {
                     EditTarget::AgentMessage
                 } else {
                     EditTarget::UserMessage
@@ -11224,7 +11235,7 @@ impl ChatWidget {
         });
 
         // Pre-fill the composer with the message text.
-        self.bottom_pane.apply_external_edit(text.clone());
+        self.bottom_pane.apply_external_edit(text);
 
         let label = match target {
             EditTarget::UserMessage => "user message",
@@ -11254,10 +11265,7 @@ impl ChatWidget {
         self.active_cell = None;
 
         self.add_info_message(
-            format!(
-                "Edited turn {}. Removed {} turn(s). Resubmitting...",
-                turn_num, removed_count
-            ),
+            format!("Edited turn {turn_num}. Removed {removed_count} turn(s). Resubmitting..."),
             None,
         );
 
