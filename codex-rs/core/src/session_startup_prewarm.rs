@@ -220,7 +220,8 @@ async fn schedule_startup_prewarm_inner(
         BaseInstructions {
             text: base_instructions,
         },
-    );
+    )
+    .await;
     let startup_turn_metadata_header = startup_turn_context
         .turn_metadata_state
         .current_header_value();
