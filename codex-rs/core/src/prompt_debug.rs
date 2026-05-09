@@ -96,7 +96,8 @@ pub(crate) async fn build_prompt_input_from_session(
         router.as_ref(),
         turn_context.as_ref(),
         base_instructions,
-    );
+    )
+    .await;
 
     Ok(prompt.input)
 }

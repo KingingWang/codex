@@ -263,7 +263,8 @@ async fn schedule_startup_prewarm_inner(
         BaseInstructions {
             text: base_instructions,
         },
-    );
+    )
+    .await;
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_build_prompt",
         build_prompt_started_at.elapsed(),
