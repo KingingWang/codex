@@ -490,6 +490,11 @@ pub struct ConfigToml {
     pub experimental_use_unified_exec_tool: Option<bool>,
     /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
+
+    /// Optional path to a script whose output is dynamically appended to the
+    /// end of each request input. The script runs fresh for every sampling
+    /// request and its output is never persisted to conversation history.
+    pub dynamic_context_script: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
