@@ -154,7 +154,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
         // Some API providers omit the `model` field in responses. Inject it
         // from the request so deserialization into ChatCompletionsResponse
         // does not fail with "missing field `model`".
-        if value.get("model").is_none_or(|v| v.is_null()) {
+        if value.get("model").is_none_or(serde_json::Value::is_null) {
             value["model"] = serde_json::Value::String(req.model.clone());
         }
 

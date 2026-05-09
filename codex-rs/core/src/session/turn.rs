@@ -981,12 +981,14 @@ fn connector_inserted_in_messages(
     connector_count == 1 && skill_count == 0 && mention_names_lower.contains(&mention_slug)
 }
 
-pub(crate) fn build_prompt(
+pub(crate) async fn build_prompt(
     input: Vec<ResponseItem>,
     router: &ToolRouter,
     turn_context: &TurnContext,
     base_instructions: BaseInstructions,
 ) -> Prompt {
+    let input = append_dynamic_context(input, turn_context).await;
+
     Prompt {
         input,
         tools: router.model_visible_specs(),
@@ -998,6 +1000,80 @@ pub(crate) fn build_prompt(
             &turn_context.session_source,
         ),
     }
+}
+
+async fn append_dynamic_context(
+    mut input: Vec<ResponseItem>,
+    turn_context: &TurnContext,
+) -> Vec<ResponseItem> {
+    info!(
+        dynamic_context_script = ?turn_context.config.dynamic_context_script,
+        "append_dynamic_context called"
+    );
+    let Some(script_path) = turn_context.config.dynamic_context_script.as_ref() else {
+        return input;
+    };
+
+    if script_path.trim().is_empty() {
+        return input;
+    }
+
+    let script_path_trimmed = script_path.trim();
+    trace!(script = %script_path_trimmed, cwd = %turn_context.cwd.display(), "executing dynamic_context_script");
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(script_path_trimmed)
+            .current_dir(&turn_context.cwd)
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            warn!(
+                script = %script_path_trimmed,
+                error = %err,
+                "failed to execute dynamic_context_script"
+            );
+            return input;
+        }
+        Err(_) => {
+            warn!(
+                script = %script_path_trimmed,
+                "dynamic_context_script timed out after 5 seconds"
+            );
+            return input;
+        }
+    };
+
+    if !output.status.success() {
+        warn!(
+            script = %script_path_trimmed,
+            exit_code = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "dynamic_context_script exited with non-zero status"
+        );
+        return input;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    trace!(script = %script_path_trimmed, output_len = trimmed.len(), "dynamic_context_script output");
+    if trimmed.is_empty() {
+        return input;
+    }
+
+    trace!(script = %script_path_trimmed, text_len = trimmed.len(), "appending dynamic context to prompt");
+    input.push(ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: trimmed.to_string(),
+        }],
+        phase: None,
+    });
+
+    input
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1065,7 +1141,8 @@ async fn run_sampling_request(
             router.as_ref(),
             turn_context.as_ref(),
             base_instructions.clone(),
-        );
+        )
+        .await;
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
