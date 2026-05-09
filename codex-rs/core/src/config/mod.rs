@@ -1057,6 +1057,10 @@ pub struct Config {
     /// end of each request input. The script runs fresh for every sampling
     /// request and its output is never persisted to conversation history.
     pub dynamic_context_script: Option<String>,
+
+    /// Timeout for `dynamic_context_script` execution.
+    /// Defaults to 5 seconds.
+    pub dynamic_context_script_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -3728,6 +3732,9 @@ impl Config {
                 .unwrap_or_default(),
             otel,
             dynamic_context_script: cfg.dynamic_context_script.clone(),
+            dynamic_context_script_timeout: std::time::Duration::from_secs(
+                cfg.dynamic_context_script_timeout_secs.unwrap_or(5),
+            ),
         };
         Ok(config)
         })
