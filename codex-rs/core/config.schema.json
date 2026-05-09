@@ -3895,6 +3895,12 @@
       "description": "Optional path to a script whose output is dynamically appended to the end of each request input. The script runs fresh for every sampling request and its output is never persisted to conversation history.",
       "type": "string"
     },
+    "dynamic_context_script_timeout_secs": {
+      "description": "Timeout in seconds for `dynamic_context_script` execution. Defaults to 5 seconds if not specified.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "experimental_compact_prompt_file": {
       "$ref": "#/definitions/AbsolutePathBuf"
     },

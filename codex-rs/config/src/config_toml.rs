@@ -456,6 +456,10 @@ pub struct ConfigToml {
     /// end of each request input. The script runs fresh for every sampling
     /// request and its output is never persisted to conversation history.
     pub dynamic_context_script: Option<String>,
+
+    /// Timeout in seconds for `dynamic_context_script` execution.
+    /// Defaults to 5 seconds if not specified.
+    pub dynamic_context_script_timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
