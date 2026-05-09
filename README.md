@@ -135,6 +135,18 @@ chat_stream = true
 # 推理强度（部分模型支持）：low | medium | high | xhigh
 # model_reasoning_effort = "medium"
 
+# ----------------------------------------------------------
+# 可选：动态上下文脚本
+# ----------------------------------------------------------
+# 指定一个可执行脚本路径，每次采样请求前执行，
+# 将脚本的 stdout 输出作为 developer 消息追加到 prompt 末尾。
+# 输出不会持久化到对话历史中。
+#
+# dynamic_context_script = "/path/to/your/script.sh"
+#
+# 脚本执行超时时间（秒），默认 5 秒。
+# dynamic_context_script_timeout_secs = 10
+
 # 分析/遥测（已默认关闭）
 [analytics]
 enabled = false
@@ -227,6 +239,8 @@ codex
 | `stream_idle_timeout_ms` | int | `300000` | 流式空闲超时（毫秒） |
 | `http_headers` | object | — | 自定义 HTTP 请求头 |
 | `query_params` | object | — | URL 附加查询参数 |
+| `dynamic_context_script` | string | — | 动态上下文脚本路径，每次请求前执行，输出追加到 prompt |
+| `dynamic_context_script_timeout_secs` | int | `5` | 动态上下文脚本执行超时时间（秒） |
 
 ---
 
