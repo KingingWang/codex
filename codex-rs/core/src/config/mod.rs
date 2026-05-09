@@ -1052,6 +1052,11 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+
+    /// Optional path to a script whose output is dynamically appended to the
+    /// end of each request input. The script runs fresh for every sampling
+    /// request and its output is never persisted to conversation history.
+    pub dynamic_context_script: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -3722,6 +3727,7 @@ impl Config {
                 .map(|t| t.keymap.clone())
                 .unwrap_or_default(),
             otel,
+            dynamic_context_script: cfg.dynamic_context_script.clone(),
         };
         Ok(config)
         })
