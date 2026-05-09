@@ -276,6 +276,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         tool_suggest: ToolSuggestConfig::default(),
         otel: OtelConfig::default(),
         dynamic_context_script: None,
+        dynamic_context_script_timeout: std::time::Duration::from_secs(5),
     };
     config
         .features

@@ -1002,14 +1002,14 @@ pub(crate) async fn build_prompt(
     }
 }
 
+/// Maximum number of bytes of script output to include in the prompt.
+/// Prevents accidentally exhausting the context window with large output.
+const MAX_DYNAMIC_CONTEXT_BYTES: usize = 4096;
+
 async fn append_dynamic_context(
     mut input: Vec<ResponseItem>,
     turn_context: &TurnContext,
 ) -> Vec<ResponseItem> {
-    info!(
-        dynamic_context_script = ?turn_context.config.dynamic_context_script,
-        "append_dynamic_context called"
-    );
     let Some(script_path) = turn_context.config.dynamic_context_script.as_ref() else {
         return input;
     };
@@ -1019,10 +1019,35 @@ async fn append_dynamic_context(
     }
 
     let script_path_trimmed = script_path.trim();
-    trace!(script = %script_path_trimmed, cwd = %turn_context.cwd.display(), "executing dynamic_context_script");
+
+    // Resolve and validate the script path.
+    let resolved_path = if script_path_trimmed.starts_with('/') {
+        std::path::PathBuf::from(script_path_trimmed)
+    } else {
+        turn_context.cwd.join(script_path_trimmed).into()
+    };
+
+    if !resolved_path.is_file() {
+        warn!(
+            script = %script_path_trimmed,
+            resolved = %resolved_path.display(),
+            "dynamic_context_script path does not exist or is not a file"
+        );
+        return input;
+    }
+
+    let timeout = turn_context.config.dynamic_context_script_timeout;
+    trace!(
+        script = %script_path_trimmed,
+        resolved = %resolved_path.display(),
+        cwd = %turn_context.cwd.display(),
+        timeout_secs = timeout.as_secs(),
+        "executing dynamic_context_script"
+    );
+
     let output = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::process::Command::new(script_path_trimmed)
+        timeout,
+        tokio::process::Command::new(&resolved_path)
             .current_dir(&turn_context.cwd)
             .output(),
     )
@@ -1032,6 +1057,7 @@ async fn append_dynamic_context(
         Ok(Err(err)) => {
             warn!(
                 script = %script_path_trimmed,
+                resolved = %resolved_path.display(),
                 error = %err,
                 "failed to execute dynamic_context_script"
             );
@@ -1040,7 +1066,8 @@ async fn append_dynamic_context(
         Err(_) => {
             warn!(
                 script = %script_path_trimmed,
-                "dynamic_context_script timed out after 5 seconds"
+                timeout_secs = timeout.as_secs(),
+                "dynamic_context_script timed out"
             );
             return input;
         }
@@ -1058,17 +1085,41 @@ async fn append_dynamic_context(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let trimmed = stdout.trim();
-    trace!(script = %script_path_trimmed, output_len = trimmed.len(), "dynamic_context_script output");
     if trimmed.is_empty() {
         return input;
     }
 
-    trace!(script = %script_path_trimmed, text_len = trimmed.len(), "appending dynamic context to prompt");
+    // Truncate output to prevent exhausting context window.
+    let (text, truncated) = if trimmed.len() > MAX_DYNAMIC_CONTEXT_BYTES {
+        let byte_boundary = trimmed
+            .char_indices()
+            .take_while(|(i, _)| *i < MAX_DYNAMIC_CONTEXT_BYTES)
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        (&trimmed[..byte_boundary], true)
+    } else {
+        (trimmed, false)
+    };
+
+    if truncated {
+        warn!(
+            script = %script_path_trimmed,
+            original_len = trimmed.len(),
+            truncated_len = text.len(),
+            "dynamic_context_script output truncated"
+        );
+    }
+
+    trace!(
+        script = %script_path_trimmed,
+        text_len = text.len(),
+        "appending dynamic context to prompt"
+    );
     input.push(ResponseItem::Message {
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {
-            text: trimmed.to_string(),
+            text: text.to_string(),
         }],
         phase: None,
     });

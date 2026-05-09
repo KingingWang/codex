@@ -7749,6 +7749,8 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             tui_pet_anchor: TuiPetAnchor::Composer,
             tui_session_picker_view: SessionPickerViewMode::Dense,
             otel: OtelConfig::default(),
+            dynamic_context_script: None,
+            dynamic_context_script_timeout: std::time::Duration::from_secs(5),
         },
         o3_profile_config
     );
@@ -8201,6 +8203,8 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         tui_pet_anchor: TuiPetAnchor::Composer,
         tui_session_picker_view: SessionPickerViewMode::Dense,
         otel: OtelConfig::default(),
+        dynamic_context_script: None,
+        dynamic_context_script_timeout: std::time::Duration::from_secs(5),
     };
 
     assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -8366,6 +8370,8 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         tui_pet_anchor: TuiPetAnchor::Composer,
         tui_session_picker_view: SessionPickerViewMode::Dense,
         otel: OtelConfig::default(),
+        dynamic_context_script: None,
+        dynamic_context_script_timeout: std::time::Duration::from_secs(5),
     };
 
     assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -8516,6 +8522,8 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         tui_pet_anchor: TuiPetAnchor::Composer,
         tui_session_picker_view: SessionPickerViewMode::Dense,
         otel: OtelConfig::default(),
+        dynamic_context_script: None,
+        dynamic_context_script_timeout: std::time::Duration::from_secs(5),
     };
 
     assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
