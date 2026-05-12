@@ -396,6 +396,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             self.emit_final_message_on_shutdown
                 .then_some(self.final_message.as_deref())
                 .flatten(),
+            self.final_message_rendered,
             std::io::stdout().is_terminal(),
             std::io::stderr().is_terminal(),
         ) && let Some(message) = self.final_message.as_deref()
@@ -583,10 +584,13 @@ fn blended_total(usage: &ThreadTokenUsage) -> i64 {
 
 fn should_print_final_message_to_stdout(
     final_message: Option<&str>,
+    final_message_rendered: bool,
     stdout_is_terminal: bool,
     stderr_is_terminal: bool,
 ) -> bool {
-    final_message.is_some() && !(stdout_is_terminal && stderr_is_terminal)
+    final_message.is_some()
+        && !final_message_rendered
+        && !(stdout_is_terminal && stderr_is_terminal)
 }
 
 fn should_print_final_message_to_tty(
