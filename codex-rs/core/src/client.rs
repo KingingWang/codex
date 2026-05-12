@@ -1954,7 +1954,10 @@ impl ModelClientSession {
                         "user" => "user",
                         other => other,
                     };
-                    let text = content
+                    let is_assistant = mapped_role == "assistant";
+                    let msg_content = content_items_to_chat_content(content, is_assistant);
+                    // Text-only view for Warning: detection; images never start with "Warning:".
+                    let text_only = content
                         .iter()
                         .filter_map(|c| match c {
                             codex_protocol::models::ContentItem::OutputText { text, .. } => {
@@ -1979,8 +1982,8 @@ impl ModelClientSession {
                             // Merge content into existing pending assistant message.
                             // This handles the case where FunctionCall items appear
                             // before the Message item in the ResponseItem list.
-                            if !text.is_empty() {
-                                msg.content = Some(serde_json::Value::String(text));
+                            if let Some(c) = msg_content.clone() {
+                                msg.content = Some(c);
                             }
                             if msg.reasoning.is_none() && reasoning.is_some() {
                                 msg.reasoning_content = reasoning.clone();
@@ -1991,11 +1994,7 @@ impl ModelClientSession {
                             let msg_reasoning = if reasoning.is_some() { reasoning } else { None };
                             pending_assistant = Some(ChatMessage {
                                 role: "assistant".to_string(),
-                                content: if text.is_empty() {
-                                    None
-                                } else {
-                                    Some(serde_json::Value::String(text))
-                                },
+                                content: msg_content.clone(),
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: msg_reasoning.clone(),
@@ -2003,10 +2002,10 @@ impl ModelClientSession {
                             });
                         }
                     } else {
-                        if mapped_role == "user" && text.starts_with("Warning:") {
+                        if mapped_role == "user" && text_only.starts_with("Warning:") {
                             pending_warnings.push(ChatMessage {
                                 role: "user".to_string(),
-                                content: Some(serde_json::Value::String(text)),
+                                content: Some(serde_json::Value::String(text_only)),
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: None,
@@ -2021,11 +2020,6 @@ impl ModelClientSession {
                         if !pending_warnings.is_empty() {
                             messages.append(&mut pending_warnings);
                         }
-                        let msg_content: Option<serde_json::Value> = if text.is_empty() {
-                            None
-                        } else {
-                            Some(serde_json::Value::String(text))
-                        };
                         messages.push(ChatMessage {
                             role: mapped_role.to_string(),
                             content: msg_content,
@@ -2073,7 +2067,7 @@ impl ModelClientSession {
                                 tool_calls: Some(vec![tool_call]),
                                 tool_call_id: None,
                                 reasoning_content: reasoning.clone(),
-                                reasoning: reasoning,
+                                reasoning,
                             });
                         }
                     }
@@ -2114,7 +2108,7 @@ impl ModelClientSession {
                                 tool_calls: Some(vec![tool_call]),
                                 tool_call_id: None,
                                 reasoning_content: reasoning.clone(),
-                                reasoning: reasoning,
+                                reasoning,
                             });
                         }
                     }
@@ -2236,6 +2230,80 @@ impl ModelClientSession {
     }
 }
 
+/// Converts a slice of [`ContentItem`] into a [`serde_json::Value`] suitable for the
+/// `content` field of a Chat Completions API message.
+///
+/// - Text-only content is serialized as a plain `Value::String` (preserving existing
+///   wire format).
+/// - Content that includes at least one `InputImage` is serialized as a multipart
+///   `Value::Array` following the OpenAI Chat Completions multipart format:
+///   `[{"type":"text","text":"..."}, {"type":"image_url","image_url":{"url":"...","detail":"high"}}]`.
+///
+/// For assistant-role messages, `InputImage` items are intentionally dropped because
+/// the Chat Completions API does not support `image_url` parts in assistant messages.
+/// In that case, even if images were present, the result falls back to text-only string format.
+///
+/// Returns `None` when the content slice is empty or contains only dropped items.
+fn content_items_to_chat_content(
+    content: &[codex_protocol::models::ContentItem],
+    is_assistant: bool,
+) -> Option<serde_json::Value> {
+    if content.is_empty() {
+        return None;
+    }
+
+    let mut has_image = false;
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut multipart_parts: Vec<serde_json::Value> = Vec::new();
+
+    for item in content {
+        match item {
+            codex_protocol::models::ContentItem::InputText { text }
+            | codex_protocol::models::ContentItem::OutputText { text } => {
+                text_parts.push(text.clone());
+                multipart_parts.push(serde_json::json!({"type": "text", "text": text.clone()}));
+            }
+            codex_protocol::models::ContentItem::InputImage { image_url, detail } => {
+                if is_assistant {
+                    // Assistant messages in the Chat Completions API only support text
+                    // content parts; drop image items rather than erroring.
+                    continue;
+                }
+                has_image = true;
+                let mut image_url_obj = serde_json::json!({"url": image_url});
+                if let Some(d) = detail {
+                    let detail_str = match d {
+                        codex_protocol::models::ImageDetail::Auto => "auto",
+                        codex_protocol::models::ImageDetail::Low => "low",
+                        codex_protocol::models::ImageDetail::High => "high",
+                        codex_protocol::models::ImageDetail::Original => "original",
+                    };
+                    image_url_obj["detail"] = serde_json::Value::String(detail_str.to_string());
+                }
+                multipart_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": image_url_obj,
+                }));
+            }
+        }
+    }
+
+    if multipart_parts.is_empty() {
+        return None;
+    }
+
+    if has_image && !is_assistant {
+        Some(serde_json::Value::Array(multipart_parts))
+    } else {
+        let joined = text_parts.join("\n");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::String(joined))
+        }
+    }
+}
+
 /// Builds a map from flat tool name to namespace prefix for MCP tools.
 /// When the Chat Completions API returns a tool call with a flat name like
 /// `ast_grep_search`, this map lets us look up the namespace (e.g. `omx_code_intel__`)
@@ -2259,20 +2327,22 @@ mod chat_completions_request_tests {
     use super::ModelClient;
     use super::ModelClientSession;
     use crate::client_common::Prompt;
+    use crate::tools::handlers::shell_spec::CommandToolOptions;
+    use crate::tools::handlers::shell_spec::create_exec_command_tool;
     use codex_api::ChatCompletionsRequest;
     use codex_model_provider_info::WireApi;
     use codex_model_provider_info::create_oss_provider_with_base_url;
+    use codex_protocol::SessionId;
     use codex_protocol::ThreadId;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ImageDetail;
     use codex_protocol::models::ReasoningItemContent;
     use codex_protocol::models::ReasoningItemReasoningSummary;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
     use codex_protocol::protocol::SessionSource;
-    use codex_tools::CommandToolOptions;
-    use codex_tools::create_exec_command_tool;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
@@ -2281,6 +2351,7 @@ mod chat_completions_request_tests {
             create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
         ModelClient::new(
             /*auth_manager*/ None,
+            SessionId::new(),
             ThreadId::new(),
             /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
             provider,
@@ -2820,6 +2891,187 @@ mod chat_completions_request_tests {
                 }
             ])
         );
+    }
+    #[test]
+    fn chat_completions_request_user_message_with_image_uses_multipart_content() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "Describe this image".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+            ],
+            phase: None,
+        }]);
+
+        let messages = &request.messages;
+        // System message + user message
+        assert_eq!(messages.len(), 1);
+        let user_msg = &messages[0];
+        assert_eq!(user_msg.role, "user");
+        let content = user_msg
+            .content
+            .as_ref()
+            .expect("user message should have content");
+        // Should be multipart array format
+        assert!(
+            content.is_array(),
+            "content with image should be multipart array"
+        );
+        let arr = content.as_array().expect("content should be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "Describe this image");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,abc");
+        assert_eq!(arr[1]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_text_only_remains_string() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+        }]);
+
+        let messages = &request.messages;
+        assert_eq!(messages.len(), 1);
+        let user_msg = &messages[0];
+        assert_eq!(user_msg.role, "user");
+        let content = user_msg.content.as_ref().expect("should have content");
+        // Text-only should remain as plain string
+        assert!(content.is_string(), "text-only content should be a string");
+        assert_eq!(content.as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn chat_completions_request_assistant_message_drops_image() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![
+                ContentItem::OutputText {
+                    text: "Here is the result".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+            ],
+            phase: None,
+        }]);
+
+        let messages = &request.messages;
+        let assistant_msg = &messages[0];
+        assert_eq!(assistant_msg.role, "assistant");
+        let content = assistant_msg.content.as_ref().expect("should have content");
+        // Assistant messages should be text-only (images dropped)
+        assert!(
+            content.is_string(),
+            "assistant content should be plain string"
+        );
+        assert_eq!(content.as_str().unwrap(), "Here is the result");
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_image_only() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: "data:image/png;base64,xyz".to_string(),
+                detail: Some(ImageDetail::Auto),
+            }],
+            phase: None,
+        }]);
+
+        let messages = &request.messages;
+        let user_msg = &messages[0];
+        assert_eq!(user_msg.role, "user");
+        let content = user_msg.content.as_ref().expect("should have content");
+        assert!(
+            content.is_array(),
+            "image-only content should be multipart array"
+        );
+        let arr = content.as_array().expect("content should be array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "image_url");
+        assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,xyz");
+        assert_eq!(arr[0]["image_url"]["detail"], "auto");
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_image_detail_none_omits_field() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: "data:image/png;base64,test".to_string(),
+                detail: None,
+            }],
+            phase: None,
+        }]);
+
+        let messages = &request.messages;
+        let user_msg = &messages[0];
+        let content = user_msg.content.as_ref().expect("should have content");
+        let arr = content.as_array().expect("content should be array");
+        // When detail is None, the detail field should be omitted
+        assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,test");
+        assert!(
+            arr[0]["image_url"].get("detail").is_none(),
+            "detail should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_multiple_images() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "Compare these".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,aaa".to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/jpeg;base64,bbb".to_string(),
+                    detail: Some(ImageDetail::Low),
+                },
+            ],
+            phase: None,
+        }]);
+
+        let messages = &request.messages;
+        let user_msg = &messages[0];
+        let content = user_msg.content.as_ref().expect("should have content");
+        let arr = content
+            .as_array()
+            .expect("content should be multipart array");
+        assert_eq!(arr.len(), 3);
+        // Text part
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "Compare these");
+        // First image
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,aaa");
+        assert_eq!(arr[1]["image_url"]["detail"], "high");
+        // Second image
+        assert_eq!(arr[2]["type"], "image_url");
+        assert_eq!(arr[2]["image_url"]["url"], "data:image/jpeg;base64,bbb");
+        assert_eq!(arr[2]["image_url"]["detail"], "low");
     }
 }
 
