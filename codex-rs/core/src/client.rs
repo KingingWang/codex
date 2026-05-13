@@ -2019,18 +2019,32 @@ impl ModelClientSession {
                 }
                 ResponseItem::FunctionCallOutput { call_id, output } => {
                     // Tool result: flush pending assistant, then push tool message.
+                    // Images cannot go in tool-role messages (Chat Completions API only
+                    // supports string content on tool messages). Split them into a
+                    // separate user message instead.
                     if let Some(msg) = pending_assistant.take() {
                         messages.push(msg);
                     }
-                    let content_str = output.body.to_text().unwrap_or_default();
+                    let (tool_content, user_image_content) =
+                        split_tool_output_into_tool_and_user_content(&output.body);
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: Some(serde_json::Value::String(content_str)),
+                        content: tool_content,
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
                         reasoning_content: None,
                         reasoning: None,
                     });
+                    if let Some(image_content) = user_image_content {
+                        messages.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(image_content),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                            reasoning: None,
+                        });
+                    }
                     pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
                     if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
                         messages.append(&mut pending_warnings);
@@ -2042,18 +2056,32 @@ impl ModelClientSession {
                     output,
                 } => {
                     // Tool result: flush pending assistant, then push tool message.
+                    // Images cannot go in tool-role messages (Chat Completions API only
+                    // supports string content on tool messages). Split them into a
+                    // separate user message instead.
                     if let Some(msg) = pending_assistant.take() {
                         messages.push(msg);
                     }
-                    let content_str = output.body.to_text().unwrap_or_default();
+                    let (tool_content, user_image_content) =
+                        split_tool_output_into_tool_and_user_content(&output.body);
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: Some(serde_json::Value::String(content_str)),
+                        content: tool_content,
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
                         reasoning_content: None,
                         reasoning: None,
                     });
+                    if let Some(image_content) = user_image_content {
+                        messages.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(image_content),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                            reasoning: None,
+                        });
+                    }
                     pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
                     if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
                         messages.append(&mut pending_warnings);
@@ -2207,6 +2235,95 @@ fn content_items_to_chat_content(
     }
 }
 
+/// Splits a [`FunctionCallOutputBody`] into a text-only tool message content and,
+/// if present, a multipart user message containing any images.
+///
+/// The Chat Completions API only supports plain-string `content` on `role: "tool"`
+/// messages. Images from tool results (e.g. `view_image`) cannot be placed in the
+/// tool message itself. Instead, they must be delivered via a separate `role: "user"`
+/// message using the multipart content format:
+///
+/// ```json
+/// [{"type":"text","text":"[tool result image]"},
+///  {"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"high"}}]
+/// ```
+///
+/// Returns `(tool_content, optional_user_content)`:
+/// - `tool_content`: `Some(Value::String(..))` with the text portion for the tool message,
+///   or `None` when the body is empty.
+/// - `optional_user_content`: `Some(Value::Array(..))` with multipart content including
+///   images when the body contains `InputImage` items, otherwise `None`.
+fn split_tool_output_into_tool_and_user_content(
+    body: &codex_protocol::models::FunctionCallOutputBody,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    use codex_protocol::models::FunctionCallOutputBody;
+    use codex_protocol::models::FunctionCallOutputContentItem;
+    use codex_protocol::models::ImageDetail;
+
+    match body {
+        FunctionCallOutputBody::Text(text) => {
+            if text.is_empty() {
+                (None, None)
+            } else {
+                (Some(serde_json::Value::String(text.clone())), None)
+            }
+        }
+        FunctionCallOutputBody::ContentItems(items) => {
+            if items.is_empty() {
+                return (None, None);
+            }
+
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut image_parts: Vec<serde_json::Value> = Vec::new();
+
+            for item in items {
+                match item {
+                    FunctionCallOutputContentItem::InputText { text } => {
+                        text_parts.push(text.clone());
+                    }
+                    FunctionCallOutputContentItem::InputImage { image_url, detail } => {
+                        let mut image_url_obj = serde_json::json!({"url": image_url});
+                        if let Some(d) = detail {
+                            let detail_str = match d {
+                                ImageDetail::Auto => "auto",
+                                ImageDetail::Low => "low",
+                                ImageDetail::High => "high",
+                                ImageDetail::Original => "original",
+                            };
+                            image_url_obj["detail"] =
+                                serde_json::Value::String(detail_str.to_string());
+                        }
+                        image_parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": image_url_obj,
+                        }));
+                    }
+                }
+            }
+
+            let tool_content = if text_parts.is_empty() {
+                // If there are only images, the tool message needs at least an empty
+                // string so it is not null (some providers reject null tool content).
+                Some(serde_json::Value::String("[image result]".to_string()))
+            } else {
+                Some(serde_json::Value::String(text_parts.join("\n")))
+            };
+
+            let user_content = if image_parts.is_empty() {
+                None
+            } else {
+                // Build multipart user message: a text label + all image parts
+                let mut parts: Vec<serde_json::Value> = Vec::new();
+                for img_part in image_parts {
+                    parts.push(img_part);
+                }
+                Some(serde_json::Value::Array(parts))
+            };
+
+            (tool_content, user_content)
+        }
+    }
+}
 /// Builds a map from flat tool name to namespace prefix for MCP tools.
 /// When the Chat Completions API returns a tool call with a flat name like
 /// `ast_grep_search`, this map lets us look up the namespace (e.g. `omx_code_intel__`)
@@ -2390,6 +2507,22 @@ mod chat_completions_request_tests {
             call_id: call_id.to_string(),
             name: None,
             output: FunctionCallOutputPayload::from_text(output.to_string()),
+        }
+    }
+
+    fn function_call_output_with_image(call_id: &str, text: &str, image_url: &str) -> ResponseItem {
+        use codex_protocol::models::FunctionCallOutputContentItem;
+        ResponseItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload::from_content_items(vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: text.to_string(),
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: image_url.to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+            ]),
         }
     }
 
@@ -2975,6 +3108,50 @@ mod chat_completions_request_tests {
         assert_eq!(arr[2]["type"], "image_url");
         assert_eq!(arr[2]["image_url"]["url"], "data:image/jpeg;base64,bbb");
         assert_eq!(arr[2]["image_url"]["detail"], "low");
+    }
+
+    #[test]
+    fn chat_completions_request_tool_output_with_image_splits_into_tool_and_user() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"view_image"}"#),
+            function_call_output_with_image(
+                "call-1",
+                "Here is the image:",
+                "data:image/png;base64,abc123",
+            ),
+        ]);
+
+        let messages = &request.messages;
+        // First message: assistant with tool_calls
+        assert_eq!(messages[0].role, "assistant");
+        assert!(messages[0].tool_calls.is_some());
+        // Second message: tool with text-only content (images cannot go in tool messages)
+        assert_eq!(messages[1].role, "tool");
+        let tool_content = messages[1]
+            .content
+            .as_ref()
+            .expect("tool should have content");
+        assert!(
+            tool_content.is_string(),
+            "tool content should be plain text"
+        );
+        assert_eq!(tool_content.as_str(), Some("Here is the image:"));
+        // Third message: user with the image in multipart format
+        assert_eq!(messages[2].role, "user");
+        let user_content = messages[2]
+            .content
+            .as_ref()
+            .expect("user message should have image content");
+        assert!(
+            user_content.is_array(),
+            "user image content should be multipart array"
+        );
+        let arr = user_content.as_array().expect("content should be array");
+        assert_eq!(arr.len(), 1);
+        // Image part
+        assert_eq!(arr[0]["type"], "image_url");
+        assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,abc123");
+        assert_eq!(arr[0]["image_url"]["detail"], "high");
     }
 }
 
