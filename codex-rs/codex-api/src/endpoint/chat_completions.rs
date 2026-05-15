@@ -576,7 +576,7 @@ mod tests {
     async fn normal_content_has_no_error() {
         let events = collect_events(normal_content_response()).await;
         assert!(
-            events.iter().all(|e| e.is_ok()),
+            events.iter().all(std::result::Result::is_ok),
             "expected all Ok events, got {events:?}"
         );
     }

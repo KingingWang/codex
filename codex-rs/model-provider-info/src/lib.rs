@@ -49,6 +49,8 @@ pub enum WireApi {
     Responses,
     /// The Chat Completions API exposed by OpenAI at `/v1/chat/completions`.
     Chat,
+    /// The Messages API exposed by Anthropic at `/v1/messages`.
+    Anthropic,
 }
 
 impl fmt::Display for WireApi {
@@ -56,6 +58,7 @@ impl fmt::Display for WireApi {
         let value = match self {
             Self::Responses => "responses",
             Self::Chat => "chat",
+            Self::Anthropic => "anthropic",
         };
         f.write_str(value)
     }
@@ -70,9 +73,10 @@ impl<'de> Deserialize<'de> for WireApi {
         match value.as_str() {
             "responses" => Ok(Self::Responses),
             "chat" => Ok(Self::Chat),
+            "anthropic" => Ok(Self::Anthropic),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["responses", "chat"],
+                &["responses", "chat", "anthropic"],
             )),
         }
     }
