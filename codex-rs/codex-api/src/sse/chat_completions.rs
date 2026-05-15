@@ -255,10 +255,10 @@ pub async fn process_chat_completions_sse(
 
         // Process choices
         for choice in &event.choices {
-            if let Some(fr) = &choice.finish_reason {
-                if !fr.is_empty() {
-                    last_finish_reason = Some(fr.clone());
-                }
+            if let Some(fr) = &choice.finish_reason
+                && !fr.is_empty()
+            {
+                last_finish_reason = Some(fr.clone());
             }
             if let Err(_e) = process_chat_choice(
                 choice,
@@ -375,10 +375,10 @@ async fn process_chat_choice(
             // Update ID if present and non-empty.
             // Some providers (e.g. qwen) send {"id": ""} in subsequent chunks,
             // which would overwrite the real call_id with an empty string.
-            if let Some(id) = &tool_call_delta.id {
-                if !id.is_empty() {
-                    entry.0 = Some(id.clone());
-                }
+            if let Some(id) = &tool_call_delta.id
+                && !id.is_empty()
+            {
+                entry.0 = Some(id.clone());
             }
 
             // Update function name if present and non-empty.
@@ -386,10 +386,10 @@ async fn process_chat_choice(
             // but subsequent chunks may include {"name": ""} which would
             // overwrite the accumulated name with an empty string.
             if let Some(func) = &tool_call_delta.function {
-                if let Some(name) = &func.name {
-                    if !name.is_empty() {
-                        entry.1 = Some(name.clone());
-                    }
+                if let Some(name) = &func.name
+                    && !name.is_empty()
+                {
+                    entry.1 = Some(name.clone());
                 }
                 if let Some(args) = &func.arguments {
                     // Accumulate arguments
