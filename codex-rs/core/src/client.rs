@@ -31,6 +31,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use codex_api::AnthropicClient as ApiAnthropicClient;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
 use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
@@ -1638,6 +1639,10 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Anthropic => {
+                self.stream_anthropic_api(prompt, model_info, session_telemetry, inference_trace)
+                    .await
+            }
         }
     }
 
@@ -1795,6 +1800,143 @@ impl ModelClientSession {
                         delay_ms = delay.as_millis(),
                         error = %err,
                         "Chat Completions request failed, retrying after backoff"
+                    );
+                    sleep(delay).await;
+                    retry_count += 1;
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Streams a turn via the Anthropic Messages API.
+    #[instrument(
+        name = "model_client.stream_anthropic_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "anthropic_http",
+            http.method = "POST",
+            api.path = "v1/messages"
+        )
+    )]
+    async fn stream_anthropic_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        let mut retry_count: u32 = 0;
+        let mut auth_retry_count: u32 = 0;
+        const MAX_AUTH_RETRIES: u32 = 10;
+        let base_delay = Duration::from_secs(5);
+        let max_delay = Duration::from_secs(600);
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                pending_retry,
+            );
+            let (_, _sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint("/v1/messages"),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+
+            let request = crate::client_anthropic::build_anthropic_request(prompt, model_info)?;
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.record_started(&request);
+            let chat_stream = self.client.state.provider.info().chat_stream;
+            let client = ApiAnthropicClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+                chat_stream,
+            );
+            let stream_result = client.request(request, ApiHeaderMap::new()).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        inference_trace_attempt,
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    match handle_unauthorized(
+                        unauthorized_transport,
+                        &mut auth_recovery,
+                        session_telemetry,
+                    )
+                    .await
+                    {
+                        Ok(recovery) => {
+                            pending_retry = PendingUnauthorizedRetry::from_recovery(recovery);
+                            retry_count = 0;
+                            auth_retry_count = 0;
+                            continue;
+                        }
+                        Err(err) => {
+                            if auth_retry_count < MAX_AUTH_RETRIES {
+                                let delay = base_delay
+                                    .saturating_mul(
+                                        1u32.checked_shl(auth_retry_count.min(20))
+                                            .unwrap_or(u32::MAX),
+                                    )
+                                    .min(max_delay);
+                                warn!(
+                                    auth_retry_count,
+                                    delay_ms = delay.as_millis(),
+                                    "Anthropic received 401, retrying after backoff"
+                                );
+                                sleep(delay).await;
+                                auth_retry_count += 1;
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    let delay = match &err {
+                        ApiError::Retryable { delay: Some(d), .. } => *d,
+                        _ => {
+                            let multiplier =
+                                1u32.checked_shl(retry_count.min(20)).unwrap_or(u32::MAX);
+                            let base = base_delay.saturating_mul(multiplier);
+                            std::cmp::min(base, max_delay)
+                        }
+                    };
+                    warn!(
+                        retry_count,
+                        delay_ms = delay.as_millis(),
+                        error = %err,
+                        "Anthropic request failed, retrying after backoff"
                     );
                     sleep(delay).await;
                     retry_count += 1;
