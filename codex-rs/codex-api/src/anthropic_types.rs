@@ -224,9 +224,14 @@ impl AnthropicUsage {
 }
 
 /// Non-streaming response body for `POST /v1/messages`.
+///
+/// `id` is `Option<String>` because some Anthropic-compatible providers omit it.
+/// Mirrors the streaming `MessageStart` shape so both paths tolerate the same
+/// upstream variation.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnthropicResponse {
-    pub id: String,
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default, rename = "type")]
     pub r#type: Option<String>,
     #[serde(default)]
@@ -478,5 +483,16 @@ mod tests {
         assert!(json.contains("\"max_tokens\":1024"));
         assert!(json.contains("\"cache_control\":{\"type\":\"ephemeral\"}"));
         assert!(!json.contains("tool_namespace_map"));
+    }
+
+    /// Some Anthropic-compatible providers omit `id` from non-streaming
+    /// responses; we tolerate that to avoid silent retry storms.
+    #[test]
+    fn deserializes_response_without_id() {
+        let body = r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"#;
+        let resp: AnthropicResponse = serde_json::from_str(body).unwrap();
+        assert!(resp.id.is_none());
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.content.len(), 1);
     }
 }
