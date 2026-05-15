@@ -218,7 +218,7 @@ async fn convert_response_to_events(
     tx: mpsc::Sender<Result<ResponseEvent, ApiError>>,
     namespace_map: &std::collections::HashMap<String, String>,
 ) {
-    let response_id = response.id.clone();
+    let response_id = response.id.clone().unwrap_or_default();
     if tx.send(Ok(ResponseEvent::Created)).await.is_err() {
         return;
     }
@@ -442,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn empty_content_yields_retryable() {
         let response = AnthropicResponse {
-            id: "msg-1".to_string(),
+            id: Some("msg-1".to_string()),
             r#type: Some("message".to_string()),
             role: Some("assistant".to_string()),
             content: Vec::new(),
@@ -463,7 +463,7 @@ mod tests {
     #[tokio::test]
     async fn text_content_emits_message_events_and_rolls_up_cache_tokens() {
         let response = AnthropicResponse {
-            id: "msg-2".to_string(),
+            id: Some("msg-2".to_string()),
             r#type: Some("message".to_string()),
             role: Some("assistant".to_string()),
             content: vec![AnthropicContentBlock::Text {
@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn tool_use_emits_function_call_events() {
         let response = AnthropicResponse {
-            id: "msg-3".to_string(),
+            id: Some("msg-3".to_string()),
             r#type: Some("message".to_string()),
             role: Some("assistant".to_string()),
             content: vec![AnthropicContentBlock::ToolUse {
