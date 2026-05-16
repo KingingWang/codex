@@ -2,15 +2,33 @@
 //! Messages API, with cache-control markers placed for maximum prompt-caching
 //! hit-rate on subsequent turns.
 //!
-//! Cache strategy (matches the patterns Claude Code uses):
+//! Cache strategy (mirrors the Crush reference client — its
+//! `internal/agent/agent.go:156-252` placement is known-working on
+//! Bedrock-backed gateways):
 //! - The **last system block** carries `cache_control: ephemeral`.
 //! - The **last tool definition** (after stable sort by name) carries
-//!   `cache_control: ephemeral`.
-//! - The **last block of the most recent historical user message** — that is,
-//!   the message before the latest user turn — carries `cache_control:
-//!   ephemeral` so the conversation history stays cached as turns advance.
-//! - Anthropic accepts at most 4 cache breakpoints per request, and we only
-//!   place 3.
+//!   `cache_control: ephemeral`. This gives an explicit "cache the tools
+//!   section" hint that Bedrock-backed gateways require to write a tools
+//!   cache at all — dropping it wipes out caching entirely on Bedrock,
+//!   even though Anthropic Direct would auto-discover the longest matching
+//!   prefix without it.
+//! - **The last `user`-role message carries `cache_control` on its
+//!   final block.** Single message-level marker, matching the Anthropic
+//!   prompt-caching reference's multi-turn example. The gateway
+//!   auto-discovers the longest cached prefix on subsequent turns
+//!   without needing us to re-assert markers at older offsets.
+//!
+//!   Note: Anthropic's wire format buckets `tool_result` deliveries as
+//!   user-role messages, so a trailing tool-result naturally falls into
+//!   this slot too. Empirically (see commit history), trying to place a
+//!   *second* marker on the second-to-last user message broke caching
+//!   because the marker shift between turns moved the cache_control
+//!   bytes the gateway was hashing the prefix with — reads stuck at
+//!   `system + tools` only.
+//! - We use up to 4 of Anthropic's 4 allowed breakpoints (system tail +
+//!   last tool + last two messages). On the very first turn (single
+//!   message) the two trailing markers collapse onto one position and we
+//!   place 3 markers total.
 //!
 //! Cache-hit invariants we preserve:
 //! - Tool order is canonicalized (sorted by name) so adjacent turns produce a
@@ -55,7 +73,7 @@ use crate::client_common::Prompt;
 /// Anthropic requires this field; codex does not currently surface it through
 /// the Prompt, so we pick a generous default that any modern Claude model can
 /// honor.
-const DEFAULT_MAX_TOKENS: u32 = 8192;
+const DEFAULT_MAX_TOKENS: u32 = 65535;
 
 /// Convert a `Prompt` into an `AnthropicRequest`. Honors the same cache-hit
 /// invariants documented at the module level.
@@ -63,9 +81,12 @@ pub(crate) fn build_anthropic_request(
     prompt: &Prompt,
     model_info: &ModelInfo,
 ) -> CodexResult<AnthropicRequest> {
-    let system = build_system(&prompt.base_instructions.text);
+    let formatted_input = prompt.get_formatted_input();
+    let (lifted_system_blocks, remaining_input) = lift_agents_md_into_system(&formatted_input);
 
-    let messages = build_messages(&prompt.get_formatted_input())?;
+    let system = build_system(&prompt.base_instructions.text, &lifted_system_blocks);
+
+    let messages = build_messages(&remaining_input)?;
 
     let (tools, tool_namespace_map) = build_tools(&prompt.tools)?;
 
@@ -86,12 +107,88 @@ pub(crate) fn build_anthropic_request(
     })
 }
 
-fn build_system(instructions: &str) -> Option<Vec<AnthropicSystemBlock>> {
-    if instructions.is_empty() {
+/// Lift the `# AGENTS.md instructions for ...</INSTRUCTIONS>` fragment out of
+/// the input messages and into the system block. The fragment is large
+/// (often several thousand tokens) and stable across the whole session, so
+/// keeping it as the first user-message block forces every turn to ship
+/// those bytes inside the message stream where only m_0-level cache
+/// markers cover them. Moving it into the system block lets the
+/// system-tail cache marker (always placed by `build_system`) cover the
+/// AGENTS.md bytes too, dramatically growing the stable cacheable prefix
+/// and letting subsequent turns hit a much larger system+tools cache when
+/// deeper message-level entries expire.
+///
+/// Only blocks that match the AGENTS.md START/END markers are lifted; any
+/// other content in the same `ResponseItem::Message` (e.g.
+/// `<environment_context>` or the actual user prompt) is preserved in the
+/// returned input. Items with no remaining content are dropped.
+fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<ResponseItem>) {
+    const START_MARKER: &str = "# AGENTS.md instructions for ";
+    const END_MARKER: &str = "</INSTRUCTIONS>";
+
+    let mut lifted: Vec<String> = Vec::new();
+    let mut remaining: Vec<ResponseItem> = Vec::with_capacity(items.len());
+
+    for item in items {
+        let ResponseItem::Message {
+            id,
+            role,
+            content,
+            phase,
+        } = item
+        else {
+            remaining.push(item.clone());
+            continue;
+        };
+        if !matches!(role.as_str(), "user" | "developer" | "system") {
+            remaining.push(item.clone());
+            continue;
+        }
+        let mut kept_content: Vec<ContentItem> = Vec::with_capacity(content.len());
+        for c in content {
+            let text_ref = match c {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
+                ContentItem::InputImage { .. } => None,
+            };
+            if let Some(text) = text_ref {
+                let trimmed_start = text.trim_start();
+                let trimmed_end = text.trim_end();
+                if trimmed_start.starts_with(START_MARKER) && trimmed_end.ends_with(END_MARKER) {
+                    lifted.push(text.clone());
+                    continue;
+                }
+            }
+            kept_content.push(c.clone());
+        }
+        if !kept_content.is_empty() {
+            remaining.push(ResponseItem::Message {
+                id: id.clone(),
+                role: role.clone(),
+                content: kept_content,
+                phase: phase.clone(),
+            });
+        }
+    }
+
+    (lifted, remaining)
+}
+
+fn build_system(instructions: &str, lifted_blocks: &[String]) -> Option<Vec<AnthropicSystemBlock>> {
+    let mut combined = String::new();
+    if !instructions.is_empty() {
+        combined.push_str(instructions);
+    }
+    for block in lifted_blocks {
+        if !combined.is_empty() {
+            combined.push_str("\n\n");
+        }
+        combined.push_str(block);
+    }
+    if combined.is_empty() {
         return None;
     }
     Some(vec![
-        AnthropicSystemBlock::text(instructions).with_cache(AnthropicCacheControl::ephemeral()),
+        AnthropicSystemBlock::text(combined).with_cache(AnthropicCacheControl::ephemeral()),
     ])
 }
 
@@ -137,6 +234,10 @@ fn build_tools(
     // turns and bust the cache.
     anthropic_tools.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // Place a cache_control marker on the last tool. Bedrock-backed gateways
+    // require this explicit marker to write a tools-section cache at all —
+    // dropping it (even if the system-block marker should subsume it on
+    // Anthropic Direct) wipes out caching entirely on Bedrock. Keep it.
     if let Some(last) = anthropic_tools.last_mut() {
         last.cache_control = Some(AnthropicCacheControl::ephemeral());
     }
@@ -399,28 +500,31 @@ fn function_output_to_tool_result_blocks(
     }]
 }
 
-/// Place the message-level cache marker on the last block of the most recent
-/// historical user message. "Historical" means: not the very last message in
-/// the list (the trailing user turn carries the new prompt and shouldn't be
-/// cached on its own — caching the message *before* keeps the turn-N prefix
-/// reusable when turn N+1 arrives).
+/// Place a single message-level cache marker on the **last `user`-role
+/// message** of the request. This matches the Anthropic prompt-caching
+/// reference (`docs.anthropic.com/en/docs/build-with-claude/prompt-caching`)
+/// multi-turn example, which uses one `cache_control` on the trailing user
+/// turn and lets the gateway auto-discover the longest cached prefix.
+///
+/// Anthropic's wire format buckets `tool_result` deliveries as user-role
+/// messages, so a trailing tool-result (mid-tool-loop) lands here too.
+///
+/// Combined with the system-block marker and the last-tool marker placed
+/// in `build_system` / `build_tools`, the request consumes 3 of
+/// Anthropic's 4 allowed breakpoints. We deliberately leave the 4th open
+/// — the previous "last two messages" strategy used the spare slot, but
+/// empirically it fought the gateway's auto-discovery (each turn the
+/// second-to-last marker landed on a different message offset, shifting
+/// the bytes of every prior marker that the gateway hashed) and produced
+/// reads stuck at `system + tools` only.
 fn apply_history_cache_marker(messages: &mut [AnthropicMessage]) {
-    if messages.len() < 2 {
-        return;
-    }
-    let last_user_index = messages
-        .iter()
-        .enumerate()
-        .rev()
-        .skip(1) // skip the very last message
-        .find(|(_, m)| m.role == "user")
-        .map(|(i, _)| i);
-    let Some(idx) = last_user_index else {
+    let Some(idx) = messages.iter().rposition(|m| m.role == "user") else {
         return;
     };
-    if let AnthropicMessageContent::Blocks(blocks) = &mut messages[idx].content
-        && let Some(last_block) = blocks.last_mut()
-    {
+    let AnthropicMessageContent::Blocks(blocks) = &mut messages[idx].content else {
+        return;
+    };
+    if let Some(last_block) = blocks.last_mut() {
         set_block_cache(last_block);
     }
 }
