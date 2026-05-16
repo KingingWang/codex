@@ -43,15 +43,22 @@ use tracing::instrument;
 const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
 const ANTHROPIC_VERSION_VALUE: &str = "2023-06-01";
 const ANTHROPIC_API_KEY_HEADER: &str = "x-api-key";
+const ANTHROPIC_BETA_HEADER: &str = "anthropic-beta";
+const ANTHROPIC_BETA_PROMPT_CACHING: &str = "prompt-caching-2024-07-31";
 
 /// Apply Anthropic-specific header rewrites to the outgoing request.
 ///
 /// - Move `Authorization: Bearer <token>` into `x-api-key: <token>` (only
 ///   when the caller has not already supplied an `x-api-key`).
 /// - Inject `anthropic-version: 2023-06-01` if missing.
+/// - Inject `anthropic-beta: prompt-caching-2024-07-31` if no beta header
+///   is already set. Direct Anthropic has prompt caching GA, but Bedrock
+///   and other compatible proxies still gate cache routing on this beta
+///   flag, so sending it makes cache hits deterministic across gateways.
 fn rewrite_anthropic_headers(req: &mut Request) {
     let api_key_header = HeaderName::from_static(ANTHROPIC_API_KEY_HEADER);
     let version_header = HeaderName::from_static(ANTHROPIC_VERSION_HEADER);
+    let beta_header = HeaderName::from_static(ANTHROPIC_BETA_HEADER);
 
     if !req.headers.contains_key(&api_key_header)
         && let Some(auth_value) = req.headers.remove(AUTHORIZATION)
@@ -70,6 +77,40 @@ fn rewrite_anthropic_headers(req: &mut Request) {
             version_header,
             HeaderValue::from_static(ANTHROPIC_VERSION_VALUE),
         );
+    }
+
+    if !req.headers.contains_key(&beta_header) {
+        req.headers.insert(
+            beta_header,
+            HeaderValue::from_static(ANTHROPIC_BETA_PROMPT_CACHING),
+        );
+    }
+}
+
+/// Diagnostic: dump the outgoing JSON body to disk when
+/// `CODEX_DEBUG_ANTHROPIC_DUMP_DIR` is set. Each call writes a new file
+/// `anthropic-<kind>-<unix_nanos>.json` so consecutive turns can be diffed
+/// to find prefix drift that breaks prompt-cache hits.
+fn debug_dump_request(body: &serde_json::Value, kind: &str) {
+    let Ok(dir) = std::env::var("CODEX_DEBUG_ANTHROPIC_DUMP_DIR") else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::path::Path::new(&dir).join(format!("anthropic-{kind}-{now}.json"));
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(?err, ?dir, "failed to create anthropic dump dir");
+        return;
+    }
+    match serde_json::to_vec_pretty(body) {
+        Ok(bytes) => {
+            if let Err(err) = std::fs::write(&path, &bytes) {
+                tracing::warn!(?err, ?path, "failed to write anthropic dump");
+            }
+        }
+        Err(err) => tracing::warn!(?err, "failed to serialize anthropic dump"),
     }
 }
 
@@ -135,6 +176,8 @@ impl<T: HttpTransport> AnthropicClient<T> {
         let body = serde_json::to_value(&req)
             .map_err(|e| ApiError::Stream(format!("failed to encode anthropic request: {e}")))?;
 
+        debug_dump_request(&body, "stream");
+
         let stream_response = self
             .session
             .stream_with(
@@ -169,6 +212,8 @@ impl<T: HttpTransport> AnthropicClient<T> {
 
         let body = serde_json::to_value(&req)
             .map_err(|e| ApiError::Stream(format!("failed to encode anthropic request: {e}")))?;
+
+        debug_dump_request(&body, "nonstream");
 
         let response = self
             .session
@@ -629,6 +674,44 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "2024-10-22"
+        );
+    }
+
+    #[test]
+    fn rewrite_headers_injects_prompt_caching_beta() {
+        let provider = test_provider();
+        let mut req = provider.build_request(Method::POST, "v1/messages");
+
+        rewrite_anthropic_headers(&mut req);
+
+        assert_eq!(
+            req.headers
+                .get(HeaderName::from_static(ANTHROPIC_BETA_HEADER))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            ANTHROPIC_BETA_PROMPT_CACHING
+        );
+    }
+
+    #[test]
+    fn rewrite_headers_preserves_user_supplied_beta() {
+        let provider = test_provider();
+        let mut req = provider.build_request(Method::POST, "v1/messages");
+        req.headers.insert(
+            HeaderName::from_static(ANTHROPIC_BETA_HEADER),
+            HeaderValue::from_static("computer-use-2024-10-22"),
+        );
+
+        rewrite_anthropic_headers(&mut req);
+
+        assert_eq!(
+            req.headers
+                .get(HeaderName::from_static(ANTHROPIC_BETA_HEADER))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "computer-use-2024-10-22"
         );
     }
 }
