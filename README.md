@@ -4,7 +4,7 @@
 
 ## 与官方仓库的区别
 
-本仓库对官方 Codex CLI 进行了以下修改，确保**用户数据不会外发**：
+本仓库对官方 Codex CLI 进行了以下修改，默认关闭官方遥测、登录、更新检查和内置云端模型入口。除非你显式配置并选择某个远端 LLM provider，否则不会把对话或代码发送到外部模型服务：
 
 ### 已禁用的外部服务
 
@@ -25,18 +25,18 @@
 
 HTTP 请求的 User-Agent 已修改为 `RooCode/3.51.1`，不再暴露 Codex 版本号、操作系统架构等信息。
 
-### 安全说明
+### 安全边界
 
-- **零数据外发**：所有可能向外部发送用户代码、对话内容、系统信息的通道均已关闭
-- **本地模型支持**：内置 Ollama 和 LM Studio 提供商，可完全离线运行
-- **可信 LLM 提供商**：可配置 `base_url` 指向企业内部部署的 LLM 服务
-- **沙箱隔离**：保留原有的 bwrap/Linux 沙箱机制，限制子进程网络访问
+- **默认不连接官方云服务**：OpenAI 登录、遥测、更新检查、Cloud Tasks、Statsig 等官方外部通道已禁用或清空。
+- **模型请求由 provider 决定**：如果选择 Ollama / LM Studio，本地模型请求可完全离线；如果配置 Anthropic、OpenAI 兼容网关或其他远端 `base_url`，对话、代码片段、工具结果和图片会发送到该 provider。
+- **可信 LLM 提供商**：隐私敏感场景建议把 `base_url` 指向企业内部部署的 LLM 服务，而不是公网模型服务。
+- **沙箱隔离**：保留原有的 bwrap/Linux 沙箱机制，限制子进程网络访问。
 
 ---
 
 ## 配置指南
 
-配置文件位于 `~/.codex/config.toml`。以下是一份完整的参考配置，涵盖了 Chat Completions API 协议切换、流式/非流式模式等常用选项。
+配置文件位于 `~/.codex/config.toml`。以下是一份完整的参考配置，涵盖了 Responses API、Chat Completions API、Anthropic Messages API 协议切换、流式/非流式模式等常用选项。
 
 ### 参考配置文件
 
@@ -58,7 +58,8 @@ model_provider = "my-provider"
 # 提供商显示名称（可选）
 name = "My Internal LLM"
 
-# API 基础 URL，必须指向 OpenAI 兼容的端点
+# API 基础 URL。OpenAI Responses / Chat 兼容端点通常以 /v1 结尾；
+# Anthropic Messages API 使用 provider 根地址，不要追加 /v1。
 base_url = "https://your-internal-llm.example.com/v1"
 
 # API Key 来源：通过环境变量获取（推荐）
@@ -74,15 +75,17 @@ env_key_instructions = "请设置 MY_LLM_API_KEY 环境变量为你的 API Key"
 # ----------------------------------------------------------
 # "responses"（默认）— 使用 OpenAI Responses API（/v1/responses）
 # "chat"             — 使用 Chat Completions API（/v1/chat/completions）
+# "anthropic"        — 使用 Anthropic Messages API（/v1/messages）
 #
 # 大多数第三方兼容端点（如 vLLM、Ollama、OneAPI、LiteLLM 等）
 # 只支持 Chat Completions API，请设置为 "chat"。
+# Anthropic 或 Anthropic 兼容网关请设置为 "anthropic"。
 wire_api = "chat"
 
 # ----------------------------------------------------------
 # 流式模式：chat_stream
 # ----------------------------------------------------------
-# 仅在 wire_api = "chat" 时生效。
+# 在 wire_api = "chat" 或 "anthropic" 时生效。
 # false（默认）— 非流式请求，等待完整响应后一次性返回
 # true         — 使用 SSE 流式传输，逐 token 实时输出
 #
@@ -195,14 +198,46 @@ env_key = "MY_LLM_API_KEY"
 wire_api = "responses"  # 使用 Responses API
 ```
 
-#### 场景 4：本地 Ollama
+#### 场景 4：Anthropic Messages API
+
+适用于 Anthropic 官方 API 或兼容 Anthropic Messages API (`/v1/messages`) 的内部网关。认证仍可使用 `env_key`；客户端会把 `Authorization: Bearer <token>` 自动改写为 Anthropic 需要的 `x-api-key: <token>`，并补充 `anthropic-version` 请求头。
+
+```toml
+model_provider = "anthropic"
+model = "claude-sonnet-4-5"
+
+[model_providers.anthropic]
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "anthropic"
+chat_stream = true  # 可选：Anthropic SSE 流式输出
+```
+
+#### 场景 5：Anthropic 兼容内部网关
+
+```toml
+model_provider = "company-claude"
+model = "claude-sonnet-4-5"
+
+[model_providers.company-claude]
+name = "Company Claude Gateway"
+base_url = "https://your-internal-anthropic-gateway.example.com"
+env_key = "COMPANY_CLAUDE_API_KEY"
+wire_api = "anthropic"
+chat_stream = true
+# 可选：如果网关要求额外请求头
+# http_headers = { "X-Project" = "codex" }
+```
+
+#### 场景 6：本地 Ollama
 
 ```toml
 model_provider = "ollama"
 model = "qwen2.5-coder:32b"
 ```
 
-#### 场景 5：本地 LM Studio
+#### 场景 7：本地 LM Studio
 
 ```toml
 model_provider = "lmstudio"
@@ -211,17 +246,25 @@ model = "your-downloaded-model"
 
 ### 环境变量方式
 
-你也可以通过环境变量快速配置，无需修改配置文件：
+API Key 推荐通过环境变量提供；provider 本身仍建议写在 `~/.codex/config.toml`，或用一次性的 `-c` 覆盖传入：
 
 ```shell
-# 设置 API 基础 URL
-export CODEX_MODEL_PROVIDER_BASE_URL="https://your-internal-llm.example.com/v1"
-
-# 设置 API Key（如果 provider 配置了 env_key）
+# 方式 A：config.toml 中已经配置 env_key = "MY_LLM_API_KEY"
 export MY_LLM_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-
-# 运行
 codex
+
+# 方式 B：不改配置文件，临时指定 provider
+export MY_LLM_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+codex \
+  -c model_provider="my-provider" \
+  -c 'model_providers.my-provider={ name = "My Internal LLM", base_url = "https://your-internal-llm.example.com/v1", env_key = "MY_LLM_API_KEY", wire_api = "chat", chat_stream = true }'
+```
+
+本地 OSS provider 的地址可用 `CODEX_OSS_BASE_URL` 覆盖，例如：
+
+```shell
+export CODEX_OSS_BASE_URL="http://localhost:11434/v1"
+codex --local-provider ollama --model qwen2.5-coder:32b
 ```
 
 ### 配置字段速查表
@@ -230,10 +273,10 @@ codex
 |------|------|--------|------|
 | `model_provider` | string | — | 选择使用的提供商 ID |
 | `model` | string | — | 模型名称 |
-| `base_url` | string | — | API 基础 URL（必须） |
+| `base_url` | string | — | API 基础 URL；Responses/Chat 通常填到 `/v1`，Anthropic 填 provider 根地址 |
 | `env_key` | string | — | 存储 API Key 的环境变量名 |
-| `wire_api` | string | `"responses"` | 协议：`"responses"` 或 `"chat"` |
-| `chat_stream` | bool | `false` | 是否启用 SSE 流式（仅 `chat` 协议有效） |
+| `wire_api` | string | `"responses"` | 协议：`"responses"`、`"chat"` 或 `"anthropic"` |
+| `chat_stream` | bool | `false` | 是否启用 SSE 流式（`chat` / `anthropic` 协议有效） |
 | `request_max_retries` | int | `4` | HTTP 请求最大重试次数 |
 | `stream_max_retries` | int | `5` | 流式重连最大次数 |
 | `stream_idle_timeout_ms` | int | `300000` | 流式空闲超时（毫秒） |
@@ -244,12 +287,38 @@ codex
 
 ---
 
+## Anthropic 支持说明
+
+近期提交新增了 Anthropic Messages API 适配，可通过 `wire_api = "anthropic"` 使用。注意：选择公网 Anthropic 官方 API 会把模型请求发送给 Anthropic；隐私敏感场景应使用可信内部 Anthropic 兼容网关。
+
+- `base_url` 填 provider 根地址（例如 `https://api.anthropic.com`），客户端请求路径为 `/v1/messages`，同时支持非流式和 SSE 流式响应。
+- 自动处理 Anthropic 认证头：把现有 bearer token 改写为 `x-api-key`，并补充 `anthropic-version: 2023-06-01`。
+- 默认补充 `anthropic-beta: prompt-caching-2024-07-31`，便于直连 Anthropic、Bedrock 或兼容网关时稳定触发 prompt caching。
+- Prompt caching 会在系统提示、工具定义和最近用户消息上放置缓存断点，控制在 Anthropic 限制的 4 个 breakpoint 内。
+- 支持工具调用、工具结果、reasoning/thinking 内容，以及用户消息/工具输出中的图片内容转换。
+- Anthropic 返回的 response id 可为空，客户端会兼容此类网关响应。
+
+### Anthropic 请求调试 Dump
+
+排查 prompt cache 命中率或网关兼容问题时，可设置环境变量导出实际发送给 Anthropic 的 JSON 请求体：
+
+```shell
+export CODEX_DEBUG_ANTHROPIC_DUMP_DIR=/tmp/codex-anthropic-dumps
+codex
+```
+
+每次请求会写入类似 `anthropic-stream-<unix_nanos>.json` 或 `anthropic-nonstream-<unix_nanos>.json` 的文件，可对比连续 turn 的前缀是否发生漂移。注意 dump 中可能包含提示词、代码片段、图片 base64 和工具参数，请只写入受信任目录并按敏感数据处理。
+
+---
+
 ## 变更记录
 
 基于官方仓库的修改提交（作者：kingingwang）：
 
 - 禁用内部部署的外部服务
 - Chat Completions API 类型及 SSE 流式传输支持
+- Anthropic Messages API 客户端、SSE/非流式支持、prompt caching、请求 dump 调试
+- 工具输出拆分与图片内容传递支持
 - /model 命令及 end_turn 字段
 - User-Agent 伪装及外部 URL 清除
 
@@ -257,6 +326,6 @@ codex
 
 ## 官方文档
 
-完整的 Codex CLI 使用文档请参考官方仓库：[https://github.com/openai/codex](https://github.com/openai/codex)
+本 fork 已禁用或修改部分官方云端能力，配置行为以本文档和本仓库代码为准。其他通用 Codex CLI 使用方式可参考官方仓库：[https://github.com/openai/codex](https://github.com/openai/codex)
 
 ---
