@@ -115,6 +115,27 @@ pub async fn process_chat_completions_sse(
 
         // Handle the [DONE] marker
         if data == "[DONE]" {
+            // Emit OutputItemDone for the assistant text message if we added one
+            // but haven't yet closed it (e.g. the stream ended without a
+            // finish_reason chunk). This must happen BEFORE tool call events so
+            // the TUI can finalize the stream_controller while it is still
+            // active, preventing duplicate rendering of the text content.
+            if text_item_added && !text_item_done {
+                let done_item = ResponseItem::Message {
+                    id: None,
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: accumulated_text.clone(),
+                    }],
+                    phase: None,
+                };
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::OutputItemDone(done_item)))
+                    .await;
+                // No need to update `text_item_done`: the [DONE] handler
+                // returns from this function once it finishes flushing.
+            }
+
             // Emit OutputItemDone for reasoning if we started one.
             if reasoning_item_added {
                 let reasoning_done = ResponseItem::Reasoning {
@@ -173,23 +194,6 @@ pub async fn process_chat_completions_sse(
                     }
                     output_emitted = true;
                 }
-            }
-
-            // Emit OutputItemDone for the assistant text message if we added it
-            // but haven't yet closed it (e.g. the stream ended without a
-            // finish_reason chunk).
-            if text_item_added && !text_item_done {
-                let done_item = ResponseItem::Message {
-                    id: None,
-                    role: "assistant".to_string(),
-                    content: vec![ContentItem::OutputText {
-                        text: accumulated_text.clone(),
-                    }],
-                    phase: None,
-                };
-                let _ = tx_event
-                    .send(Ok(ResponseEvent::OutputItemDone(done_item)))
-                    .await;
             }
 
             // Check if stream had no meaningful output - treat as retryable error.
@@ -682,6 +686,66 @@ mod tests {
         ));
 
         // 7. Completed
+        assert!(matches!(&events[6], Ok(ResponseEvent::Completed { .. })));
+    }
+    #[tokio::test]
+    async fn text_then_tool_calls_done_only_emits_text_done_before_tools() {
+        // Regression test: some providers terminate a streaming response with
+        // [DONE] without first emitting a chunk that carries `finish_reason`
+        // (or send finish_reason in a chunk that lacks any tool_calls, leaving
+        // accumulated tool calls to be flushed by the [DONE] handler).
+        // In that case the [DONE] branch must still emit OutputItemDone for
+        // the assistant text BEFORE flushing tool calls; otherwise the TUI
+        // observes the assistant text being finalized AFTER a tool call has
+        // already consumed the stream_controller, which renders the assistant
+        // message a second time.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me check that.\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        // No finish_reason chunk; stream terminates directly with [DONE].
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        // Expected sequence:
+        // 1. OutputItemAdded(Message)
+        // 2. OutputTextDelta("Let me check that.")
+        // 3. OutputItemDone(Message)             <- text finalized BEFORE tool calls
+        // 4. OutputItemAdded(FunctionCall)
+        // 5. ToolCallInputDelta
+        // 6. OutputItemDone(FunctionCall)
+        // 7. Completed
+        assert_eq!(events.len(), 7);
+
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputTextDelta(s)) if s == "Let me check that."
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+        assert!(matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
+        assert!(matches!(
+            &events[4],
+            Ok(ResponseEvent::ToolCallInputDelta { delta, .. })
+            if delta == "{\"cmd\":\"pwd\"}"
+        ));
+        assert!(matches!(
+            &events[5],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
         assert!(matches!(&events[6], Ok(ResponseEvent::Completed { .. })));
     }
 }
