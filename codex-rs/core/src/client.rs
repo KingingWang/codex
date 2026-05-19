@@ -1661,7 +1661,7 @@ impl ModelClientSession {
         session_telemetry: &SessionTelemetry,
         effort: Option<ReasoningEffortConfig>,
         _summary: ReasoningSummaryConfig,
-        _service_tier: Option<ServiceTier>,
+        _service_tier: Option<String>,
         _turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
