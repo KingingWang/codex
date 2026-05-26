@@ -275,7 +275,22 @@ fn build_messages(items: &[ResponseItem]) -> CodexResult<Vec<AnthropicMessage>> 
 
     for item in items {
         match item {
-            ResponseItem::Reasoning { content, .. } => {
+            ResponseItem::Reasoning {
+                content,
+                encrypted_content,
+                ..
+            } => {
+                // Vertex AI (and Anthropic in extended-thinking mode) requires
+                // a non-empty `signature` whenever a `thinking` block is sent
+                // back to the API. The signature lives on `encrypted_content`
+                // because the canonical ResponseItem has no dedicated field.
+                // If we don't have one (older history, non-thinking response,
+                // or a provider that doesn't return signatures), drop the
+                // block entirely instead of sending an invalid one — replaying
+                // an unsigned thinking block fails validation upstream.
+                let Some(signature) = encrypted_content.clone() else {
+                    continue;
+                };
                 if let Some(content) = content {
                     for entry in content {
                         let text = match entry {
@@ -287,7 +302,7 @@ fn build_messages(items: &[ResponseItem]) -> CodexResult<Vec<AnthropicMessage>> 
                         }
                         pending_thinking.push(AnthropicContentBlock::Thinking {
                             thinking: text.clone(),
-                            signature: None,
+                            signature: Some(signature.clone()),
                         });
                     }
                 }
