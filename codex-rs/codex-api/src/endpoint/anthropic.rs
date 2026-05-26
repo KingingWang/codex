@@ -43,22 +43,21 @@ use tracing::instrument;
 const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
 const ANTHROPIC_VERSION_VALUE: &str = "2023-06-01";
 const ANTHROPIC_API_KEY_HEADER: &str = "x-api-key";
-const ANTHROPIC_BETA_HEADER: &str = "anthropic-beta";
-const ANTHROPIC_BETA_PROMPT_CACHING: &str = "prompt-caching-2024-07-31";
 
 /// Apply Anthropic-specific header rewrites to the outgoing request.
 ///
 /// - Move `Authorization: Bearer <token>` into `x-api-key: <token>` (only
 ///   when the caller has not already supplied an `x-api-key`).
 /// - Inject `anthropic-version: 2023-06-01` if missing.
-/// - Inject `anthropic-beta: prompt-caching-2024-07-31` if no beta header
-///   is already set. Direct Anthropic has prompt caching GA, but Bedrock
-///   and other compatible proxies still gate cache routing on this beta
-///   flag, so sending it makes cache hits deterministic across gateways.
+///
+/// Note: we do NOT auto-inject any `anthropic-beta` header. Prompt caching is
+/// now GA on the direct Anthropic API and on Vertex AI, and Vertex actively
+/// rejects the legacy `prompt-caching-2024-07-31` value. Gateways that still
+/// require a beta flag (e.g. Bedrock) should set it explicitly via the
+/// provider's `headers` config so other backends are not broken.
 fn rewrite_anthropic_headers(req: &mut Request) {
     let api_key_header = HeaderName::from_static(ANTHROPIC_API_KEY_HEADER);
     let version_header = HeaderName::from_static(ANTHROPIC_VERSION_HEADER);
-    let beta_header = HeaderName::from_static(ANTHROPIC_BETA_HEADER);
 
     if !req.headers.contains_key(&api_key_header)
         && let Some(auth_value) = req.headers.remove(AUTHORIZATION)
@@ -76,13 +75,6 @@ fn rewrite_anthropic_headers(req: &mut Request) {
         req.headers.insert(
             version_header,
             HeaderValue::from_static(ANTHROPIC_VERSION_VALUE),
-        );
-    }
-
-    if !req.headers.contains_key(&beta_header) {
-        req.headers.insert(
-            beta_header,
-            HeaderValue::from_static(ANTHROPIC_BETA_PROMPT_CACHING),
         );
     }
 }
@@ -288,7 +280,9 @@ async fn convert_response_to_events(
 
     for (idx, block) in response.content.iter().enumerate() {
         match block {
-            AnthropicContentBlock::Thinking { thinking, .. } => {
+            AnthropicContentBlock::Thinking {
+                thinking, signature, ..
+            } => {
                 if thinking.is_empty() {
                     continue;
                 }
@@ -324,7 +318,12 @@ async fn convert_response_to_events(
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: thinking.clone(),
                     }]),
-                    encrypted_content: None,
+                    // Persist Anthropic's signature so build_messages can echo
+                    // it on the next turn. Vertex AI rejects unsigned thinking
+                    // blocks when replayed, so dropping the signature here
+                    // would force build_messages to elide thinking content
+                    // from history.
+                    encrypted_content: signature.clone(),
                 };
                 if tx
                     .send(Ok(ResponseEvent::OutputItemDone(done)))
@@ -678,19 +677,19 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_headers_injects_prompt_caching_beta() {
+    fn rewrite_headers_does_not_inject_beta() {
         let provider = test_provider();
         let mut req = provider.build_request(Method::POST, "v1/messages");
 
         rewrite_anthropic_headers(&mut req);
 
-        assert_eq!(
-            req.headers
-                .get(HeaderName::from_static(ANTHROPIC_BETA_HEADER))
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            ANTHROPIC_BETA_PROMPT_CACHING
+        // We must NOT inject any anthropic-beta header automatically — Vertex
+        // rejects the legacy prompt-caching value, and prompt caching is GA
+        // anyway. Gateways that need a beta flag should set it via provider
+        // headers.
+        assert!(
+            !req.headers
+                .contains_key(HeaderName::from_static("anthropic-beta"))
         );
     }
 
@@ -699,7 +698,7 @@ mod tests {
         let provider = test_provider();
         let mut req = provider.build_request(Method::POST, "v1/messages");
         req.headers.insert(
-            HeaderName::from_static(ANTHROPIC_BETA_HEADER),
+            HeaderName::from_static("anthropic-beta"),
             HeaderValue::from_static("computer-use-2024-10-22"),
         );
 
@@ -707,7 +706,7 @@ mod tests {
 
         assert_eq!(
             req.headers
-                .get(HeaderName::from_static(ANTHROPIC_BETA_HEADER))
+                .get(HeaderName::from_static("anthropic-beta"))
                 .unwrap()
                 .to_str()
                 .unwrap(),
