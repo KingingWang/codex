@@ -66,6 +66,12 @@ enum BlockKind {
     Tool(ToolBlockState),
     Thinking {
         accumulated: String,
+        /// Captured from Anthropic's `signature_delta` events. Required by
+        /// Vertex AI (and the direct Anthropic API in some modes) when the
+        /// thinking block is replayed in a follow-up turn. We persist it via
+        /// `ResponseItem::Reasoning::encrypted_content` so build_messages can
+        /// reattach it on the next request.
+        signature: Option<String>,
     },
     /// Unknown block type — we still emit lifecycle events but do not generate
     /// deltas for it.
@@ -236,7 +242,9 @@ pub async fn process_anthropic_sse(
                             arguments: String::new(),
                         })
                     }
-                    AnthropicContentBlock::Thinking { thinking, .. } => {
+                    AnthropicContentBlock::Thinking {
+                        thinking, signature, ..
+                    } => {
                         let item = ResponseItem::Reasoning {
                             id: format!("reasoning_{index}"),
                             summary: Vec::new(),
@@ -255,6 +263,7 @@ pub async fn process_anthropic_sse(
                         output_emitted = true;
                         BlockKind::Thinking {
                             accumulated: thinking.clone(),
+                            signature: signature.clone(),
                         }
                     }
                     _ => BlockKind::Other,
@@ -295,7 +304,7 @@ pub async fn process_anthropic_sse(
                         }
                     }
                     (
-                        BlockKind::Thinking { accumulated },
+                        BlockKind::Thinking { accumulated, .. },
                         AnthropicStreamDelta::ThinkingDelta { thinking },
                     ) => {
                         accumulated.push_str(&thinking);
@@ -310,10 +319,18 @@ pub async fn process_anthropic_sse(
                             return;
                         }
                     }
-                    (BlockKind::Thinking { .. }, AnthropicStreamDelta::SignatureDelta { .. }) => {
-                        // Anthropic signature for thinking blocks — we drop it
-                        // because the canonical ResponseItem doesn't carry the
-                        // signature out-of-band.
+                    (
+                        BlockKind::Thinking { signature, .. },
+                        AnthropicStreamDelta::SignatureDelta { signature: sig },
+                    ) => {
+                        // Anthropic delivers the thinking-block signature as a
+                        // delta. Vertex AI (and Anthropic in extended-thinking
+                        // mode) require this value to be echoed back when the
+                        // thinking block is replayed; persist it so we can
+                        // round-trip it via encrypted_content.
+                        if let Some(s) = sig {
+                            *signature = Some(s);
+                        }
                     }
                     _ => {
                         // Mismatched delta variant for the active block — ignore.
@@ -338,13 +355,16 @@ pub async fn process_anthropic_sse(
                         arguments: state.arguments,
                         call_id: state.id,
                     }),
-                    BlockKind::Thinking { accumulated } => Some(ResponseItem::Reasoning {
+                    BlockKind::Thinking {
+                        accumulated,
+                        signature,
+                    } => Some(ResponseItem::Reasoning {
                         id: format!("reasoning_{index}"),
                         summary: Vec::new(),
                         content: Some(vec![ReasoningItemContent::ReasoningText {
                             text: accumulated,
                         }]),
-                        encrypted_content: None,
+                        encrypted_content: signature,
                     }),
                     BlockKind::Other => None,
                 };
@@ -389,13 +409,16 @@ pub async fn process_anthropic_sse(
                                 arguments: state.arguments,
                                 call_id: state.id,
                             }),
-                            BlockKind::Thinking { accumulated } => Some(ResponseItem::Reasoning {
+                            BlockKind::Thinking {
+                                accumulated,
+                                signature,
+                            } => Some(ResponseItem::Reasoning {
                                 id: format!("reasoning_{index}"),
                                 summary: Vec::new(),
                                 content: Some(vec![ReasoningItemContent::ReasoningText {
                                     text: accumulated,
                                 }]),
-                                encrypted_content: None,
+                                encrypted_content: signature,
                             }),
                             BlockKind::Other => None,
                         };
