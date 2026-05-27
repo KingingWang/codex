@@ -286,6 +286,7 @@ pub async fn process_chat_completions_sse(
 }
 
 /// Processes a single choice from the chat completions stream.
+#[allow(clippy::too_many_arguments)]
 async fn process_chat_choice(
     choice: &ChatCompletionChoice,
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,

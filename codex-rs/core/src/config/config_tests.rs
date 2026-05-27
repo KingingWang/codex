@@ -7980,9 +7980,6 @@ async fn legacy_profile_selection_is_rejected() -> std::io::Result<()> {
     );
     Ok(())
 }
-    );
-    Ok(())
-}
 
 #[tokio::test]
 async fn metrics_exporter_defaults_to_none_when_missing() -> std::io::Result<()> {
