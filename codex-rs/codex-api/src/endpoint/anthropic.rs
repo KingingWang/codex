@@ -281,7 +281,9 @@ async fn convert_response_to_events(
     for (idx, block) in response.content.iter().enumerate() {
         match block {
             AnthropicContentBlock::Thinking {
-                thinking, signature, ..
+                thinking,
+                signature,
+                ..
             } => {
                 if thinking.is_empty() {
                     continue;

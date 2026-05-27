@@ -1035,11 +1035,18 @@ async fn append_dynamic_context(
 
     let script_path_trimmed = script_path.trim();
 
+    #[allow(deprecated)]
+    let cwd = turn_context
+        .environments
+        .primary()
+        .map(|env| env.cwd.clone())
+        .unwrap_or_else(|| turn_context.cwd.clone());
+
     // Resolve and validate the script path.
     let resolved_path = if script_path_trimmed.starts_with('/') {
         std::path::PathBuf::from(script_path_trimmed)
     } else {
-        turn_context.cwd.join(script_path_trimmed).into()
+        cwd.join(script_path_trimmed).into()
     };
 
     if !resolved_path.is_file() {
@@ -1055,7 +1062,7 @@ async fn append_dynamic_context(
     trace!(
         script = %script_path_trimmed,
         resolved = %resolved_path.display(),
-        cwd = %turn_context.cwd.display(),
+        cwd = %cwd.display(),
         timeout_secs = timeout.as_secs(),
         "executing dynamic_context_script"
     );
@@ -1063,7 +1070,7 @@ async fn append_dynamic_context(
     let output = match tokio::time::timeout(
         timeout,
         tokio::process::Command::new(&resolved_path)
-            .current_dir(&turn_context.cwd)
+            .current_dir(&cwd)
             .output(),
     )
     .await
