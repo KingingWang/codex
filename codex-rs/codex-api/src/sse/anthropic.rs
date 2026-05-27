@@ -243,7 +243,9 @@ pub async fn process_anthropic_sse(
                         })
                     }
                     AnthropicContentBlock::Thinking {
-                        thinking, signature, ..
+                        thinking,
+                        signature,
+                        ..
                     } => {
                         let item = ResponseItem::Reasoning {
                             id: format!("reasoning_{index}"),
@@ -321,16 +323,14 @@ pub async fn process_anthropic_sse(
                     }
                     (
                         BlockKind::Thinking { signature, .. },
-                        AnthropicStreamDelta::SignatureDelta { signature: sig },
+                        AnthropicStreamDelta::SignatureDelta { signature: Some(s) },
                     ) => {
                         // Anthropic delivers the thinking-block signature as a
                         // delta. Vertex AI (and Anthropic in extended-thinking
                         // mode) require this value to be echoed back when the
                         // thinking block is replayed; persist it so we can
                         // round-trip it via encrypted_content.
-                        if let Some(s) = sig {
-                            *signature = Some(s);
-                        }
+                        *signature = Some(s);
                     }
                     _ => {
                         // Mismatched delta variant for the active block — ignore.

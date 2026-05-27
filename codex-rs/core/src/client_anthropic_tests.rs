@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default, clippy::needless_update)]
+
 use super::*;
 use codex_api::AnthropicContentBlock;
 use codex_api::AnthropicImageSource;

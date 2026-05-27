@@ -501,6 +501,12 @@ fn function_output_to_tool_result_blocks(
                     FunctionCallOutputContentItem::InputImage { image_url, .. } => {
                         image_to_block(image_url)
                     }
+                    FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
+                        AnthropicContentBlock::Text {
+                            text: encrypted_content.clone(),
+                            cache_control: None,
+                        }
+                    }
                 })
                 .collect::<Vec<_>>();
             AnthropicToolResultContent::Blocks(blocks)

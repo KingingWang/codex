@@ -1733,7 +1733,7 @@ impl ModelClientSession {
         session_telemetry: &SessionTelemetry,
         effort: Option<ReasoningEffortConfig>,
         _summary: ReasoningSummaryConfig,
-        _service_tier: Option<ServiceTier>,
+        _service_tier: Option<String>,
         _turn_metadata_header: Option<&str>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
@@ -2044,8 +2044,8 @@ impl ModelClientSession {
                     // to the *next* relevant item (Message with role=assistant or
                     // FunctionCall), not a previous assistant message from an
                     // earlier turn.
-                    for next_idx in (idx + 1)..input.len() {
-                        match &input[next_idx] {
+                    for (next_idx, next_item) in input.iter().enumerate().skip(idx + 1) {
+                        match next_item {
                             ResponseItem::Message { role, .. } if role == "assistant" => {
                                 reasoning_by_index
                                     .entry(next_idx)
@@ -2447,8 +2447,6 @@ fn content_items_to_chat_content(
                 let mut image_url_obj = serde_json::json!({"url": image_url});
                 if let Some(d) = detail {
                     let detail_str = match d {
-                        codex_protocol::models::ImageDetail::Auto => "auto",
-                        codex_protocol::models::ImageDetail::Low => "low",
                         codex_protocol::models::ImageDetail::High => "high",
                         codex_protocol::models::ImageDetail::Original => "original",
                     };
@@ -2528,8 +2526,6 @@ fn split_tool_output_into_tool_and_user_content(
                         let mut image_url_obj = serde_json::json!({"url": image_url});
                         if let Some(d) = detail {
                             let detail_str = match d {
-                                ImageDetail::Auto => "auto",
-                                ImageDetail::Low => "low",
                                 ImageDetail::High => "high",
                                 ImageDetail::Original => "original",
                             };
@@ -2540,6 +2536,9 @@ fn split_tool_output_into_tool_and_user_content(
                             "type": "image_url",
                             "image_url": image_url_obj,
                         }));
+                    }
+                    FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
+                        text_parts.push(encrypted_content.clone());
                     }
                 }
             }
@@ -2623,6 +2622,7 @@ mod chat_completions_request_tests {
             /*enable_request_compression*/ false,
             /*include_timing_metrics*/ false,
             /*beta_features_header*/ None,
+            /*attestation_provider*/ None,
         )
     }
 
@@ -3268,7 +3268,7 @@ mod chat_completions_request_tests {
             role: "user".to_string(),
             content: vec![ContentItem::InputImage {
                 image_url: "data:image/png;base64,xyz".to_string(),
-                detail: Some(ImageDetail::Auto),
+                detail: Some(ImageDetail::High),
             }],
             phase: None,
         }]);
@@ -3327,7 +3327,7 @@ mod chat_completions_request_tests {
                 },
                 ContentItem::InputImage {
                     image_url: "data:image/jpeg;base64,bbb".to_string(),
-                    detail: Some(ImageDetail::Low),
+                    detail: Some(ImageDetail::Original),
                 },
             ],
             phase: None,

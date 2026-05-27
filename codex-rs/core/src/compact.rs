@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -240,9 +239,6 @@ async fn run_compact_task_inner_impl(
         let tool_router = built_tools(
             sess.as_ref(),
             turn_context.as_ref(),
-            &turn_input,
-            &HashSet::new(),
-            /*skills_outcome*/ None,
             &CancellationToken::new(),
         )
         .await?;
