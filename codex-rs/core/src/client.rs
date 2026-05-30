@@ -2418,6 +2418,8 @@ fn content_items_to_chat_content(
                 let mut image_url_obj = serde_json::json!({"url": image_url});
                 if let Some(d) = detail {
                     let detail_str = match d {
+                        codex_protocol::models::ImageDetail::Auto => "auto",
+                        codex_protocol::models::ImageDetail::Low => "low",
                         codex_protocol::models::ImageDetail::High => "high",
                         codex_protocol::models::ImageDetail::Original => "original",
                     };
@@ -2497,6 +2499,8 @@ fn split_tool_output_into_tool_and_user_content(
                         let mut image_url_obj = serde_json::json!({"url": image_url});
                         if let Some(d) = detail {
                             let detail_str = match d {
+                                ImageDetail::Auto => "auto",
+                                ImageDetail::Low => "low",
                                 ImageDetail::High => "high",
                                 ImageDetail::Original => "original",
                             };
