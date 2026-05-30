@@ -4383,6 +4383,13 @@
             "chat"
           ],
           "type": "string"
+        },
+        {
+          "description": "The Messages API exposed by Anthropic at `/v1/messages`.",
+          "enum": [
+            "anthropic"
+          ],
+          "type": "string"
         }
       ]
     },
