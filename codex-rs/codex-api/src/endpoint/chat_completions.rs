@@ -450,7 +450,7 @@ mod tests {
         ChatCompletionsResponse {
             id: "resp-1".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: Some(1234567890),
             model: Some("test-model".to_string()),
             choices: vec![],
             usage: None,
@@ -461,7 +461,7 @@ mod tests {
         ChatCompletionsResponse {
             id: "resp-2".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: Some(1234567890),
             model: Some("test-model".to_string()),
             choices: vec![ChatCompletionResponseChoice {
                 index: 0,
@@ -481,7 +481,7 @@ mod tests {
         ChatCompletionsResponse {
             id: "resp-3".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: Some(1234567890),
             model: Some("test-model".to_string()),
             choices: vec![ChatCompletionResponseChoice {
                 index: 0,
@@ -501,7 +501,7 @@ mod tests {
         ChatCompletionsResponse {
             id: "resp-4".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: Some(1234567890),
             model: Some("test-model".to_string()),
             choices: vec![ChatCompletionResponseChoice {
                 index: 0,
