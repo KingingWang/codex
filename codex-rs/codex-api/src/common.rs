@@ -458,7 +458,8 @@ pub struct ChatCompletionUsage {
 pub struct ChatCompletionsResponse {
     pub id: String,
     pub object: String,
-    pub created: i64,
+    #[serde(default)]
+    pub created: Option<i64>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
