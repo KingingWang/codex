@@ -11,12 +11,10 @@ use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_client::CodexHttpClient;
 
 use super::manager::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
-use super::manager::REVOKE_TOKEN_URL;
 use super::manager::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
 use super::manager::oauth_client_id;
 use super::storage::AuthDotJson;
 use super::util::try_parse_error_message;
-use crate::default_client::create_client;
 use crate::token_data::TokenData;
 
 const REVOKE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);

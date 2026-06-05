@@ -9,7 +9,6 @@ use codex_client::CodexHttpClient;
 pub use codex_client::CodexRequestBuilder;
 use codex_client::build_reqwest_client_with_custom_ca;
 use codex_client::with_chatgpt_cloudflare_cookie_store;
-use codex_terminal_detection::user_agent;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
 use reqwest::header::USER_AGENT;
