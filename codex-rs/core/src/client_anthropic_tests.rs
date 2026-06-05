@@ -166,22 +166,23 @@ fn system_block_is_cached() {
 }
 
 #[test]
-fn last_tool_carries_cache_marker_others_dont() {
+fn no_tool_carries_cache_marker() {
     let mut prompt = Prompt::default();
     prompt.tools = vec![shell_tool(), read_tool()];
     let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
     assert_eq!(req.tools.len(), 2);
     assert_eq!(req.tools[0].name, "read_file");
     assert_eq!(req.tools[1].name, "shell");
-    // Crush-aligned: only the last tool (after sorting) carries cache_control.
-    // This gives the gateway an explicit "cache the tools section" hint.
+    // Matches Claude Code: no tool carries cache_control. The system-block
+    // marker alone is sufficient for Anthropic to auto-discover the tools
+    // prefix.
     assert!(
         req.tools[0].cache_control.is_none(),
-        "non-last tool must not carry cache_control"
+        "tool must not carry cache_control"
     );
     assert!(
-        req.tools[1].cache_control.is_some(),
-        "last tool must carry cache_control"
+        req.tools[1].cache_control.is_none(),
+        "tool must not carry cache_control"
     );
 }
 
