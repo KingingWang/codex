@@ -2562,6 +2562,7 @@ mod chat_completions_request_tests {
             /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
             provider,
             SessionSource::Cli,
+            /*parent_thread_id*/ None,
             /*model_verbosity*/ None,
             /*enable_request_compression*/ false,
             /*include_timing_metrics*/ false,
