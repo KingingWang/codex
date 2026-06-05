@@ -169,6 +169,10 @@ pub enum AnthropicThinking {
         budget_tokens: Option<u32>,
     },
     Disabled,
+    /// Adaptive thinking lets the model decide the reasoning budget per turn.
+    /// This matches the Claude Code reference client and improves cache-hit
+    /// rates because the thinking section does not force a fixed-size prefix.
+    Adaptive,
 }
 
 /// Outbound request body for `POST /v1/messages`.

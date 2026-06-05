@@ -2,16 +2,12 @@
 //! Messages API, with cache-control markers placed for maximum prompt-caching
 //! hit-rate on subsequent turns.
 //!
-//! Cache strategy (mirrors the Crush reference client — its
-//! `internal/agent/agent.go:156-252` placement is known-working on
-//! Bedrock-backed gateways):
+//! Cache strategy (matches the Claude Code reference client exactly):
 //! - The **last system block** carries `cache_control: ephemeral`.
-//! - The **last tool definition** (after stable sort by name) carries
-//!   `cache_control: ephemeral`. This gives an explicit "cache the tools
-//!   section" hint that Bedrock-backed gateways require to write a tools
-//!   cache at all — dropping it wipes out caching entirely on Bedrock,
-//!   even though Anthropic Direct would auto-discover the longest matching
-//!   prefix without it.
+//! - **Tool definitions carry NO `cache_control` markers.** The system-block
+//!   marker alone is sufficient for Anthropic to auto-discover the tools
+//!   prefix. Adding a tool-level marker shifts the hashed bytes on every
+//!   turn, fighting the gateway's auto-discovery and reducing hit rate.
 //! - **The last `user`-role message carries `cache_control` on its
 //!   final block.** Single message-level marker, matching the Anthropic
 //!   prompt-caching reference's multi-turn example. The gateway
@@ -20,15 +16,11 @@
 //!
 //!   Note: Anthropic's wire format buckets `tool_result` deliveries as
 //!   user-role messages, so a trailing tool-result naturally falls into
-//!   this slot too. Empirically (see commit history), trying to place a
-//!   *second* marker on the second-to-last user message broke caching
-//!   because the marker shift between turns moved the cache_control
-//!   bytes the gateway was hashing the prefix with — reads stuck at
-//!   `system + tools` only.
-//! - We use up to 4 of Anthropic's 4 allowed breakpoints (system tail +
-//!   last tool + last two messages). On the very first turn (single
-//!   message) the two trailing markers collapse onto one position and we
-//!   place 3 markers total.
+//!   this slot too.
+//! - We use 2 of Anthropic's 4 allowed breakpoints (system tail +
+//!   last user message).
+//! - **Adaptive thinking** is enabled for models that support reasoning,
+//!   matching Claude Code's `thinking: {type: "adaptive"}`.
 //!
 //! Cache-hit invariants we preserve:
 //! - Tool order is canonicalized (sorted by name) so adjacent turns produce a
@@ -56,6 +48,7 @@ use codex_api::AnthropicMessage;
 use codex_api::AnthropicMessageContent;
 use codex_api::AnthropicRequest;
 use codex_api::AnthropicSystemBlock;
+use codex_api::AnthropicThinking;
 use codex_api::AnthropicTool;
 use codex_api::AnthropicToolResultContent;
 use codex_protocol::error::CodexErr;
@@ -73,7 +66,7 @@ use crate::client_common::Prompt;
 /// Anthropic requires this field; codex does not currently surface it through
 /// the Prompt, so we pick a generous default that any modern Claude model can
 /// honor.
-const DEFAULT_MAX_TOKENS: u32 = 65535;
+const DEFAULT_MAX_TOKENS: u32 = 64000;
 
 /// Convert a `Prompt` into an `AnthropicRequest`. Honors the same cache-hit
 /// invariants documented at the module level.
@@ -90,6 +83,15 @@ pub(crate) fn build_anthropic_request(
 
     let (tools, tool_namespace_map) = build_tools(&prompt.tools)?;
 
+    // Match Claude Code: enable adaptive thinking for models that support
+    // reasoning. This produces thinking blocks in the response that get
+    // replayed in subsequent turns, matching the Claude Code cache pattern.
+    let thinking = if model_info.supported_reasoning_levels.is_empty() {
+        None
+    } else {
+        Some(AnthropicThinking::Adaptive)
+    };
+
     Ok(AnthropicRequest {
         model: model_info.slug.clone(),
         messages,
@@ -101,7 +103,7 @@ pub(crate) fn build_anthropic_request(
         stream: false,
         tools,
         tool_choice: None,
-        thinking: None,
+        thinking,
         metadata: None,
         tool_namespace_map,
     })
@@ -234,13 +236,11 @@ fn build_tools(
     // turns and bust the cache.
     anthropic_tools.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // Place a cache_control marker on the last tool. Bedrock-backed gateways
-    // require this explicit marker to write a tools-section cache at all —
-    // dropping it (even if the system-block marker should subsume it on
-    // Anthropic Direct) wipes out caching entirely on Bedrock. Keep it.
-    if let Some(last) = anthropic_tools.last_mut() {
-        last.cache_control = Some(AnthropicCacheControl::ephemeral());
-    }
+    // NOTE: Do NOT place cache_control on tools. Claude Code's reference client
+    // leaves tools without cache_control markers. The system-block marker alone
+    // is sufficient for Anthropic Direct to auto-discover the tools prefix, and
+    // adding a tool-level marker shifts the hashed bytes on every turn, which
+    // fights the gateway's auto-discovery and reduces cache hit rate.
 
     let namespace_map = build_tool_namespace_map(tools);
 
@@ -530,14 +530,9 @@ fn function_output_to_tool_result_blocks(
 /// Anthropic's wire format buckets `tool_result` deliveries as user-role
 /// messages, so a trailing tool-result (mid-tool-loop) lands here too.
 ///
-/// Combined with the system-block marker and the last-tool marker placed
-/// in `build_system` / `build_tools`, the request consumes 3 of
-/// Anthropic's 4 allowed breakpoints. We deliberately leave the 4th open
-/// — the previous "last two messages" strategy used the spare slot, but
-/// empirically it fought the gateway's auto-discovery (each turn the
-/// second-to-last marker landed on a different message offset, shifting
-/// the bytes of every prior marker that the gateway hashed) and produced
-/// reads stuck at `system + tools` only.
+/// Combined with the system-block marker placed in `build_system`, the
+/// request consumes 2 of Anthropic's 4 allowed breakpoints — matching
+/// the Claude Code reference client exactly.
 fn apply_history_cache_marker(messages: &mut [AnthropicMessage]) {
     let Some(idx) = messages.iter().rposition(|m| m.role == "user") else {
         return;
