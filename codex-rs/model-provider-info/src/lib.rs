@@ -247,26 +247,9 @@ impl ModelProviderInfo {
         Ok(headers)
     }
 
-<<<<<<< HEAD
-    pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
-        let default_base_url = if matches!(
-            auth_mode,
-            Some(
-                AuthMode::Chatgpt
-                    | AuthMode::ChatgptAuthTokens
-                    | AuthMode::AgentIdentity
-                    | AuthMode::PersonalAccessToken
-            )
-        ) {
-            CHATGPT_CODEX_BASE_URL
-        } else {
-            "https://api.openai.com/v1"
-        };
-=======
     pub fn to_api_provider(&self, _auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
         // DISABLED: Internal deployment - removed external OpenAI/ChatGPT defaults
         // Users must configure their own model_providers in config.toml
->>>>>>> f0c54b2a19 (feat: add Chat Completions API support with SSE streaming)
         let base_url = self
             .base_url
             .clone()
