@@ -1702,7 +1702,8 @@ impl ModelClientSession {
                 self.client.state.auth_env_telemetry.clone(),
             );
 
-            let request = self.build_chat_completions_request(prompt, model_info, effort)?;
+            let request =
+                self.build_chat_completions_request(prompt, model_info, effort.clone())?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.record_started(&request);
             let chat_stream = self.client.state.provider.info().chat_stream;
@@ -2321,7 +2322,7 @@ impl ModelClientSession {
 
         // Determine reasoning_effort for models that support reasoning
         let reasoning_effort = if model_info.supports_reasoning_summaries {
-            effort.or(model_info.default_reasoning_level)
+            effort.or_else(|| model_info.default_reasoning_level.clone())
         } else {
             None
         };
