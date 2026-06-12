@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  # ── 构建矩阵（同时编译 Ubuntu 22.04 与 latest）─────────
+  # ── 构建矩阵（glibc + musl 静态编译）─────────
   build:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 1200
@@ -24,10 +24,19 @@ jobs:
 
     strategy:
       matrix:
-        os:
-          - ubuntu-22.04
-          - ubuntu-latest
-      fail-fast: false   # 一个 os 失败不影响另一个
+        include:
+          # ── glibc 构建 ──
+          - os: ubuntu-22.04
+            target: ""
+            label: ubuntu22
+          - os: ubuntu-latest
+            target: ""
+            label: ubuntu24
+          # ── musl 静态编译 ──
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            label: musl
+      fail-fast: false   # 一个失败不影响其他
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -37,23 +46,53 @@ jobs:
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
 
-      - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+      # 不指定版本，由 rust-toolchain.toml 控制实际使用的 Rust 版本
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
+      # ── musl 专用步骤 ──
+      - name: Install musl target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install musl build tools
+        if: matrix.target != ''
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy (musl)
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          # aws-lc-sys jitter entropy fails under musl on GitHub runners.
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+
+      # ── 构建 ──
+      - name: Build release binary (glibc)
+        if: matrix.target == ''
         run: cargo build --release -j 1
+
+      - name: Build release binary (musl)
+        if: matrix.target != ''
+        run: cargo build --release --target ${{ matrix.target }} -j 1
 
       # 将二进制重命名为带 OS 标识的名字
       - name: Prepare release artifact
         run: |
           mkdir -p dist
-          BINARY_NAME="codex-linux-x86_64-${{ matrix.os == 'ubuntu-22.04' && 'ubuntu22' || 'ubuntu24' }}"
-          cp target/release/codex "dist/${BINARY_NAME}"
+          if [ -n "${{ matrix.target }}" ]; then
+            BINARY_DIR="target/${{ matrix.target }}/release"
+          else
+            BINARY_DIR="target/release"
+          fi
+          BINARY_NAME="codex-linux-x86_64-${{ matrix.label }}"
+          cp "${BINARY_DIR}/codex" "dist/${BINARY_NAME}"
           echo "binary=${BINARY_NAME}" >> "$GITHUB_ENV"
 
       # 上传 artifact 供后续 Release Job 使用
       - uses: actions/upload-artifact@v4
         with:
-          name: codex-${{ matrix.os }}
+          name: codex-${{ matrix.label }}
           path: codex-rs/dist
 
   # ── 发布（只跑一次，收集所有构建产物）─────────
