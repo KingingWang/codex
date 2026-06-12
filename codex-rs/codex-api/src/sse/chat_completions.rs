@@ -122,7 +122,7 @@ pub async fn process_chat_completions_sse(
             // active, preventing duplicate rendering of the text content.
             if text_item_added && !text_item_done {
                 let done_item = ResponseItem::Message {
-                    id: None,
+                    id: Some("msg_assistant".to_string()),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: accumulated_text.clone(),
@@ -314,7 +314,7 @@ async fn process_chat_choice(
         // processor has an active_item to attach deltas to.
         if !*text_item_added {
             let added_item = ResponseItem::Message {
-                id: None,
+                id: Some("msg_assistant".to_string()),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: String::new(),
@@ -415,7 +415,7 @@ async fn process_chat_choice(
         // stream_controller while it is still active, preventing duplicate rendering.
         if *text_item_added && !*text_item_done {
             let done_item = ResponseItem::Message {
-                id: None,
+                id: Some("msg_assistant".to_string()),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: accumulated_text.clone(),
