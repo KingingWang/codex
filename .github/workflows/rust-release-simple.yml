@@ -47,7 +47,9 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
 
       # 不指定版本，由 rust-toolchain.toml 控制实际使用的 Rust 版本
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
 
       # ── musl 专用步骤（与官方 rust-release.yml 一致）──
       - name: Use hermetic Cargo home (musl)
