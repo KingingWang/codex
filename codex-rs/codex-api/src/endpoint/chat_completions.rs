@@ -333,7 +333,7 @@ async fn convert_response_to_events(
             // item, mirroring the streaming path. The turn processor requires
             // an OutputItemAdded before it can handle OutputTextDelta events.
             let assistant_added = ResponseItem::Message {
-                id: None,
+                id: Some("msg_assistant".to_string()),
                 role: message.role.clone(),
                 content: vec![ContentItem::OutputText {
                     text: String::new(),
@@ -360,7 +360,7 @@ async fn convert_response_to_events(
 
             // Emit OutputItemDone with the full text
             let assistant_done = ResponseItem::Message {
-                id: None,
+                id: Some("msg_assistant".to_string()),
                 role: message.role.clone(),
                 content: vec![ContentItem::OutputText {
                     text: content.clone(),

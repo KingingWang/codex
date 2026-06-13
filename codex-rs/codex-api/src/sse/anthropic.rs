@@ -62,6 +62,7 @@ struct ToolBlockState {
 enum BlockKind {
     Text {
         accumulated: String,
+        block_id: String,
     },
     Tool(ToolBlockState),
     Thinking {
@@ -200,8 +201,9 @@ pub async fn process_anthropic_sse(
             } => {
                 let kind = match &content_block {
                     AnthropicContentBlock::Text { .. } => {
+                        let block_id = format!("msg_{index}");
                         let item = ResponseItem::Message {
-                            id: None,
+                            id: Some(block_id.clone()),
                             role: "assistant".to_string(),
                             content: vec![ContentItem::OutputText {
                                 text: String::new(),
@@ -218,6 +220,7 @@ pub async fn process_anthropic_sse(
                         output_emitted = true;
                         BlockKind::Text {
                             accumulated: String::new(),
+                            block_id,
                         }
                     }
                     AnthropicContentBlock::ToolUse { id, name, .. } => {
@@ -278,7 +281,10 @@ pub async fn process_anthropic_sse(
                     continue;
                 };
                 match (kind, delta) {
-                    (BlockKind::Text { accumulated }, AnthropicStreamDelta::TextDelta { text }) => {
+                    (
+                        BlockKind::Text { accumulated, .. },
+                        AnthropicStreamDelta::TextDelta { text },
+                    ) => {
                         accumulated.push_str(&text);
                         if tx_event
                             .send(Ok(ResponseEvent::OutputTextDelta(text)))
@@ -342,8 +348,11 @@ pub async fn process_anthropic_sse(
                     continue;
                 };
                 let item = match kind {
-                    BlockKind::Text { accumulated } => Some(ResponseItem::Message {
-                        id: None,
+                    BlockKind::Text {
+                        accumulated,
+                        block_id,
+                    } => Some(ResponseItem::Message {
+                        id: Some(block_id),
                         role: "assistant".to_string(),
                         content: vec![ContentItem::OutputText { text: accumulated }],
                         phase: None,
@@ -396,8 +405,11 @@ pub async fn process_anthropic_sse(
                 for index in leftover_indices {
                     if let Some(kind) = blocks.remove(&index) {
                         let item = match kind {
-                            BlockKind::Text { accumulated } => Some(ResponseItem::Message {
-                                id: None,
+                            BlockKind::Text {
+                                accumulated,
+                                block_id,
+                            } => Some(ResponseItem::Message {
+                                id: Some(block_id),
                                 role: "assistant".to_string(),
                                 content: vec![ContentItem::OutputText { text: accumulated }],
                                 phase: None,
