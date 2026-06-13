@@ -1,0 +1,125 @@
+name: rust-release-simple-macos
+
+# 仅编译 macOS 二进制（原生编译，不打包 DMG、不签名/公证）。
+# 风格对齐 rust-release-simple.yml，但加上 macOS 必需的 v8 预编译库处理。
+#
+# 防内存 / 防超时的核心思路：
+#   1. 用官方 setup-rusty-v8 下载预编译静态库，跳过 V8 源码编译
+#      （V8 从源码编会爆内存 + 超过 6 小时，这是唯一真正的风险点）。
+#   2. 两个架构各自走【原生】runner 编译，不做交叉编译
+#      （交叉编 V8 的 target 容易不匹配，且更慢更吃内存）。
+#   3. 只编 --bin codex，不开 --all-features、不开 LTO。
+#   4. Swatinem/rust-cache 缓存 target/，二次构建只跑增量。
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 构建矩阵（两个架构各自原生编译）─────────────
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360   # 原生编译 + 预编译 v8，通常 20–40 分钟，留足 buffer
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon：macos-14/15 是 ARM runner，原生编 aarch64 最快最省内存
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            label: aarch64
+          # Intel：macos-13 是 x86_64 runner，原生编 x86_64
+          # （若 macos-13 将来下线，可改 macos-15 交叉编，但需更多内存）
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            label: x86_64
+
+    env:
+      # macOS runner 用 libgit2 拉子模块（libwebrtc/libyuv）会间歇性失败，改走 git CLI
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 不指定版本，实际版本由 codex-rs/rust-toolchain.toml 控制
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      # 【关键】下载预编译的 rusty_v8 静态库，避免从源码编译 V8（防 OOM + 防超时）
+      # 该 action 下载 URL 写死指向 openai/codex 的 release，fork 仓库也能拉到。
+      - name: Setup rusty_v8 prebuilt artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cache Cargo target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          key: ${{ matrix.target }}
+
+      # 若仍遇到内存不足，取消下面两行注释限制编译并行度
+      - name: Limit build jobs to avoid OOM
+        run: echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --bin codex --timings
+
+      - name: Prepare release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/codex" "dist/codex-macos-${{ matrix.label }}"
+          # 顺带压缩一份，便于分发
+          zstd -T0 -19 --rm "dist/codex-macos-${{ matrix.label }}" || true
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-macos-${{ matrix.label }}
+          path: codex-rs/dist/*
+
+  # ── 发布（收集所有 macOS 产物）─────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: codex-macos-*
+          merge-multiple: true
+
+      - name: Set release version (date-based)
+        id: version
+        run: |
+          VERSION="$(date '+%Y%m%d-%H%M%S')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          name: macos-${{ steps.version.outputs.version }}
+          tag_name: macos-${{ steps.version.outputs.version }}
+          files: release-assets/*
+          prerelease: false
