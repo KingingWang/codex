@@ -508,12 +508,9 @@ debug = "none"
 strip = "symbols"
 
 [profile.release]
-lto = "thin"
-debug = "line-tables-only"
+lto = "fat"
 split-debuginfo = "off"
-# Keep release binaries symbolicateable until packaging has archived the
-# sidecar symbols and stripped the binaries.
-strip = false
+strip = "symbols"
 
 # Balance parallel release code generation against binary size.
 codegen-units = 4

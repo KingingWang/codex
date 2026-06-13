@@ -340,7 +340,7 @@ async fn convert_response_to_events(
                     continue;
                 }
                 let added = ResponseItem::Message {
-                    id: None,
+                    id: Some(format!("msg_{idx}")),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: String::new(),
@@ -363,7 +363,7 @@ async fn convert_response_to_events(
                     return;
                 }
                 let done = ResponseItem::Message {
-                    id: None,
+                    id: Some(format!("msg_{idx}")),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText { text: text.clone() }],
                     phase: None,
