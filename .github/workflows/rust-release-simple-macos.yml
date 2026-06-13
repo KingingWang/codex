@@ -76,7 +76,7 @@ jobs:
 
       # 若仍遇到内存不足，取消下面两行注释限制编译并行度
       - name: Limit build jobs to avoid OOM
-        run: echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --bin codex --timings
