@@ -41,22 +41,11 @@ jobs:
           # Apple Silicon: macos-15 (ARM, Xcode 16+), 原生编 aarch64
           # 注: 不能用 macos-14 (Xcode 15.4), webrtc-sys cxx 绑定与该 SDK 不兼容
           - runner: macos-15
-          # Apple Silicon: macos-15 (ARM, Xcode 16+), 原生编 aarch64
+            target: aarch64-apple-darwin
+            label: aarch64
           # Intel x86_64: 也在 macos-15 (ARM) 上交叉编译, 与官方 rust-release.yml 一致
           # macos-13 (Xcode 15) 同样有 webrtc-sys 兼容问题
           - runner: macos-15
-          # Intel x86_64: 也在 macos-15 (ARM) 上交叉编译, 与官方 rust-release.yml 一致
-          # macos-13 (Xcode 15) 同样有 webrtc-sys 兼容问题
-          - runner: macos-15
-          # Intel x86_64: 也在 macos-15 (ARM) 上交叉编译, 与官方 rust-release.yml 一致
-          # macos-13 (Xcode 15) 同样有 webrtc-sys 兼容问题
-          - runner: macos-15
-          # Intel x86_64: 也在 macos-15 (ARM) 上交叉编译, 与官方 rust-release.yml 一致
-          # macos-13 (Xcode 15) 同样有 webrtc-sys 兼容问题
-          - runner: macos-15
-          # Intel：macos-13 是 x86_64 runner，原生编 x86_64
-          # （若 macos-13 将来下线，可改 macos-15 交叉编，但需更多内存）
-          - runner: macos-13
             target: x86_64-apple-darwin
             label: x86_64
 
