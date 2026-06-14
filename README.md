@@ -311,6 +311,91 @@ codex
 
 ---
 
+## Codex 客户端模型列表补丁（VS Code / macOS 桌面端）
+
+### 现象
+
+CLI 已经能正确加载 `model_catalog_json` 里所有 `visibility:"list"` 的模型
+（GLM / Qwen / MiniMax / DeepSeek / Kimi / Claude / ring 等），但
+**VS Code 扩展和 macOS 桌面端的模型选择器里只显示 `gpt-*`**。
+
+### 根因（简版）
+
+客户端 UI 是 Electron/webview，模型选择器在 JS 端做了一次二次过滤：
+
+```js
+// webview picker chunk（minified，hash 文件名每次发版都会变）
+let a=[],o=null,s=useHiddenModels && authMethod!==`amazonBedrock`;
+r.forEach(n => {
+  if (s ? availableModels.has(n.model) : !n.hidden) { ... 显示 ... }
+});
+```
+
+当 Statsig 动态配置 `107580212` 命中（生产环境会命中），返回的
+`{use_hidden_models:true, available_models:[gpt-*...]}` 让 `s=true`，过滤
+就走白名单分支，所有非 gpt 模型被前端挡掉——跟 CLI 后端完全无关。
+
+补丁把那一行强制改成 `s=false`，让过滤永远走 `!n.hidden` 分支，
+所有 `visibility:"list"` 的 catalog 模型都会显示。
+
+### 直接跑（无需 clone 仓库）
+
+脚本托管在本仓库的 `scripts/` 目录，通过 GitHub raw URL 拉取执行：
+
+```
+https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-<target>.sh
+```
+
+> 这个 URL 直接走 GitHub 的 CDN（Fastly），`main` 永远是最新代码。
+> 如果想锁定到某个 commit 或 tag，把 URL 里的 `main` 换成 commit hash 或 tag 即可。
+
+**推荐：下载到本地后执行**（支持 `--revert`、`--help`、升级后重跑，幂等）
+
+```bash
+# === VS Code 扩展（Linux / macOS / Windows-WSL） ===
+curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-extension.sh \
+     -o ~/.local/bin/patch-codex-extension.sh
+chmod +x ~/.local/bin/patch-codex-extension.sh
+
+patch-codex-extension.sh            # 打补丁
+patch-codex-extension.sh --revert   # 从 .bak 还原
+patch-codex-extension.sh --help
+
+# === macOS 桌面端（Codex.app） ===
+curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-desktop.sh \
+     -o ~/.local/bin/patch-codex-desktop.sh
+chmod +x ~/.local/bin/patch-codex-desktop.sh
+
+patch-codex-desktop.sh              # 打补丁（需要 sudo，会提示输密码）
+patch-codex-desktop.sh --revert     # 从 .bak 还原
+patch-codex-desktop.sh --help
+```
+
+**替代：一次性 `curl | bash`**（不保留脚本，无法 `--revert`
+
+```bash
+# VS Code 扩展
+curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-extension.sh | bash
+
+# macOS 桌面端（会触发 sudo 提示）
+curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-desktop.sh | bash
+```
+
+### 重要提示
+
+| 场景 | 说明 |
+| --- | --- |
+| **生效** | VS Code: `Ctrl/Cmd+Shift+P → Developer: Reload Window`；macOS: 重启 Codex |
+| **升级后** | 每次客户端自动升级都会覆盖被 patch 的资源，重跑一次即可 |
+| **VS Code 扫描范围** | `~/.vscode{,-server}{,-insiders}/extensions`、`~/.cursor{,-server}/extensions` |
+| **macOS .app 位置** | `/Applications/Codex.app` 或 `~/Applications/Codex.app`，可用 `CODEX_APP=` 环境变量覆盖 |
+| **macOS 签名** | 改 `.app` 内容会让原 notarization 失效；脚本会用 ad-hoc 重签 + 清 quarantine |
+| **macOS Codex 必须先退出** | 脚本会先 `pgrep` 检查，没退出会拒绝执行 |
+| **桌面端依赖** | 需要 `asar` 或 `npx`（脚本会自动用 `npx -y @electron/asar` 拉取） |
+| **回滚** | 两份脚本都会备份原文件到 `<target>.bak`；`--revert` 会从备份恢复 |
+
+---
+
 ## 变更记录
 
 基于官方仓库的修改提交（作者：kingingwang）：
