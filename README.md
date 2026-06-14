@@ -346,40 +346,23 @@ r.forEach(n => {
 https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-<target>.sh
 ```
 
-> 这个 URL 直接走 GitHub 的 CDN（Fastly），`main` 永远是最新代码。
-> 如果想锁定到某个 commit 或 tag，把 URL 里的 `main` 换成 commit hash 或 tag 即可。
-
-**推荐：下载到本地后执行**（支持 `--revert`、`--help`、升级后重跑，幂等）
-
-```bash
-# === VS Code 扩展（Linux / macOS / Windows-WSL） ===
-curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-extension.sh \
-     -o ~/.local/bin/patch-codex-extension.sh
-chmod +x ~/.local/bin/patch-codex-extension.sh
-
-patch-codex-extension.sh            # 打补丁
-patch-codex-extension.sh --revert   # 从 .bak 还原
-patch-codex-extension.sh --help
-
-# === macOS 桌面端（Codex.app） ===
-curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-desktop.sh \
-     -o ~/.local/bin/patch-codex-desktop.sh
-chmod +x ~/.local/bin/patch-codex-desktop.sh
-
-patch-codex-desktop.sh              # 打补丁（需要 sudo，会提示输密码）
-patch-codex-desktop.sh --revert     # 从 .bak 还原
-patch-codex-desktop.sh --help
-```
-
-**替代：一次性 `curl | bash`**（不保留脚本，无法 `--revert`
+### patch命令(直接复制运行即可)
 
 ```bash
 # VS Code 扩展
 curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-extension.sh | bash
+```
 
-# macOS 桌面端（会触发 sudo 提示）
+```bash
+# macOS 桌面端（需要输入密码）
 curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-desktop.sh | bash
 ```
+
+```bash
+# macOS 桌面端解锁插件（需要输入密码,第一次启动app后需要读取钥匙串,输入密码后始终允许即可）
+curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlock-codex-plugins.sh | bash
+```
+
 
 ### 重要提示
 
