@@ -501,7 +501,27 @@ pub struct ChatCompletionResponseToolCall {
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionResponseFunction {
     pub name: String,
+    /// The arguments field may be returned as either a JSON string or a JSON
+    /// object by different providers. This custom deserializer normalizes both
+    /// forms into a JSON string so downstream code always sees a string.
+    #[serde(deserialize_with = "deserialize_arguments")]
     pub arguments: String,
+}
+
+/// Deserializes `arguments` from either a JSON string or a JSON value.
+///
+/// Some providers (e.g. DashScope) return `arguments` as a parsed JSON object
+/// instead of the standard JSON string. This function handles both cases by
+/// converting objects/arrays/primitives to their JSON string representation.
+fn deserialize_arguments<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        other => Ok(other.to_string()),
+    }
 }
 
 #[cfg(test)]

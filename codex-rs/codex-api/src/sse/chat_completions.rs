@@ -26,6 +26,25 @@ use tracing::trace;
 // (call_id, function_name, concatenated_arguments)
 type ToolCallAccumulator = (Option<String>, Option<String>, Option<String>);
 
+/// Normalizes accumulated tool call arguments to a valid JSON string.
+///
+/// When no argument deltas were received, defaults to `"{}"`. When the
+/// accumulated string is not valid JSON, also falls back to `"{}"`.
+/// This prevents the next request from being rejected with a 400 error
+/// ("arguments must be in JSON format").
+fn normalize_tool_call_arguments(arguments: Option<String>) -> String {
+    match arguments {
+        Some(args) if !args.is_empty() => {
+            if serde_json::from_str::<serde_json::Value>(&args).is_ok() {
+                args
+            } else {
+                "{}".to_string()
+            }
+        }
+        _ => "{}".to_string(),
+    }
+}
+
 /// Spawns a background task to process SSE events from a chat completions stream.
 pub fn spawn_chat_completions_stream(
     stream_response: StreamResponse,
@@ -157,7 +176,8 @@ pub async fn process_chat_completions_sse(
             // (OutputItemAdded -> ToolCallInputDelta -> OutputItemDone) so the
             // turn processor can establish the active tool before receiving deltas.
             for (index, (id, name, arguments)) in accumulated_tool_calls.drain() {
-                if let (Some(id), Some(name), Some(args)) = (id, name, arguments) {
+                if let (Some(id), Some(name)) = (id, name) {
+                    let args = normalize_tool_call_arguments(arguments);
                     let function_call_item = ResponseItem::FunctionCall {
                         id: None,
                         namespace: namespace_map.get(&name).cloned(),
@@ -449,7 +469,8 @@ async fn process_chat_choice(
         // (OutputItemAdded -> ToolCallInputDelta -> OutputItemDone) so the
         // turn processor can establish the active tool before receiving deltas.
         for (index, (id, name, arguments)) in accumulated_tool_calls.drain() {
-            if let (Some(id), Some(name), Some(args)) = (id, name, arguments) {
+            if let (Some(id), Some(name)) = (id, name) {
+                let args = normalize_tool_call_arguments(arguments);
                 let function_call_item = ResponseItem::FunctionCall {
                     id: None,
                     namespace: namespace_map.get(&name).cloned(),
