@@ -1622,7 +1622,7 @@ impl ModelClientSession {
                     effort,
                     summary,
                     service_tier,
-                    turn_metadata_header,
+                    None,
                     inference_trace,
                 )
                 .await
@@ -1943,7 +1943,7 @@ impl ModelClientSession {
         effort: Option<ReasoningEffortConfig>,
     ) -> Result<ChatCompletionsRequest> {
         let instructions = &prompt.base_instructions.text;
-        let input = prompt.get_formatted_input();
+        let input = prompt.get_formatted_input_for_request(false);
 
         // Convert instructions to a system message
         let mut messages = Vec::new();

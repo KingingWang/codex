@@ -74,7 +74,7 @@ pub(crate) fn build_anthropic_request(
     prompt: &Prompt,
     model_info: &ModelInfo,
 ) -> CodexResult<AnthropicRequest> {
-    let formatted_input = prompt.get_formatted_input();
+    let formatted_input = prompt.get_formatted_input_for_request(false);
     let (lifted_system_blocks, remaining_input) = lift_agents_md_into_system(&formatted_input);
 
     let system = build_system(&prompt.base_instructions.text, &lifted_system_blocks);

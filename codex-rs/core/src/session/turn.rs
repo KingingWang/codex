@@ -1039,7 +1039,7 @@ async fn append_dynamic_context(
     let cwd = turn_context
         .environments
         .primary()
-        .map(|env| env.cwd.clone())
+        .map(|env| env.cwd().clone())
         .unwrap_or_else(|| turn_context.cwd.clone());
 
     // Resolve and validate the script path.
@@ -1196,13 +1196,13 @@ async fn run_sampling_request(
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        let prompt_input = append_dynamic_context(prompt_input, turn_context.as_ref()).await;
         let prompt = build_prompt(
             prompt_input,
             router.as_ref(),
             turn_context.as_ref(),
             base_instructions.clone(),
-        )
-        .await;
+        );
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
