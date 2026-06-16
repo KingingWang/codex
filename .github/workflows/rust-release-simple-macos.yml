@@ -10,6 +10,8 @@ name: rust-release-simple-macos
 #      （交叉编 V8 的 target 容易不匹配，且更慢更吃内存）。
 #   3. 只编 --bin codex，不开 --all-features、不开 LTO。
 #   4. Swatinem/rust-cache 缓存 target/，二次构建只跑增量。
+#   5. 缓存恢复后清理 v8 构建产物，强制 build.rs 重新下载/解压静态库，
+#      避免 rust-cache 只恢复了 fingerprint 而未恢复 .a 文件导致链接失败。
 
 on:
   push:
@@ -73,6 +75,23 @@ jobs:
         with:
           workspaces: codex-rs
           key: ${{ matrix.target }}
+
+      # rust-cache 可能恢复了 v8 的 build script fingerprint 但未恢复实际的
+      # librusty_v8.a 静态库（大文件被裁剪），导致 Cargo 跳过 build.rs 重跑、
+      # 链接器找不到静态库。此步骤删除 v8 的 build 输出，强制 build.rs 重新执行。
+      - name: Clean stale v8 build artifacts from cache
+        shell: bash
+        run: |
+          set -uo pipefail
+          target="${{ matrix.target }}"
+          # Remove v8 build script output directories (fingerprint + output)
+          # so Cargo is forced to re-run the v8 build.rs, which will
+          # decompress RUSTY_V8_ARCHIVE into the correct location.
+          find "target/${target}/release/build" -maxdepth 1 -type d -name 'v8-*' -exec rm -rf {} + 2>/dev/null || true
+          # Also remove the decompressed static lib and its checksum if they exist,
+          # so the build.rs re-downloads/decompresses from RUSTY_V8_ARCHIVE.
+          rm -rf "target/${target}/release/gn_out" 2>/dev/null || true
+          echo "Cleaned stale v8 build artifacts (if any)"
 
       # 若仍遇到内存不足，取消下面两行注释限制编译并行度
       - name: Limit build jobs to avoid OOM
