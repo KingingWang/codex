@@ -2184,7 +2184,7 @@ impl ModelClientSession {
                         r#type: "function".to_string(),
                         function: codex_api::ChatFunctionCall {
                             name: name.clone(),
-                            arguments: Some(arguments.clone()),
+                            arguments: Some(ensure_valid_json_arguments(arguments)),
                         },
                     };
                     if pending_assistant.is_none()
@@ -2227,7 +2227,7 @@ impl ModelClientSession {
                         r#type: "function".to_string(),
                         function: codex_api::ChatFunctionCall {
                             name: name.clone(),
-                            arguments: Some(tool_input.clone()),
+                            arguments: Some(ensure_valid_json_arguments(tool_input)),
                         },
                     };
                     if pending_assistant.is_none()
@@ -2488,6 +2488,20 @@ fn content_items_to_chat_content(
 ///  {"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"high"}}]
 /// ```
 ///
+/// Ensures that tool call `arguments` is a valid JSON string.
+///
+/// Some providers return empty arguments (`""`) for tools with no parameters.
+/// Sending an empty string back triggers a 400 error ("arguments must be in
+/// JSON format"). This function normalizes empty strings to `"{}"` so the
+/// request always contains valid JSON. Non-empty values are passed through
+/// unchanged to preserve custom tool inputs that may not be strict JSON.
+fn ensure_valid_json_arguments(arguments: &str) -> String {
+    if arguments.is_empty() {
+        return "{}".to_string();
+    }
+    arguments.to_string()
+}
+
 /// Returns `(tool_content, optional_user_content)`:
 /// - `tool_content`: `Some(Value::String(..))` with the text portion for the tool message,
 ///   or `None` when the body is empty.
