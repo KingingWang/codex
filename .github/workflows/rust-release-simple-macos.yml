@@ -54,6 +54,13 @@ jobs:
     env:
       # macOS runner 用 libgit2 拉子模块（libwebrtc/libyuv）会间歇性失败，改走 git CLI
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # workspace profile.release 默认 lto="fat" + codegen-units=4，是 OOM 元凶。
+      # fat LTO 会把整个 workspace 100+ crate 的 bitcode 全部载入内存做全程序优化，
+      # 峰值轻松超过 10GB，在 7-14GB 的 GitHub-hosted runner 上必爆内存/卡死。
+      # 这里用环境变量覆盖：thin LTO（per-crate，内存峰值远低于 fat）+ 16 codegen-units
+      # （每单元更小，降低单次编译内存峰值），代价是 binary 略大，换来稳定编译。
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
     steps:
       - uses: actions/checkout@v4
