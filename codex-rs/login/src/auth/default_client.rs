@@ -138,6 +138,7 @@ pub fn get_codex_user_agent() -> String {
 /// Invalid characters are replaced with an underscore.
 ///
 /// If the user agent fails to parse, it falls back to fallback and then to ORIGINATOR.
+#[allow(dead_code)]
 fn sanitize_user_agent(candidate: String, fallback: &str) -> String {
     if HeaderValue::from_str(candidate.as_str()).is_ok() {
         return candidate;

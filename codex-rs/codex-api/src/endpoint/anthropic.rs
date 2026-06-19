@@ -170,13 +170,16 @@ impl<T: HttpTransport> AnthropicClient<T> {
 
         debug_dump_request(&body, "stream");
 
+        let encoded_body = codex_client::EncodedJsonBody::encode(&body)
+            .map_err(|e| ApiError::Stream(format!("failed to encode anthropic request: {e}")))?;
+
         let stream_response = self
             .session
-            .stream_with(
+            .stream_encoded_json_with(
                 Method::POST,
                 Self::path(),
                 extra_headers,
-                Some(body),
+                Some(encoded_body),
                 |req| {
                     rewrite_anthropic_headers(req);
                     req.timeout = Some(Duration::from_secs(600));
@@ -295,6 +298,7 @@ async fn convert_response_to_events(
                         text: String::new(),
                     }]),
                     encrypted_content: None,
+                    metadata: None,
                 };
                 output_emitted = true;
                 if tx
@@ -326,6 +330,7 @@ async fn convert_response_to_events(
                     // would force build_messages to elide thinking content
                     // from history.
                     encrypted_content: signature.clone(),
+                    metadata: None,
                 };
                 if tx
                     .send(Ok(ResponseEvent::OutputItemDone(done)))
@@ -346,6 +351,7 @@ async fn convert_response_to_events(
                         text: String::new(),
                     }],
                     phase: None,
+                    metadata: None,
                 };
                 output_emitted = true;
                 if tx
@@ -367,6 +373,7 @@ async fn convert_response_to_events(
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText { text: text.clone() }],
                     phase: None,
+                    metadata: None,
                 };
                 if tx
                     .send(Ok(ResponseEvent::OutputItemDone(done)))
@@ -390,6 +397,7 @@ async fn convert_response_to_events(
                     name: name.clone(),
                     arguments: String::new(),
                     call_id: id.clone(),
+                    metadata: None,
                 };
                 output_emitted = true;
                 if tx
@@ -416,6 +424,7 @@ async fn convert_response_to_events(
                     name: name.clone(),
                     arguments,
                     call_id: id.clone(),
+                    metadata: None,
                 };
                 if tx
                     .send(Ok(ResponseEvent::OutputItemDone(done)))

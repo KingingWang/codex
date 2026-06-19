@@ -1150,6 +1150,7 @@ async fn append_dynamic_context(
             text: text.to_string(),
         }],
         phase: None,
+        metadata: None,
     });
 
     input

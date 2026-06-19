@@ -137,6 +137,7 @@ fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<Respo
             role,
             content,
             phase,
+            ..
         } = item
         else {
             remaining.push(item.clone());
@@ -168,6 +169,7 @@ fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<Respo
                 role: role.clone(),
                 content: kept_content,
                 phase: phase.clone(),
+                metadata: None,
             });
         }
     }
@@ -371,7 +373,9 @@ fn build_messages(items: &[ResponseItem]) -> CodexResult<Vec<AnthropicMessage>> 
                     cache_control: None,
                 });
             }
-            ResponseItem::FunctionCallOutput { call_id, output } => {
+            ResponseItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
                 flush_assistant(&mut messages, &mut pending_assistant_blocks);
                 pending_thinking.clear();
                 let blocks = function_output_to_tool_result_blocks(call_id, &output.body);

@@ -147,6 +147,7 @@ pub async fn process_chat_completions_sse(
                         text: accumulated_text.clone(),
                     }],
                     phase: None,
+                    metadata: None,
                 };
                 let _ = tx_event
                     .send(Ok(ResponseEvent::OutputItemDone(done_item)))
@@ -166,6 +167,7 @@ pub async fn process_chat_completions_sse(
                         },
                     ]),
                     encrypted_content: None,
+                    metadata: None,
                 };
                 let _ = tx_event
                     .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
@@ -184,6 +186,7 @@ pub async fn process_chat_completions_sse(
                         name: name.clone(),
                         arguments: args.clone(),
                         call_id: id.clone(),
+                        metadata: None,
                     };
                     if tx_event
                         .send(Ok(ResponseEvent::OutputItemAdded(
@@ -340,6 +343,7 @@ async fn process_chat_choice(
                     text: String::new(),
                 }],
                 phase: None,
+                metadata: None,
             };
             let _ = tx_event
                 .send(Ok(ResponseEvent::OutputItemAdded(added_item)))
@@ -370,6 +374,7 @@ async fn process_chat_choice(
                         },
                     ]),
                     encrypted_content: None,
+                    metadata: None,
                 };
                 let _ = tx_event
                     .send(Ok(ResponseEvent::OutputItemAdded(reasoning_added)))
@@ -441,6 +446,7 @@ async fn process_chat_choice(
                     text: accumulated_text.clone(),
                 }],
                 phase: None,
+                metadata: None,
             };
             let _ = tx_event
                 .send(Ok(ResponseEvent::OutputItemDone(done_item)))
@@ -459,6 +465,7 @@ async fn process_chat_choice(
                     },
                 ]),
                 encrypted_content: None,
+                metadata: None,
             };
             let _ = tx_event
                 .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
@@ -477,6 +484,7 @@ async fn process_chat_choice(
                     name: name.clone(),
                     arguments: args.clone(),
                     call_id: id.clone(),
+                    metadata: None,
                 };
                 if tx_event
                     .send(Ok(ResponseEvent::OutputItemAdded(

@@ -89,13 +89,17 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
             ApiError::Stream(format!("failed to encode chat completions request: {e}"))
         })?;
 
+        let encoded_body = codex_client::EncodedJsonBody::encode(&body).map_err(|e| {
+            ApiError::Stream(format!("failed to encode chat completions request: {e}"))
+        })?;
+
         let stream_response = self
             .session
-            .stream_with(
+            .stream_encoded_json_with(
                 Method::POST,
                 Self::path(),
                 extra_headers,
-                Some(body),
+                Some(encoded_body),
                 |req| {
                     req.timeout = Some(Duration::from_secs(600));
                 },
@@ -231,6 +235,7 @@ async fn convert_response_to_events(
                         },
                     ]),
                     encrypted_content: None,
+                    metadata: None,
                 };
                 output_emitted = true;
                 if tx
@@ -261,6 +266,7 @@ async fn convert_response_to_events(
                         },
                     ]),
                     encrypted_content: None,
+                    metadata: None,
                 };
                 if tx
                     .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
@@ -284,6 +290,7 @@ async fn convert_response_to_events(
                     name: tc.function.name.clone(),
                     arguments: String::new(),
                     call_id: tc.id.clone(),
+                    metadata: None,
                 };
                 output_emitted = true;
                 if tx
@@ -314,6 +321,7 @@ async fn convert_response_to_events(
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
                     call_id: tc.id.clone(),
+                    metadata: None,
                 };
                 if tx
                     .send(Ok(ResponseEvent::OutputItemDone(function_call_done_item)))
@@ -339,6 +347,7 @@ async fn convert_response_to_events(
                     text: String::new(),
                 }],
                 phase: None,
+                metadata: None,
             };
             output_emitted = true;
             if tx
@@ -366,6 +375,7 @@ async fn convert_response_to_events(
                     text: content.clone(),
                 }],
                 phase: None,
+                metadata: None,
             };
             if tx
                 .send(Ok(ResponseEvent::OutputItemDone(assistant_done)))

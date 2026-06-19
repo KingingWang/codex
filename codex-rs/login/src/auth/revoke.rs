@@ -17,9 +17,11 @@ use super::storage::AuthDotJson;
 use super::util::try_parse_error_message;
 use crate::token_data::TokenData;
 
+#[allow(dead_code)]
 const REVOKE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum RevokeTokenKind {
     Access,
     Refresh,
@@ -42,6 +44,7 @@ impl RevokeTokenKind {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct RevokeTokenRequest<'a> {
     token: &'a str,
     token_type_hint: &'static str,
@@ -57,6 +60,7 @@ pub(super) async fn revoke_auth_tokens(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn revocable_token(auth_dot_json: &AuthDotJson) -> Option<(&str, RevokeTokenKind)> {
     let tokens = managed_chatgpt_tokens(auth_dot_json)?;
     if !tokens.refresh_token.is_empty() {
@@ -68,6 +72,7 @@ fn revocable_token(auth_dot_json: &AuthDotJson) -> Option<(&str, RevokeTokenKind
     }
 }
 
+#[allow(dead_code)]
 fn managed_chatgpt_tokens(auth_dot_json: &AuthDotJson) -> Option<&TokenData> {
     if resolved_auth_mode(auth_dot_json) == ApiAuthMode::Chatgpt {
         auth_dot_json.tokens.as_ref()
@@ -76,6 +81,7 @@ fn managed_chatgpt_tokens(auth_dot_json: &AuthDotJson) -> Option<&TokenData> {
     }
 }
 
+#[allow(dead_code)]
 fn resolved_auth_mode(auth_dot_json: &AuthDotJson) -> ApiAuthMode {
     if let Some(mode) = auth_dot_json.auth_mode {
         return mode;
@@ -86,6 +92,7 @@ fn resolved_auth_mode(auth_dot_json: &AuthDotJson) -> ApiAuthMode {
     ApiAuthMode::Chatgpt
 }
 
+#[allow(dead_code)]
 async fn revoke_oauth_token(
     client: &CodexHttpClient,
     endpoint: &str,
@@ -123,6 +130,7 @@ async fn revoke_oauth_token(
     )))
 }
 
+#[allow(dead_code)]
 fn revoke_token_endpoint() -> String {
     if let Ok(endpoint) = std::env::var(REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR) {
         return endpoint;
@@ -138,6 +146,7 @@ fn revoke_token_endpoint() -> String {
     String::new()
 }
 
+#[allow(dead_code)]
 fn derive_revoke_token_endpoint(refresh_endpoint: &str) -> Option<String> {
     let mut url = url::Url::parse(refresh_endpoint).ok()?;
     url.set_path("/oauth/revoke");

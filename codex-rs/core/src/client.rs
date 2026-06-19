@@ -2261,7 +2261,9 @@ impl ModelClientSession {
                     }
                     pending_tool_outputs_in_turn += 1;
                 }
-                ResponseItem::FunctionCallOutput { call_id, output } => {
+                ResponseItem::FunctionCallOutput {
+                    call_id, output, ..
+                } => {
                     // Tool result: flush pending assistant, then push tool message.
                     // Images cannot go in tool-role messages (Chat Completions API only
                     // supports string content on tool messages). Split them into a
@@ -2298,6 +2300,7 @@ impl ModelClientSession {
                     call_id,
                     name: _,
                     output,
+                    ..
                 } => {
                     // Tool result: flush pending assistant, then push tool message.
                     // Images cannot go in tool-role messages (Chat Completions API only
@@ -2613,7 +2616,6 @@ mod chat_completions_request_tests {
     use codex_api::ChatCompletionsRequest;
     use codex_model_provider_info::WireApi;
     use codex_model_provider_info::create_oss_provider_with_base_url;
-    use codex_protocol::SessionId;
     use codex_protocol::ThreadId;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::models::ContentItem;
@@ -2632,12 +2634,9 @@ mod chat_completions_request_tests {
             create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
         ModelClient::new(
             /*auth_manager*/ None,
-            SessionId::new(),
             ThreadId::new(),
-            /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
             provider,
             SessionSource::Cli,
-            /*parent_thread_id*/ None,
             /*model_verbosity*/ None,
             /*enable_request_compression*/ false,
             /*include_timing_metrics*/ false,
@@ -2711,6 +2710,7 @@ mod chat_completions_request_tests {
                 text: message.to_string(),
             }],
             phase: None,
+            metadata: None,
         }
     }
 
@@ -2722,6 +2722,7 @@ mod chat_completions_request_tests {
                 text: text.to_string(),
             }],
             phase: None,
+            metadata: None,
         }
     }
 
@@ -2735,6 +2736,7 @@ mod chat_completions_request_tests {
                 text: text.to_string(),
             }]),
             encrypted_content: None,
+            metadata: None,
         }
     }
 
@@ -2745,6 +2747,7 @@ mod chat_completions_request_tests {
             namespace: None,
             arguments: arguments.to_string(),
             call_id: call_id.to_string(),
+            metadata: None,
         }
     }
 
@@ -2752,6 +2755,7 @@ mod chat_completions_request_tests {
         ResponseItem::FunctionCallOutput {
             call_id: call_id.to_string(),
             output: FunctionCallOutputPayload::from_text(output.to_string()),
+            metadata: None,
         }
     }
 
@@ -2762,6 +2766,7 @@ mod chat_completions_request_tests {
             call_id: call_id.to_string(),
             name: "exec_command".to_string(),
             input: input.to_string(),
+            metadata: None,
         }
     }
 
@@ -2770,6 +2775,7 @@ mod chat_completions_request_tests {
             call_id: call_id.to_string(),
             name: None,
             output: FunctionCallOutputPayload::from_text(output.to_string()),
+            metadata: None,
         }
     }
 
@@ -2786,6 +2792,7 @@ mod chat_completions_request_tests {
                     detail: Some(ImageDetail::High),
                 },
             ]),
+            metadata: None,
         }
     }
 
@@ -3206,6 +3213,7 @@ mod chat_completions_request_tests {
                 },
             ],
             phase: None,
+            metadata: None,
         }]);
 
         let messages = &request.messages;
@@ -3240,6 +3248,7 @@ mod chat_completions_request_tests {
                 text: "hello".to_string(),
             }],
             phase: None,
+            metadata: None,
         }]);
 
         let messages = &request.messages;
@@ -3267,6 +3276,7 @@ mod chat_completions_request_tests {
                 },
             ],
             phase: None,
+            metadata: None,
         }]);
 
         let messages = &request.messages;
@@ -3291,6 +3301,7 @@ mod chat_completions_request_tests {
                 detail: Some(ImageDetail::High),
             }],
             phase: None,
+            metadata: None,
         }]);
 
         let messages = &request.messages;
@@ -3318,6 +3329,7 @@ mod chat_completions_request_tests {
                 detail: None,
             }],
             phase: None,
+            metadata: None,
         }]);
 
         let messages = &request.messages;
@@ -3351,6 +3363,7 @@ mod chat_completions_request_tests {
                 },
             ],
             phase: None,
+            metadata: None,
         }]);
 
         let messages = &request.messages;

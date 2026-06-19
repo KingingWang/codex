@@ -209,6 +209,7 @@ pub async fn process_anthropic_sse(
                                 text: String::new(),
                             }],
                             phase: None,
+                            metadata: None,
                         };
                         if tx_event
                             .send(Ok(ResponseEvent::OutputItemAdded(item)))
@@ -230,6 +231,7 @@ pub async fn process_anthropic_sse(
                             name: name.clone(),
                             arguments: String::new(),
                             call_id: id.clone(),
+                            metadata: None,
                         };
                         if tx_event
                             .send(Ok(ResponseEvent::OutputItemAdded(item)))
@@ -257,6 +259,7 @@ pub async fn process_anthropic_sse(
                                 text: String::new(),
                             }]),
                             encrypted_content: None,
+                            metadata: None,
                         };
                         if tx_event
                             .send(Ok(ResponseEvent::OutputItemAdded(item)))
@@ -356,6 +359,7 @@ pub async fn process_anthropic_sse(
                         role: "assistant".to_string(),
                         content: vec![ContentItem::OutputText { text: accumulated }],
                         phase: None,
+                        metadata: None,
                     }),
                     BlockKind::Tool(state) => Some(ResponseItem::FunctionCall {
                         id: None,
@@ -363,6 +367,7 @@ pub async fn process_anthropic_sse(
                         name: state.name,
                         arguments: state.arguments,
                         call_id: state.id,
+                        metadata: None,
                     }),
                     BlockKind::Thinking {
                         accumulated,
@@ -374,6 +379,7 @@ pub async fn process_anthropic_sse(
                             text: accumulated,
                         }]),
                         encrypted_content: signature,
+                        metadata: None,
                     }),
                     BlockKind::Other => None,
                 };
@@ -413,6 +419,7 @@ pub async fn process_anthropic_sse(
                                 role: "assistant".to_string(),
                                 content: vec![ContentItem::OutputText { text: accumulated }],
                                 phase: None,
+                                metadata: None,
                             }),
                             BlockKind::Tool(state) => Some(ResponseItem::FunctionCall {
                                 id: None,
@@ -420,6 +427,7 @@ pub async fn process_anthropic_sse(
                                 name: state.name,
                                 arguments: state.arguments,
                                 call_id: state.id,
+                                metadata: None,
                             }),
                             BlockKind::Thinking {
                                 accumulated,
@@ -431,6 +439,7 @@ pub async fn process_anthropic_sse(
                                     text: accumulated,
                                 }]),
                                 encrypted_content: signature,
+                                metadata: None,
                             }),
                             BlockKind::Other => None,
                         };

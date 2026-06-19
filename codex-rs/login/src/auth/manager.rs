@@ -106,6 +106,7 @@ const REFRESH_TOKEN_UNKNOWN_MESSAGE: &str =
 const REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE: &str = "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.";
 const DEFAULT_CHATGPT_BACKEND_BASE_URL: &str = "";
 const REFRESH_TOKEN_URL: &str = "";
+#[allow(dead_code)]
 pub(super) const REVOKE_TOKEN_URL: &str = "";
 pub const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 pub const REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REVOKE_TOKEN_URL_OVERRIDE";
@@ -1144,6 +1145,7 @@ fn refresh_token_endpoint() -> String {
         .unwrap_or_else(|_| REFRESH_TOKEN_URL.to_string())
 }
 
+#[allow(dead_code)]
 fn revoke_token_endpoint() -> String {
     std::env::var(REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR)
         .unwrap_or_else(|_| REVOKE_TOKEN_URL.to_string())
