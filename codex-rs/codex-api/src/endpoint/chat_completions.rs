@@ -339,37 +339,12 @@ async fn convert_response_to_events(
         if let Some(content) = &message.content
             && !content.is_empty()
         {
-            // Emit OutputItemAdded with empty text to establish the active
-            // item, mirroring the streaming path. The turn processor requires
-            // an OutputItemAdded before it can handle OutputTextDelta events.
-            let assistant_added = ResponseItem::Message {
-                id: Some("msg_assistant".to_string()),
-                role: message.role.clone(),
-                content: vec![ContentItem::OutputText {
-                    text: String::new(),
-                }],
-                phase: None,
-                metadata: None,
-            };
             output_emitted = true;
-            if tx
-                .send(Ok(ResponseEvent::OutputItemAdded(assistant_added)))
-                .await
-                .is_err()
-            {
-                return;
-            }
 
-            // Emit text delta with the full content
-            if tx
-                .send(Ok(ResponseEvent::OutputTextDelta(content.clone())))
-                .await
-                .is_err()
-            {
-                return;
-            }
-
-            // Emit OutputItemDone with the full text
+            // Non-streaming chat completions already provide the full text in
+            // the completed item. Do not synthesize a text delta too; clients
+            // that render both deltas and completed items would display the
+            // same assistant text twice.
             let assistant_done = ResponseItem::Message {
                 id: Some("msg_assistant".to_string()),
                 role: message.role.clone(),
@@ -622,13 +597,17 @@ mod tests {
     async fn normal_content_succeeds() {
         let events = collect_events(normal_content_response()).await;
         assert!(
-            events.len() >= 5,
-            "expected at least 5 events, got {events:?}"
+            events.len() >= 3,
+            "expected at least 3 events, got {events:?}"
         );
         assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
-        assert!(matches!(&events[1], Ok(ResponseEvent::OutputItemAdded(_))));
-        assert!(matches!(&events[2], Ok(ResponseEvent::OutputTextDelta(_))));
-        assert!(matches!(&events[3], Ok(ResponseEvent::OutputItemDone(_))));
+        assert!(matches!(&events[1], Ok(ResponseEvent::OutputItemDone(_))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ResponseEvent::OutputTextDelta(_)))),
+            "non-streaming chat completions should not emit text deltas: {events:?}"
+        );
         let last = events.last().unwrap();
         assert!(
             matches!(last, Ok(ResponseEvent::Completed { .. })),
