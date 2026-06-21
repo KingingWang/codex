@@ -2014,7 +2014,6 @@ impl ModelClientSession {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
-                reasoning: None,
             });
         }
 
@@ -2132,20 +2131,19 @@ impl ModelClientSession {
                             if let Some(c) = msg_content.clone() {
                                 msg.content = Some(c);
                             }
-                            if msg.reasoning.is_none() && reasoning.is_some() {
+                            // Gate on the surviving `reasoning_content` field;
+                            // the redundant `reasoning` field was removed.
+                            if msg.reasoning_content.is_none() && reasoning.is_some() {
                                 msg.reasoning_content = reasoning.clone();
-                                msg.reasoning = reasoning;
                             }
                         } else {
                             // Start a new pending assistant message.
-                            let msg_reasoning = if reasoning.is_some() { reasoning } else { None };
                             pending_assistant = Some(ChatMessage {
                                 role: "assistant".to_string(),
                                 content: msg_content.clone(),
                                 tool_calls: None,
                                 tool_call_id: None,
-                                reasoning_content: msg_reasoning.clone(),
-                                reasoning: msg_reasoning,
+                                reasoning_content: reasoning.clone(),
                             });
                         }
                     } else {
@@ -2156,7 +2154,6 @@ impl ModelClientSession {
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: None,
-                                reasoning: None,
                             });
                             continue;
                         }
@@ -2173,7 +2170,6 @@ impl ModelClientSession {
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
-                            reasoning: None,
                         });
                     }
                 }
@@ -2188,7 +2184,7 @@ impl ModelClientSession {
                         r#type: "function".to_string(),
                         function: codex_api::ChatFunctionCall {
                             name: name.clone(),
-                            arguments: Some(ensure_valid_json_arguments(arguments)),
+                            arguments: Some(ensure_valid_json_arguments(name, arguments)),
                         },
                     };
                     if pending_assistant.is_none()
@@ -2201,9 +2197,10 @@ impl ModelClientSession {
                         Some(msg) => {
                             // Append to existing pending assistant message.
                             msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
-                            if msg.reasoning.is_none() && reasoning.is_some() {
+                            // Gate on the surviving `reasoning_content` field;
+                            // the redundant `reasoning` field was removed.
+                            if msg.reasoning_content.is_none() && reasoning.is_some() {
                                 msg.reasoning_content = reasoning.clone();
-                                msg.reasoning = reasoning;
                             }
                         }
                         None => {
@@ -2214,7 +2211,6 @@ impl ModelClientSession {
                                 tool_calls: Some(vec![tool_call]),
                                 tool_call_id: None,
                                 reasoning_content: reasoning.clone(),
-                                reasoning,
                             });
                         }
                     }
@@ -2231,7 +2227,7 @@ impl ModelClientSession {
                         r#type: "function".to_string(),
                         function: codex_api::ChatFunctionCall {
                             name: name.clone(),
-                            arguments: Some(ensure_valid_json_arguments(tool_input)),
+                            arguments: Some(ensure_valid_json_arguments(name, tool_input)),
                         },
                     };
                     if pending_assistant.is_none()
@@ -2243,9 +2239,10 @@ impl ModelClientSession {
                     match pending_assistant.as_mut() {
                         Some(msg) => {
                             msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
-                            if msg.reasoning.is_none() && reasoning.is_some() {
+                            // Gate on the surviving `reasoning_content` field;
+                            // the redundant `reasoning` field was removed.
+                            if msg.reasoning_content.is_none() && reasoning.is_some() {
                                 msg.reasoning_content = reasoning.clone();
-                                msg.reasoning = reasoning;
                             }
                         }
                         None => {
@@ -2255,7 +2252,6 @@ impl ModelClientSession {
                                 tool_calls: Some(vec![tool_call]),
                                 tool_call_id: None,
                                 reasoning_content: reasoning.clone(),
-                                reasoning,
                             });
                         }
                     }
@@ -2279,7 +2275,6 @@ impl ModelClientSession {
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
                         reasoning_content: None,
-                        reasoning: None,
                     });
                     if let Some(image_content) = user_image_content {
                         messages.push(ChatMessage {
@@ -2288,7 +2283,6 @@ impl ModelClientSession {
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
-                            reasoning: None,
                         });
                     }
                     pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
@@ -2317,7 +2311,6 @@ impl ModelClientSession {
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
                         reasoning_content: None,
-                        reasoning: None,
                     });
                     if let Some(image_content) = user_image_content {
                         messages.push(ChatMessage {
@@ -2326,7 +2319,6 @@ impl ModelClientSession {
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
-                            reasoning: None,
                         });
                     }
                     pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
@@ -2495,18 +2487,38 @@ fn content_items_to_chat_content(
 ///  {"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"high"}}]
 /// ```
 ///
-/// Ensures that tool call `arguments` is a valid JSON string.
+/// Ensures that tool call `arguments` is a valid JSON object string.
 ///
-/// Some providers return empty arguments (`""`) for tools with no parameters.
-/// Sending an empty string back triggers a 400 error ("arguments must be in
-/// JSON format"). This function normalizes empty strings to `"{}"` so the
-/// request always contains valid JSON. Non-empty values are passed through
-/// unchanged to preserve custom tool inputs that may not be strict JSON.
-fn ensure_valid_json_arguments(arguments: &str) -> String {
-    if arguments.is_empty() {
+/// Some providers return empty arguments (`""`) for tools with no parameters,
+/// while legacy history can contain bare command strings. Strict Chat
+/// Completions providers reject those values because function call arguments
+/// must be a JSON object string. Preserve valid JSON objects as-is, normalize
+/// empty arguments to `"{}"`, and wrap non-object values in an object.
+fn ensure_valid_json_arguments(name: &str, arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
         return "{}".to_string();
     }
-    arguments.to_string()
+
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        // Preserve valid JSON objects verbatim. Re-serializing would reorder
+        // keys (serde_json's default map is a BTreeMap) and waste a
+        // serialize/deserialize round-trip on the hot path; `trimmed` is
+        // already a valid JSON object string.
+        Ok(serde_json::Value::Object(_)) => trimmed.to_string(),
+        Ok(value) => wrap_non_object_tool_arguments(name, value),
+        // Non-JSON text (e.g. legacy bare command strings): wrap the trimmed
+        // text so leading/trailing whitespace is not smuggled into the value.
+        Err(_) => wrap_non_object_tool_arguments(name, serde_json::Value::String(trimmed.to_string())),
+    }
+}
+
+fn wrap_non_object_tool_arguments(name: &str, value: serde_json::Value) -> String {
+    let key = match name {
+        "exec_command" | "shell" => "cmd",
+        _ => "input",
+    };
+    serde_json::json!({ key: value }).to_string()
 }
 
 /// Returns `(tool_content, optional_user_content)`:
@@ -2751,6 +2763,17 @@ mod chat_completions_request_tests {
         }
     }
 
+    fn function_call_named(call_id: &str, name: &str, arguments: &str) -> ResponseItem {
+        ResponseItem::FunctionCall {
+            id: None,
+            name: name.to_string(),
+            namespace: None,
+            arguments: arguments.to_string(),
+            call_id: call_id.to_string(),
+            metadata: None,
+        }
+    }
+
     fn function_call_output(call_id: &str, output: &str) -> ResponseItem {
         ResponseItem::FunctionCallOutput {
             call_id: call_id.to_string(),
@@ -2974,7 +2997,7 @@ mod chat_completions_request_tests {
                             "type": "function",
                             "function": {
                                 "name": "exec_command",
-                                "arguments": "pwd"
+                                "arguments": "{\"cmd\":\"pwd\"}"
                             }
                         },
                         {
@@ -2982,7 +3005,7 @@ mod chat_completions_request_tests {
                             "type": "function",
                             "function": {
                                 "name": "exec_command",
-                                "arguments": "ls"
+                                "arguments": "{\"cmd\":\"ls\"}"
                             }
                         }
                     ],
@@ -3035,7 +3058,7 @@ mod chat_completions_request_tests {
                             "type": "function",
                             "function": {
                                 "name": "exec_command",
-                                "arguments": "ls"
+                                "arguments": "{\"cmd\":\"ls\"}"
                             }
                         }
                     ],
@@ -3163,6 +3186,109 @@ mod chat_completions_request_tests {
     }
 
     #[test]
+    fn chat_completions_request_normalizes_tool_call_arguments_to_json_objects() {
+        let request = build_request(vec![
+            function_call("call-empty", ""),
+            function_call("call-bare", "pwd"),
+            custom_tool_call("call-string", r#""ls""#),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-empty",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{}"
+                            }
+                        },
+                        {
+                            "id": "call-bare",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-string",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_preserves_object_arguments_and_wraps_other_tools() {
+        // Multi-key object with keys in non-sorted order: must be preserved
+        // verbatim (no BTreeMap reordering, no redundant re-serialization).
+        // Non-exec/shell tool names wrap into `{"input": ...}`. Bare text is
+        // trimmed before wrapping so whitespace is not smuggled into the value.
+        let request = build_request(vec![
+            function_call("call-obj", r#"{"workdir":"/tmp","cmd":"pwd"}"#),
+            function_call_named("call-input", "summarize", "some text"),
+            function_call_named("call-num", "summarize", "42"),
+            function_call("call-ws", "  pwd  "),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-obj",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"workdir\":\"/tmp\",\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-input",
+                            "type": "function",
+                            "function": {
+                                "name": "summarize",
+                                "arguments": "{\"input\":\"some text\"}"
+                            }
+                        },
+                        {
+                            "id": "call-num",
+                            "type": "function",
+                            "function": {
+                                "name": "summarize",
+                                "arguments": "{\"input\":42}"
+                            }
+                        },
+                        {
+                            "id": "call-ws",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn chat_completions_request_keeps_reasoning_between_assistant_text_and_tool_call() {
         let request = build_request(vec![
             assistant_message("Running command"),
@@ -3187,7 +3313,6 @@ mod chat_completions_request_tests {
                             }
                         }
                     ],
-                    "reasoning": "Need to call a tool",
                     "reasoning_content": "Need to call a tool"
                 },
                 {

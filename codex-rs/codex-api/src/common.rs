@@ -359,9 +359,6 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ChatToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// Reasoning content for assistant messages (e.g., o1, o3 models).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<String>,
     /// Reasoning content for models with thinking/reasoning mode (e.g., DeepSeek).
     /// This field maps to the wire key `reasoning_content` as required by DeepSeek's
     /// thinking mode API. When tool calls are present in an assistant message, the
@@ -535,7 +532,6 @@ mod chat_message_tests {
             content: Some(serde_json::Value::String("Hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
-            reasoning: None,
             reasoning_content: Some("DeepSeek thinking...".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -556,60 +552,12 @@ mod chat_message_tests {
             content: Some(serde_json::Value::String("Hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
-            reasoning: None,
             reasoning_content: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
             !json.contains("reasoning_content"),
             "should not contain reasoning_content when None"
-        );
-    }
-
-    #[test]
-    fn reasoning_still_serializes_independently() {
-        let msg = ChatMessage {
-            role: "assistant".to_string(),
-            content: Some(serde_json::Value::String("Hello".to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning: Some("high".to_string()),
-            reasoning_content: None,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("reasoning"), "should contain reasoning key");
-        assert!(
-            !json.contains("reasoning_content"),
-            "should not contain reasoning_content"
-        );
-    }
-
-    #[test]
-    fn both_fields_can_coexist() {
-        let msg = ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![ChatToolCall {
-                id: "call_1".to_string(),
-                r#type: "function".to_string(),
-                function: ChatFunctionCall {
-                    name: "shell".to_string(),
-                    arguments: Some("{}".to_string()),
-                },
-            }]),
-            tool_call_id: None,
-            reasoning: Some("high".to_string()),
-            reasoning_content: Some("Step-by-step analysis...".to_string()),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(
-            json.contains("\"reasoning\":\"high\"") || json.contains("\"reasoning\": \"high\""),
-            "should contain reasoning: high"
-        );
-        assert!(
-            json.contains("\"reasoning_content\":\"Step-by-step analysis...\"")
-                || json.contains("\"reasoning_content\": \"Step-by-step analysis...\""),
-            "should contain reasoning_content"
         );
     }
 }
