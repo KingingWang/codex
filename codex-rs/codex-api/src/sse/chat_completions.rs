@@ -4,6 +4,7 @@ use crate::common::ChatCompletionChoice;
 use crate::common::ChatCompletionsStreamEvent;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
+use crate::common::normalize_chat_completion_tool_arguments;
 use crate::error::ApiError;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
@@ -34,13 +35,7 @@ type ToolCallAccumulator = (Option<String>, Option<String>, Option<String>);
 /// ("arguments must be in JSON format").
 fn normalize_tool_call_arguments(arguments: Option<String>) -> String {
     match arguments {
-        Some(args) if !args.is_empty() => {
-            if serde_json::from_str::<serde_json::Value>(&args).is_ok() {
-                args
-            } else {
-                "{}".to_string()
-            }
-        }
+        Some(args) => normalize_chat_completion_tool_arguments(&args),
         _ => "{}".to_string(),
     }
 }
@@ -616,6 +611,35 @@ mod tests {
             Ok(ResponseEvent::OutputItemDone(
                 ResponseItem::FunctionCall { name, .. }
             )) if name == "get_weather"
+        ));
+        assert!(matches!(&events[3], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn concatenated_tool_arguments_are_normalized() {
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
+            if name == "exec_command"
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::ToolCallInputDelta { call_id, delta, .. })
+            if call_id.as_deref() == Some("call_123")
+            && delta == r#"{"cmd":"pwd"}"#
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { arguments, .. }))
+            if arguments == r#"{"cmd":"pwd"}"#
         ));
         assert!(matches!(&events[3], Ok(ResponseEvent::Completed { .. })));
     }

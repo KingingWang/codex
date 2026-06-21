@@ -2509,7 +2509,9 @@ fn ensure_valid_json_arguments(name: &str, arguments: &str) -> String {
         Ok(value) => wrap_non_object_tool_arguments(name, value),
         // Non-JSON text (e.g. legacy bare command strings): wrap the trimmed
         // text so leading/trailing whitespace is not smuggled into the value.
-        Err(_) => wrap_non_object_tool_arguments(name, serde_json::Value::String(trimmed.to_string())),
+        Err(_) => {
+            wrap_non_object_tool_arguments(name, serde_json::Value::String(trimmed.to_string()))
+        }
     }
 }
 

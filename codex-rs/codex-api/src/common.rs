@@ -521,9 +521,69 @@ where
     }
 }
 
+/// Normalizes chat completions tool call arguments to a single JSON value.
+///
+/// Some Chat Completions-compatible providers occasionally return multiple
+/// adjacent JSON values in `function.arguments` (for example `{}` followed by
+/// the actual object). Downstream tool handlers expect one JSON string, so keep
+/// valid single values as-is and recover adjacent JSON values by using the last
+/// object. Empty or unrecoverable arguments default to `{}` to match the
+/// existing streaming fallback behavior.
+pub(crate) fn normalize_chat_completion_tool_arguments(arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return "{}".to_string();
+    }
+
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    let mut parsed_values = serde_json::Deserializer::from_str(trimmed).into_iter();
+    let mut last_value = None;
+    let mut value_count = 0;
+    for value in &mut parsed_values {
+        let value = match value {
+            Ok(value) => value,
+            Err(_) => return "{}".to_string(),
+        };
+        value_count += 1;
+        last_value = Some(value);
+    }
+
+    if value_count > 1
+        && let Some(value @ serde_json::Value::Object(_)) = last_value
+    {
+        return value.to_string();
+    }
+
+    "{}".to_string()
+}
+
 #[cfg(test)]
 mod chat_message_tests {
     use super::*;
+
+    #[test]
+    fn normalizes_concatenated_tool_arguments_to_last_object() {
+        assert_eq!(
+            normalize_chat_completion_tool_arguments(r#"{}{"cmd":"pwd"}"#),
+            r#"{"cmd":"pwd"}"#
+        );
+    }
+
+    #[test]
+    fn preserves_valid_tool_arguments() {
+        assert_eq!(
+            normalize_chat_completion_tool_arguments(r#" {"cmd":"pwd"} "#),
+            r#"{"cmd":"pwd"}"#
+        );
+    }
+
+    #[test]
+    fn defaults_unrecoverable_tool_arguments_to_empty_object() {
+        assert_eq!(normalize_chat_completion_tool_arguments("not json"), "{}");
+    }
 
     #[test]
     fn reasoning_content_serializes_when_some() {

@@ -8,6 +8,7 @@ use crate::common::ChatCompletionsRequest;
 use crate::common::ChatCompletionsResponse;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
+use crate::common::normalize_chat_completion_tool_arguments;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::sse::chat_completions::spawn_chat_completions_stream;
@@ -281,6 +282,7 @@ async fn convert_response_to_events(
         // Handle tool calls if present
         if let Some(tool_calls) = &message.tool_calls {
             for (i, tc) in tool_calls.iter().enumerate() {
+                let arguments = normalize_chat_completion_tool_arguments(&tc.function.arguments);
                 // Emit OutputItemAdded with empty arguments to establish the
                 // active item. The turn processor needs an active_item before
                 // it can handle delta events.
@@ -306,7 +308,7 @@ async fn convert_response_to_events(
                     .send(Ok(ResponseEvent::ToolCallInputDelta {
                         item_id: format!("call_{i}"),
                         call_id: Some(tc.id.clone()),
-                        delta: tc.function.arguments.clone(),
+                        delta: arguments.clone(),
                     }))
                     .await
                     .is_err()
@@ -319,7 +321,7 @@ async fn convert_response_to_events(
                     id: None,
                     namespace: namespace_map.get(&tc.function.name).cloned(),
                     name: tc.function.name.clone(),
-                    arguments: tc.function.arguments.clone(),
+                    arguments,
                     call_id: tc.id.clone(),
                     metadata: None,
                 };
@@ -436,7 +438,9 @@ fn extract_reasoning_text(reasoning: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use crate::common::ChatCompletionResponseChoice;
+    use crate::common::ChatCompletionResponseFunction;
     use crate::common::ChatCompletionResponseMessage;
+    use crate::common::ChatCompletionResponseToolCall;
     use crate::common::ChatCompletionUsage;
     use crate::common::ChatCompletionsResponse;
 
@@ -529,6 +533,56 @@ mod tests {
                 total_tokens: 15,
             }),
         }
+    }
+
+    fn concatenated_tool_arguments_response() -> ChatCompletionsResponse {
+        ChatCompletionsResponse {
+            id: "resp-5".to_string(),
+            object: "chat.completion".to_string(),
+            created: Some(1234567890),
+            model: Some("test-model".to_string()),
+            choices: vec![ChatCompletionResponseChoice {
+                index: 0,
+                message: ChatCompletionResponseMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![ChatCompletionResponseToolCall {
+                        id: "call_123".to_string(),
+                        r#type: "function".to_string(),
+                        function: ChatCompletionResponseFunction {
+                            name: "exec_command".to_string(),
+                            arguments: r#"{}{"cmd":"pwd"}"#.to_string(),
+                        },
+                    }]),
+                    reasoning: None,
+                },
+                finish_reason: Some("tool_calls".to_string()),
+            }],
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn concatenated_tool_arguments_are_normalized() {
+        let events = collect_events(concatenated_tool_arguments_response()).await;
+
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
+            if name == "exec_command"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::ToolCallInputDelta { delta, .. })
+            if delta == r#"{"cmd":"pwd"}"#
+        ));
+        assert!(matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { arguments, .. }))
+            if arguments == r#"{"cmd":"pwd"}"#
+        ));
+        assert!(matches!(&events[4], Ok(ResponseEvent::Completed { .. })));
     }
 
     #[tokio::test]
