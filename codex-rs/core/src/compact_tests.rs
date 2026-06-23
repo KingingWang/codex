@@ -264,6 +264,32 @@ fn build_compacted_history_preserves_user_message_passthrough_metadata() {
     assert_eq!(history[1].turn_id(), None);
 }
 
+#[test]
+fn should_use_remote_compact_task_for_azure_provider() {
+    let provider = ModelProviderInfo {
+        name: "Azure".into(),
+        base_url: Some("https://example.com/openai".into()),
+        env_key: Some("AZURE_OPENAI_API_KEY".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        chat_stream: false,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+
+    assert!(should_use_remote_compact_task(&provider));
+}
 #[tokio::test]
 async fn process_compacted_history_replaces_developer_messages() {
     let compacted_history = vec![
