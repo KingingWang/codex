@@ -20,6 +20,7 @@ base_url = "http://localhost:11434/v1"
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -53,6 +54,7 @@ query_params = { api-version = "2025-04-01-preview" }
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: Some(maplit::hashmap! {
             "api-version".to_string() => "2025-04-01-preview".to_string(),
         }),
@@ -90,6 +92,7 @@ supports_standalone_web_search = true
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: Some(maplit::hashmap! {
             "X-Example-Header".to_string() => "example-value".to_string(),
@@ -111,19 +114,6 @@ supports_standalone_web_search = true
 }
 
 #[test]
-fn test_deserialize_chat_wire_api_shows_helpful_error() {
-    let provider_toml = r#"
-name = "OpenAI using Chat Completions"
-base_url = "https://api.openai.com/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "chat"
-        "#;
-
-    let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
-    assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
-}
-
-#[test]
 fn test_deserialize_websocket_connect_timeout() {
     let provider_toml = r#"
 name = "OpenAI"
@@ -137,21 +127,100 @@ supports_websockets = true
 }
 
 #[test]
-fn test_personal_access_token_uses_chatgpt_codex_base_url() {
-    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
-        .to_api_provider(Some(AuthMode::PersonalAccessToken))
-        .expect("OpenAI provider should build API provider");
+fn test_supports_remote_compaction_for_openai() {
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
 
-    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+    assert!(provider.supports_remote_compaction());
 }
 
 #[test]
-fn test_header_auth_uses_chatgpt_codex_base_url() {
-    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
-        .to_api_provider(Some(AuthMode::Headers))
-        .expect("OpenAI provider should build API provider");
+fn test_personal_access_token_requires_explicit_base_url() {
+    // DISABLED: Internal deployment - removed external OpenAI/ChatGPT defaults.
+    // Without an explicit `base_url`, a chatgpt/pat provider must NOT fall
+    // back to the implicit ChatGPT Codex base URL; it must error out.
+    let result = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        .to_api_provider(Some(AuthMode::PersonalAccessToken));
+    assert!(result.is_err(), "personal-access-token provider must require an explicit base_url (external defaults disabled)");
 
-    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+    // When an explicit base_url is configured, it is preserved verbatim and
+    // must NOT be silently rewritten to the upstream ChatGPT Codex URL.
+    let api_provider = ModelProviderInfo::create_openai_provider(Some(
+        "https://configured.example.com/codex".to_string(),
+    ))
+    .to_api_provider(Some(AuthMode::PersonalAccessToken))
+    .expect("OpenAI provider with explicit base_url should build API provider");
+    assert_ne!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+}
+
+#[test]
+fn test_header_auth_requires_explicit_base_url() {
+    // DISABLED: Internal deployment - removed external OpenAI/ChatGPT defaults.
+    // Header-auth providers must likewise require an explicit `base_url`
+    // instead of falling back to the implicit ChatGPT Codex base URL.
+    let result = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        .to_api_provider(Some(AuthMode::Headers));
+    assert!(result.is_err(), "header-auth provider must require an explicit base_url (external defaults disabled)");
+
+    let api_provider = ModelProviderInfo::create_openai_provider(Some(
+        "https://configured.example.com/codex".to_string(),
+    ))
+    .to_api_provider(Some(AuthMode::Headers))
+    .expect("OpenAI provider with explicit base_url should build API provider");
+    assert_ne!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+}
+
+#[test]
+fn test_supports_remote_compaction_for_azure_name() {
+    let provider = ModelProviderInfo {
+        name: "Azure".into(),
+        base_url: Some("https://example.com/openai".into()),
+        env_key: Some("AZURE_OPENAI_API_KEY".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        chat_stream: false,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+
+    assert!(provider.supports_remote_compaction());
+}
+
+#[test]
+fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
+    let provider = ModelProviderInfo {
+        name: "Example".into(),
+        base_url: Some("https://example.com/v1".into()),
+        env_key: Some("API_KEY".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        chat_stream: false,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+
+    assert!(!provider.supports_remote_compaction());
 }
 
 #[test]
@@ -245,6 +314,7 @@ fn test_create_amazon_bedrock_provider() {
                 region: None,
             }),
             wire_api: WireApi::Responses,
+            chat_stream: false,
             query_params: None,
             http_headers: Some(maplit::hashmap! {
                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string() =>
