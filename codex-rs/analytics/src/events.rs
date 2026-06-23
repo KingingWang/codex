@@ -58,6 +58,7 @@ pub enum AppServerRpcTransport {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub(crate) struct TrackEventsRequest {
     pub(crate) events: Vec<TrackEventRequest>,
 }
@@ -154,6 +155,7 @@ pub(crate) fn codex_artifact_operation_event_request(
 }
 
 impl TrackEventRequest {
+    #[allow(dead_code)]
     pub(crate) fn should_send_in_isolated_request(&self) -> bool {
         matches!(self, Self::AcceptedLineFingerprints(_))
     }
