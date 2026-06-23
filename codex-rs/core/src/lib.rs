@@ -9,6 +9,7 @@ mod apply_patch;
 mod apps;
 mod audio_preparation;
 mod client;
+mod client_anthropic;
 mod client_common;
 mod realtime_context;
 mod realtime_conversation;
