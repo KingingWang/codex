@@ -1075,6 +1075,15 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+
+    /// Optional path to a script whose output is dynamically appended to the
+    /// end of each request input. The script runs fresh for every sampling
+    /// request and its output is never persisted to conversation history.
+    pub dynamic_context_script: Option<String>,
+
+    /// Timeout for `dynamic_context_script` execution.
+    /// Defaults to 5 seconds.
+    pub dynamic_context_script_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -3619,7 +3628,7 @@ impl Config {
 
         let review_model = override_review_model.or(cfg.review_model);
 
-        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
+        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(false);
         let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
 
         let log_dir = cfg
@@ -3924,7 +3933,7 @@ impl Config {
                 .feedback
                 .as_ref()
                 .and_then(|feedback| feedback.enabled)
-                .unwrap_or(true),
+                .unwrap_or(false),
             tool_suggest,
             tui_notifications: cfg
                 .tui
@@ -3979,6 +3988,10 @@ impl Config {
                 .map(|t| t.keymap.clone())
                 .unwrap_or_default(),
             otel,
+            dynamic_context_script: cfg.dynamic_context_script.clone(),
+            dynamic_context_script_timeout: std::time::Duration::from_secs(
+                cfg.dynamic_context_script_timeout_secs.unwrap_or(5),
+            ),
         };
         Ok(config)
         })

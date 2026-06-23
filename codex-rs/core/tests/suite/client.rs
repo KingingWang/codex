@@ -1181,6 +1181,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         auth: Some(auth),
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -2792,6 +2793,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -3408,6 +3410,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         )])),
         env_key_instructions: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
             "Value".to_string(),
@@ -3497,6 +3500,7 @@ async fn env_var_overrides_loaded_auth() {
         auth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
             "Value".to_string(),

@@ -2,6 +2,7 @@ use crate::FreeformTool;
 use crate::JsonSchema;
 use crate::LoadableToolSpec;
 use crate::ResponsesApiNamespace;
+use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchFilters as ConfigWebSearchFilters;
@@ -85,6 +86,55 @@ pub fn create_tools_json_for_responses_api(
     for tool in tools {
         let json = serde_json::to_value(tool)?;
         tools_json.push(json);
+    }
+
+    Ok(tools_json)
+}
+
+/// Returns JSON values that are compatible with Function Calling in the
+/// Chat Completions API:
+/// https://platform.openai.com/docs/guides/function-calling?api-mode=responses
+pub fn create_tools_json_for_chat_completions(
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>, serde_json::Error> {
+    let mut tools_json = Vec::new();
+
+    for tool in tools {
+        match tool {
+            ToolSpec::Function(resp_tool) => {
+                // Convert to chat/completions format: {"type": "function", "function": {...}}
+                let func = serde_json::json!({
+                    "name": resp_tool.name,
+                    "description": resp_tool.description,
+                    "parameters": resp_tool.parameters,
+                });
+                tools_json.push(serde_json::json!({
+                    "type": "function",
+                    "function": func,
+                }));
+            }
+            ToolSpec::Namespace(ns) => {
+                // Convert namespace tools to individual function tools
+                for tool in &ns.tools {
+                    match tool {
+                        ResponsesApiNamespaceTool::Function(resp_tool) => {
+                            let func = serde_json::json!({
+                                "name": resp_tool.name,
+                                "description": resp_tool.description,
+                                "parameters": resp_tool.parameters,
+                            });
+                            tools_json.push(serde_json::json!({
+                                "type": "function",
+                                "function": func,
+                            }));
+                        }
+                    }
+                }
+            }
+            // Other tool types (web_search, image_generation, etc.) are not supported
+            // in chat/completions API - skip them
+            _ => {}
+        }
     }
 
     Ok(tools_json)
