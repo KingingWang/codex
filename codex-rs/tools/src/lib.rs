@@ -103,6 +103,7 @@ pub use tool_search::ToolSearchInfo;
 pub use tool_spec::ResponsesApiWebSearchFilters;
 pub use tool_spec::ResponsesApiWebSearchUserLocation;
 pub use tool_spec::ToolSpec;
+pub use tool_spec::create_tools_json_for_chat_completions;
 pub use tool_spec::create_tools_json_for_responses_api;
 pub use tool_spec::create_tools_json_for_responses_lite;
 pub use tool_spec::create_tools_raw_json_for_responses_api;

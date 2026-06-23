@@ -1,0 +1,183 @@
+name: rust-release-simple
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 构建矩阵（glibc + musl 静态编译）─────────
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 1200
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    strategy:
+      matrix:
+        include:
+          # ── glibc 构建 ──
+          - os: ubuntu-22.04
+            target: ""
+            label: ubuntu22
+          - os: ubuntu-latest
+            target: ""
+            label: ubuntu24
+          # ── musl 静态编译 ──
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            label: musl
+      fail-fast: false   # 一个失败不影响其他
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      # 不指定版本，由 rust-toolchain.toml 控制实际使用的 Rust 版本
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── musl 专用步骤（与官方 rust-release.yml 一致）──
+      - name: Use hermetic Cargo home (musl)
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig (musl)
+        if: matrix.target != ''
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        if: matrix.target != ''
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy (musl)
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          # aws-lc-sys jitter entropy fails under musl on GitHub runners.
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+
+      # 下载官方预编译的 rusty_v8 musl 静态库
+      # denoland 官方 releases 没有 musl 版本，需要从 OpenAI 的 releases 下载
+      - name: Setup rusty_v8 artifacts (musl)
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # 从 Cargo.lock 读取 v8 版本
+          v8_version="$(grep -A 1 '^name = "v8"$' Cargo.lock | grep '^version = ' | sed 's/version = "\([^"]*\)"/\1/')"
+          echo "V8 version: ${v8_version}"
+          
+          target="${{ matrix.target }}"
+          release_tag="rusty-v8-v${v8_version}"
+          base_url="https://github.com/openai/codex/releases/download/${release_tag}"
+          binding_dir="${RUNNER_TEMP}/rusty_v8"
+          
+          mkdir -p "${binding_dir}"
+          
+          archive_path="${binding_dir}/librusty_v8_release_${target}.a.gz"
+          binding_path="${binding_dir}/src_binding_release_${target}.rs"
+          
+          echo "Downloading rusty_v8 artifacts from ${base_url}..."
+          curl -fsSL "${base_url}/librusty_v8_release_${target}.a.gz" -o "${archive_path}"
+          curl -fsSL "${base_url}/src_binding_release_${target}.rs" -o "${binding_path}"
+          
+          echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
+          echo "✅ rusty_v8 artifacts downloaded"
+
+      # ── 构建 ──
+      - name: Build release binary (glibc)
+        if: matrix.target == ''
+        env:
+          # workspace profile.release 默认 lto="fat" + codegen-units=4，是 OOM 元凶。
+          # fat LTO 把整个 workspace bitcode 全载入内存做全程序优化，峰值 >10GB，
+          # 在 16GB runner 上编到大型 crate（如 codex-core/tui）的 LTO 链接阶段
+          # 就吃光内存被 OOM killer 杀掉（exit 143 = SIGTERM）。改用 thin LTO +
+          # 16 codegen-units 降低单次内存峰值。
+          CARGO_PROFILE_RELEASE_LTO: "thin"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: cargo build --release -j 1
+
+      - name: Build release binary (musl)
+        if: matrix.target != ''
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "thin"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: cargo build --release --target ${{ matrix.target }} -j 1
+
+      # 将二进制重命名为带 OS 标识的名字
+      - name: Prepare release artifact
+        run: |
+          mkdir -p dist
+          if [ -n "${{ matrix.target }}" ]; then
+            BINARY_DIR="target/${{ matrix.target }}/release"
+          else
+            BINARY_DIR="target/release"
+          fi
+          BINARY_NAME="codex-linux-x86_64-${{ matrix.label }}"
+          cp "${BINARY_DIR}/codex" "dist/${BINARY_NAME}"
+          echo "binary=${BINARY_NAME}" >> "$GITHUB_ENV"
+
+      # 上传 artifact 供后续 Release Job 使用
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-${{ matrix.label }}
+          path: codex-rs/dist
+
+  # ── 发布（只跑一次，收集所有构建产物）─────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: codex-*
+          merge-multiple: true
+
+      - name: Set release version (date-based)
+        id: version
+        run: |
+          VERSION="$(date '+%Y%m%d-%H%M%S')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.version }}
+          files: release-assets/*
+          prerelease: false
