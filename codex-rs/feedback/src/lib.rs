@@ -54,9 +54,9 @@ pub const CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME: &str = "codex-app-direc
 /// Filename used for the Windows sandbox log feedback attachment.
 pub const WINDOWS_SANDBOX_LOG_ATTACHMENT_FILENAME: &str = "windows-sandbox.log";
 const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
-const SENTRY_DSN: &str =
-    "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 300);
+// DISABLED: Internal deployment - no external feedback collection
+const SENTRY_DSN: &str = "";
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
 // Raw collection budgets used by the report API, not the interactive upload.
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ATTACHMENTS_BYTES: usize = 126 * 1024 * 1024;
@@ -569,6 +569,12 @@ impl FeedbackSnapshot {
         dsn: &str,
         deadline: Instant,
     ) -> Result<()> {
+        if dsn.is_empty() {
+            // DISABLED: Internal deployment - no external feedback collection
+            let _ = (options, http_client_factory);
+            return Ok(());
+        }
+
         use std::str::FromStr;
 
         use sentry::protocol::Envelope;

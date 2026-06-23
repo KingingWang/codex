@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
@@ -279,9 +281,23 @@ async fn run_compact_task_inner_impl(
             .clone()
             .for_prompt(&turn_context.model_info().input_modalities);
         let turn_input_len = turn_input.len();
+
+        // Get tools for the prompt (same as in turn.rs build_prompt).
+        // built_tools now lives behind capture_step_context (rust-v0.146.0): it builds the
+        // per-step ToolRouter and stores it on the captured StepContext.
+        let cancellation_token = CancellationToken::new();
+        let step_context = sess
+            .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
+            .await?;
         let prompt = Prompt {
             input: turn_input,
+        let prompt = Prompt {
+            input: turn_input,
+            tools: step_context.tool_router.model_visible_specs(),
+            parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
             base_instructions: sess.get_prompt_base_instructions().await,
+            ..Default::default()
+        };
             ..Default::default()
         };
         let attempt_result = drain_to_completed(
