@@ -22,35 +22,9 @@ use crate::version::CODEX_CLI_VERSION;
 pub(crate) use crate::updates_cache::dismiss_version;
 
 pub fn get_upgrade_version(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
-        return None;
-    }
-
-    let action = update_action::get_update_action();
-    let version_file = version_filepath(config);
-    let info = read_version_info(&version_file).ok();
-
-    if match &info {
-        None => true,
-        Some(info) => info.last_checked_at < Utc::now() - Duration::hours(20),
-    } {
-        // Refresh the cached latest version in the background so TUI startup
-        // isn’t blocked by a network call. The UI reads the previously cached
-        // value (if any) for this run; the next run shows the banner if needed.
-        tokio::spawn(async move {
-            check_for_update(&version_file, action)
-                .await
-                .inspect_err(|e| tracing::error!("Failed to update version: {e}"))
-        });
-    }
-
-    info.and_then(|info| {
-        if is_newer(&info.latest_version, CODEX_CLI_VERSION).unwrap_or(false) {
-            Some(info.latest_version)
-        } else {
-            None
-        }
-    })
+    // DISABLED: Internal deployment - no external version checks
+    let _ = config;
+    None
 }
 
 // We use the latest version from the cask if installation is via homebrew - homebrew does not immediately pick up the latest release and can lag behind.
