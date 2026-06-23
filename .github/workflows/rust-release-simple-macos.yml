@@ -1,0 +1,152 @@
+name: rust-release-simple-macos
+
+# 仅编译 macOS 二进制（原生编译，不打包 DMG、不签名/公证）。
+# 风格对齐 rust-release-simple.yml，但加上 macOS 必需的 v8 预编译库处理。
+#
+# 防内存 / 防超时的核心思路：
+#   1. 用官方 setup-rusty-v8 下载预编译静态库，跳过 V8 源码编译
+#      （V8 从源码编会爆内存 + 超过 6 小时，这是唯一真正的风险点）。
+#   2. 两个架构各自走【原生】runner 编译，不做交叉编译
+#      （交叉编 V8 的 target 容易不匹配，且更慢更吃内存）。
+#   3. 只编 --bin codex，不开 --all-features、不开 LTO。
+#   4. Swatinem/rust-cache 缓存 target/，二次构建只跑增量。
+#   5. 缓存恢复后清理 v8 构建产物，强制 build.rs 重新下载/解压静态库，
+#      避免 rust-cache 只恢复了 fingerprint 而未恢复 .a 文件导致链接失败。
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 构建矩阵（两个架构各自原生编译）─────────────
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360   # 原生编译 + 预编译 v8，通常 20–40 分钟，留足 buffer
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon: macos-15 (ARM, Xcode 16+), 原生编 aarch64
+          # 注: 不能用 macos-14 (Xcode 15.4), webrtc-sys cxx 绑定与该 SDK 不兼容
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            label: aarch64
+          # Intel x86_64: 也在 macos-15 (ARM) 上交叉编译, 与官方 rust-release.yml 一致
+          # macos-13 (Xcode 15) 同样有 webrtc-sys 兼容问题
+          - runner: macos-15
+            target: x86_64-apple-darwin
+            label: x86_64
+
+    env:
+      # macOS runner 用 libgit2 拉子模块（libwebrtc/libyuv）会间歇性失败，改走 git CLI
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # workspace profile.release 默认 lto="fat" + codegen-units=4，是 OOM 元凶。
+      # fat LTO 会把整个 workspace 100+ crate 的 bitcode 全部载入内存做全程序优化，
+      # 峰值轻松超过 10GB，在 7-14GB 的 GitHub-hosted runner 上必爆内存/卡死。
+      # 这里用环境变量覆盖：thin LTO（per-crate，内存峰值远低于 fat）+ 16 codegen-units
+      # （每单元更小，降低单次编译内存峰值），代价是 binary 略大，换来稳定编译。
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 不指定版本，实际版本由 codex-rs/rust-toolchain.toml 控制
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      # 【关键】下载预编译的 rusty_v8 静态库，避免从源码编译 V8（防 OOM + 防超时）
+      # 该 action 下载 URL 写死指向 openai/codex 的 release，fork 仓库也能拉到。
+      - name: Setup rusty_v8 prebuilt artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cache Cargo target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          key: ${{ matrix.target }}
+
+      # rust-cache 可能恢复了 v8 的 build script fingerprint 但未恢复实际的
+      # librusty_v8.a 静态库（大文件被裁剪），导致 Cargo 跳过 build.rs 重跑、
+      # 链接器找不到静态库。此步骤删除 v8 的 build 输出，强制 build.rs 重新执行。
+      - name: Clean stale v8 build artifacts from cache
+        shell: bash
+        run: |
+          set -uo pipefail
+          target="${{ matrix.target }}"
+          # Remove v8 build script output directories (fingerprint + output)
+          # so Cargo is forced to re-run the v8 build.rs, which will
+          # decompress RUSTY_V8_ARCHIVE into the correct location.
+          find "target/${target}/release/build" -maxdepth 1 -type d -name 'v8-*' -exec rm -rf {} + 2>/dev/null || true
+          # Also remove the decompressed static lib and its checksum if they exist,
+          # so the build.rs re-downloads/decompresses from RUSTY_V8_ARCHIVE.
+          rm -rf "target/${target}/release/gn_out" 2>/dev/null || true
+          echo "Cleaned stale v8 build artifacts (if any)"
+
+      # 若仍遇到内存不足，取消下面两行注释限制编译并行度
+      - name: Limit build jobs to avoid OOM
+        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --bin codex --timings
+
+      - name: Prepare release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/codex" "dist/codex-macos-${{ matrix.label }}"
+          # 顺带压缩一份，便于分发
+          zstd -T0 -19 --rm "dist/codex-macos-${{ matrix.label }}" || true
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-macos-${{ matrix.label }}
+          path: codex-rs/dist/*
+
+  # ── 发布（收集所有 macOS 产物）─────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: codex-macos-*
+          merge-multiple: true
+
+      - name: Set release version (date-based)
+        id: version
+        run: |
+          VERSION="$(date '+%Y%m%d-%H%M%S')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          name: macos-${{ steps.version.outputs.version }}
+          tag_name: macos-${{ steps.version.outputs.version }}
+          files: release-assets/*
+          prerelease: false
