@@ -30,8 +30,12 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use codex_api::AnthropicClient as ApiAnthropicClient;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
+use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
+use codex_api::ChatCompletionsRequest;
+use codex_api::ChatMessage;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::Compression;
@@ -82,6 +86,9 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
+use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ToolSpec;
+use codex_tools::create_tools_json_for_chat_completions;
 use codex_tools::create_tools_json_for_responses_api;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
@@ -95,6 +102,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
+use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -1682,6 +1690,23 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Chat => {
+                self.stream_chat_completions_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    None,
+                    inference_trace,
+                )
+                .await
+            }
+            WireApi::Anthropic => {
+                self.stream_anthropic_api(prompt, model_info, session_telemetry, inference_trace)
+                    .await
+            }
         }
     }
 
@@ -1701,6 +1726,1851 @@ impl ModelClientSession {
             .force_http_fallback(session_telemetry, model_info);
         self.websocket_session = WebsocketSession::default();
         activated
+    }
+
+    /// Streams a turn via the OpenAI Chat Completions API.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_chat_completions_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "chat_completions_http",
+            http.method = "POST",
+            api.path = "chat/completions"
+        )
+    )]
+    async fn stream_chat_completions_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        _summary: ReasoningSummaryConfig,
+        _service_tier: Option<String>,
+        _turn_metadata_header: Option<&str>,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        let mut retry_count: u32 = 0;
+        let mut auth_retry_count: u32 = 0;
+        const MAX_AUTH_RETRIES: u32 = 10;
+        let base_delay = Duration::from_secs(5);
+        let max_delay = Duration::from_secs(600); // 10 minutes
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                pending_retry,
+            );
+            let (_, _sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint("/chat/completions"),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+
+            let request =
+                self.build_chat_completions_request(prompt, model_info, effort.clone())?;
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.record_started(&request);
+            let chat_stream = self.client.state.provider.info().chat_stream;
+            let client = ApiChatCompletionsClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+                chat_stream,
+            );
+            let stream_result = client.request(request, ApiHeaderMap::new()).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        inference_trace_attempt,
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    match handle_unauthorized(
+                        unauthorized_transport,
+                        &mut auth_recovery,
+                        session_telemetry,
+                    )
+                    .await
+                    {
+                        Ok(recovery) => {
+                            pending_retry = PendingUnauthorizedRetry::from_recovery(recovery);
+                            retry_count = 0;
+                            auth_retry_count = 0;
+                            continue;
+                        }
+                        Err(err) => {
+                            // Custom API providers can't refresh tokens, but 401s
+                            // may be transient. Retry with backoff up to 10 times.
+                            if auth_retry_count < MAX_AUTH_RETRIES {
+                                let delay = base_delay
+                                    .saturating_mul(
+                                        1u32.checked_shl(auth_retry_count.min(20))
+                                            .unwrap_or(u32::MAX),
+                                    )
+                                    .min(max_delay);
+                                warn!(
+                                    auth_retry_count,
+                                    delay_ms = delay.as_millis(),
+                                    "Chat Completions received 401, retrying after backoff"
+                                );
+                                sleep(delay).await;
+                                auth_retry_count += 1;
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    let delay = match &err {
+                        ApiError::Retryable { delay: Some(d), .. } => *d,
+                        _ => {
+                            // Exponential backoff: 5s, 10s, 20s, 40s, ..., capped at 10 min
+                            let multiplier =
+                                1u32.checked_shl(retry_count.min(20)).unwrap_or(u32::MAX);
+                            let base = base_delay.saturating_mul(multiplier);
+                            std::cmp::min(base, max_delay)
+                        }
+                    };
+                    warn!(
+                        retry_count,
+                        delay_ms = delay.as_millis(),
+                        error = %err,
+                        "Chat Completions request failed, retrying after backoff"
+                    );
+                    sleep(delay).await;
+                    retry_count += 1;
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Streams a turn via the Anthropic Messages API.
+    #[instrument(
+        name = "model_client.stream_anthropic_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "anthropic_http",
+            http.method = "POST",
+            api.path = "v1/messages"
+        )
+    )]
+    async fn stream_anthropic_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        let mut retry_count: u32 = 0;
+        let mut auth_retry_count: u32 = 0;
+        const MAX_AUTH_RETRIES: u32 = 10;
+        let base_delay = Duration::from_secs(5);
+        let max_delay = Duration::from_secs(600);
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                pending_retry,
+            );
+            let (_, _sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint("/v1/messages"),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+
+            let request = crate::client_anthropic::build_anthropic_request(prompt, model_info)?;
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.record_started(&request);
+            let chat_stream = self.client.state.provider.info().chat_stream;
+            let client = ApiAnthropicClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+                chat_stream,
+            );
+            let stream_result = client.request(request, ApiHeaderMap::new()).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        inference_trace_attempt,
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    match handle_unauthorized(
+                        unauthorized_transport,
+                        &mut auth_recovery,
+                        session_telemetry,
+                    )
+                    .await
+                    {
+                        Ok(recovery) => {
+                            pending_retry = PendingUnauthorizedRetry::from_recovery(recovery);
+                            retry_count = 0;
+                            auth_retry_count = 0;
+                            continue;
+                        }
+                        Err(err) => {
+                            if auth_retry_count < MAX_AUTH_RETRIES {
+                                let delay = base_delay
+                                    .saturating_mul(
+                                        1u32.checked_shl(auth_retry_count.min(20))
+                                            .unwrap_or(u32::MAX),
+                                    )
+                                    .min(max_delay);
+                                warn!(
+                                    auth_retry_count,
+                                    delay_ms = delay.as_millis(),
+                                    "Anthropic received 401, retrying after backoff"
+                                );
+                                sleep(delay).await;
+                                auth_retry_count += 1;
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        /*upstream_request_id*/ None,
+                        /*output_items*/ &[],
+                    );
+                    let delay = match &err {
+                        ApiError::Retryable { delay: Some(d), .. } => *d,
+                        _ => {
+                            let multiplier =
+                                1u32.checked_shl(retry_count.min(20)).unwrap_or(u32::MAX);
+                            let base = base_delay.saturating_mul(multiplier);
+                            std::cmp::min(base, max_delay)
+                        }
+                    };
+                    warn!(
+                        retry_count,
+                        delay_ms = delay.as_millis(),
+                        error = %err,
+                        "Anthropic request failed, retrying after backoff"
+                    );
+                    sleep(delay).await;
+                    retry_count += 1;
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Builds a ChatCompletionsRequest from a Prompt.
+    fn build_chat_completions_request(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+    ) -> Result<ChatCompletionsRequest> {
+        let instructions = &prompt.base_instructions.text;
+        let input = prompt.get_formatted_input_for_request(false);
+
+        // Convert instructions to a system message
+        let mut messages = Vec::new();
+        if !instructions.is_empty() {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(serde_json::Value::String(instructions.clone())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+
+        // Convert ResponseItems to ChatMessages
+        // First pass: collect reasoning content by anchor index
+        let mut reasoning_by_index: HashMap<usize, String> = HashMap::new();
+        for (idx, item) in input.iter().enumerate() {
+            if let ResponseItem::Reasoning {
+                content: Some(items),
+                ..
+            } = item
+            {
+                let mut text = String::new();
+                for entry in items {
+                    match entry {
+                        codex_protocol::models::ReasoningItemContent::ReasoningText {
+                            text: segment,
+                        }
+                        | codex_protocol::models::ReasoningItemContent::Text { text: segment } => {
+                            text.push_str(segment)
+                        }
+                    }
+                }
+                if !text.trim().is_empty() {
+                    // Attach reasoning to the next assistant output in this turn.
+                    // In thinking mode (e.g., DeepSeek), reasoning precedes the
+                    // assistant's content or tool calls, so it should be attached
+                    // to the *next* relevant item (Message with role=assistant or
+                    // FunctionCall), not a previous assistant message from an
+                    // earlier turn.
+                    for (next_idx, next_item) in input.iter().enumerate().skip(idx + 1) {
+                        match next_item {
+                            ResponseItem::Message { role, .. } if role == "assistant" => {
+                                reasoning_by_index
+                                    .entry(next_idx)
+                                    .and_modify(|v| {
+                                        v.push('\n');
+                                        v.push_str(&text)
+                                    })
+                                    .or_insert(text.clone());
+                                break;
+                            }
+                            ResponseItem::FunctionCall { .. } => {
+                                reasoning_by_index
+                                    .entry(next_idx)
+                                    .and_modify(|v| {
+                                        v.push('\n');
+                                        v.push_str(&text)
+                                    })
+                                    .or_insert(text.clone());
+                                break;
+                            }
+                            // Stop searching if we hit a non-assistant boundary
+                            ResponseItem::Message { role, .. } if role != "assistant" => break,
+                            ResponseItem::FunctionCallOutput { .. } => break,
+                            ResponseItem::CustomToolCallOutput { .. } => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second pass: build messages with reasoning attached.
+        // Consecutive assistant-turn items (Message with role=assistant, FunctionCall,
+        // CustomToolCall, Reasoning) must be merged into a single ChatMessage because
+        // the Chat Completions API requires all tool_calls and content from one
+        // assistant turn to appear on the same message, with tool results immediately
+        // following. If we emit separate messages for text and tool_calls, providers
+        // that validate message ordering will reject the request with a 400 error.
+        let mut pending_assistant: Option<ChatMessage> = None;
+        // Warning messages are recorded before the tool result they describe.
+        // Queue them until the current assistant tool-result block is complete,
+        // or we reach a non-tool boundary.
+        let mut pending_warnings: Vec<ChatMessage> = Vec::new();
+        let mut pending_tool_outputs_in_turn = 0usize;
+        for (idx, item) in input.iter().enumerate() {
+            let reasoning = reasoning_by_index.get(&idx).cloned();
+            match item {
+                ResponseItem::Message { role, content, .. } => {
+                    let mapped_role = match role.as_str() {
+                        "developer" | "system" => "system",
+                        "assistant" => "assistant",
+                        "user" => "user",
+                        other => other,
+                    };
+                    let is_assistant = mapped_role == "assistant";
+                    let msg_content = content_items_to_chat_content(content, is_assistant);
+                    // Text-only view for Warning: detection; images never start with "Warning:".
+                    let text_only = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            codex_protocol::models::ContentItem::OutputText { text, .. } => {
+                                Some(text.clone())
+                            }
+                            codex_protocol::models::ContentItem::InputText { text, .. } => {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    if mapped_role == "assistant" {
+                        if pending_assistant.is_none()
+                            && pending_tool_outputs_in_turn == 0
+                            && !pending_warnings.is_empty()
+                        {
+                            messages.append(&mut pending_warnings);
+                        }
+                        if let Some(msg) = pending_assistant.as_mut() {
+                            // Merge content into existing pending assistant message.
+                            // This handles the case where FunctionCall items appear
+                            // before the Message item in the ResponseItem list.
+                            if let Some(c) = msg_content.clone() {
+                                msg.content = Some(c);
+                            }
+                            // Gate on the surviving `reasoning_content` field;
+                            // the redundant `reasoning` field was removed.
+                            if msg.reasoning_content.is_none() && reasoning.is_some() {
+                                msg.reasoning_content = reasoning.clone();
+                            }
+                        } else {
+                            // Start a new pending assistant message.
+                            pending_assistant = Some(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: msg_content.clone(),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: reasoning.clone(),
+                            });
+                        }
+                    } else {
+                        if mapped_role == "user" && text_only.starts_with("Warning:") {
+                            pending_warnings.push(ChatMessage {
+                                role: "user".to_string(),
+                                content: Some(serde_json::Value::String(text_only)),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                            });
+                            continue;
+                        }
+                        if let Some(msg) = pending_assistant.take() {
+                            messages.push(msg);
+                        }
+                        pending_tool_outputs_in_turn = 0;
+                        if !pending_warnings.is_empty() {
+                            messages.append(&mut pending_warnings);
+                        }
+                        messages.push(ChatMessage {
+                            role: mapped_role.to_string(),
+                            content: msg_content,
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                    }
+                }
+                ResponseItem::FunctionCall {
+                    name,
+                    arguments,
+                    call_id,
+                    ..
+                } => {
+                    let tool_call = codex_api::ChatToolCall {
+                        id: call_id.clone(),
+                        r#type: "function".to_string(),
+                        function: codex_api::ChatFunctionCall {
+                            name: name.clone(),
+                            arguments: Some(ensure_valid_json_arguments(name, arguments)),
+                        },
+                    };
+                    if pending_assistant.is_none()
+                        && pending_tool_outputs_in_turn == 0
+                        && !pending_warnings.is_empty()
+                    {
+                        messages.append(&mut pending_warnings);
+                    }
+                    match pending_assistant.as_mut() {
+                        Some(msg) => {
+                            // Append to existing pending assistant message.
+                            msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
+                            // Gate on the surviving `reasoning_content` field;
+                            // the redundant `reasoning` field was removed.
+                            if msg.reasoning_content.is_none() && reasoning.is_some() {
+                                msg.reasoning_content = reasoning.clone();
+                            }
+                        }
+                        None => {
+                            // No pending assistant — start one with just this tool call.
+                            pending_assistant = Some(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: None,
+                                tool_calls: Some(vec![tool_call]),
+                                tool_call_id: None,
+                                reasoning_content: reasoning.clone(),
+                            });
+                        }
+                    }
+                    pending_tool_outputs_in_turn += 1;
+                }
+                ResponseItem::CustomToolCall {
+                    call_id,
+                    name,
+                    input: tool_input,
+                    ..
+                } => {
+                    let tool_call = codex_api::ChatToolCall {
+                        id: call_id.clone(),
+                        r#type: "function".to_string(),
+                        function: codex_api::ChatFunctionCall {
+                            name: name.clone(),
+                            arguments: Some(ensure_valid_json_arguments(name, tool_input)),
+                        },
+                    };
+                    if pending_assistant.is_none()
+                        && pending_tool_outputs_in_turn == 0
+                        && !pending_warnings.is_empty()
+                    {
+                        messages.append(&mut pending_warnings);
+                    }
+                    match pending_assistant.as_mut() {
+                        Some(msg) => {
+                            msg.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
+                            // Gate on the surviving `reasoning_content` field;
+                            // the redundant `reasoning` field was removed.
+                            if msg.reasoning_content.is_none() && reasoning.is_some() {
+                                msg.reasoning_content = reasoning.clone();
+                            }
+                        }
+                        None => {
+                            pending_assistant = Some(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: None,
+                                tool_calls: Some(vec![tool_call]),
+                                tool_call_id: None,
+                                reasoning_content: reasoning.clone(),
+                            });
+                        }
+                    }
+                    pending_tool_outputs_in_turn += 1;
+                }
+                ResponseItem::FunctionCallOutput {
+                    call_id, output, ..
+                } => {
+                    // Tool result: flush pending assistant, then push tool message.
+                    // Images cannot go in tool-role messages (Chat Completions API only
+                    // supports string content on tool messages). Split them into a
+                    // separate user message instead.
+                    if let Some(msg) = pending_assistant.take() {
+                        messages.push(msg);
+                    }
+                    let (tool_content, user_image_content) =
+                        split_tool_output_into_tool_and_user_content(&output.body);
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: tool_content,
+                        tool_calls: None,
+                        tool_call_id: Some(call_id.clone()),
+                        reasoning_content: None,
+                    });
+                    if let Some(image_content) = user_image_content {
+                        messages.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(image_content),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                    }
+                    pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
+                    if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
+                        messages.append(&mut pending_warnings);
+                    }
+                }
+                ResponseItem::CustomToolCallOutput {
+                    call_id,
+                    name: _,
+                    output,
+                    ..
+                } => {
+                    // Tool result: flush pending assistant, then push tool message.
+                    // Images cannot go in tool-role messages (Chat Completions API only
+                    // supports string content on tool messages). Split them into a
+                    // separate user message instead.
+                    if let Some(msg) = pending_assistant.take() {
+                        messages.push(msg);
+                    }
+                    let (tool_content, user_image_content) =
+                        split_tool_output_into_tool_and_user_content(&output.body);
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: tool_content,
+                        tool_calls: None,
+                        tool_call_id: Some(call_id.clone()),
+                        reasoning_content: None,
+                    });
+                    if let Some(image_content) = user_image_content {
+                        messages.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(image_content),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                    }
+                    pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
+                    if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
+                        messages.append(&mut pending_warnings);
+                    }
+                }
+                ResponseItem::Reasoning { .. } => {
+                    // Reasoning belongs to the current assistant turn, so it should not flush a
+                    // pending assistant message or pending warning queue on its own.
+                }
+                _ => {
+                    // Skip items that don't map cleanly to chat format.
+                    // Flush pending assistant before skipping unknown items.
+                    if let Some(msg) = pending_assistant.take() {
+                        messages.push(msg);
+                    }
+                    pending_tool_outputs_in_turn = 0;
+                    if !pending_warnings.is_empty() {
+                        messages.append(&mut pending_warnings);
+                    }
+                }
+            }
+        }
+        // Flush any remaining pending assistant message.
+        if let Some(msg) = pending_assistant.take() {
+            messages.push(msg);
+        }
+        if !pending_warnings.is_empty() {
+            messages.append(&mut pending_warnings);
+        }
+
+        // DeepSeek thinking mode requires reasoning_content on ALL assistant messages
+        // when the model is in thinking mode. Even if a non-thinking model was used
+        // mid-session, switching back to DeepSeek requires reasoning_content to be
+        // present on every assistant message in the conversation history.
+        // Fill in "No reasoning required" for any assistant message missing this field.
+        for msg in &mut messages {
+            if msg.role == "assistant" && msg.reasoning_content.is_none() {
+                msg.reasoning_content = Some("No reasoning required".to_string());
+            }
+        }
+
+        // Convert tools and build namespace map for MCP tool resolution
+        let tools = create_tools_json_for_chat_completions(&prompt.tools)?;
+        let tool_namespace_map = build_tool_namespace_map(&prompt.tools);
+
+        // Check if there are tool_calls but no tools defined
+        let has_tool_calls = messages.iter().any(|m| m.tool_calls.is_some());
+        if has_tool_calls && tools.is_empty() {
+            return Err(CodexErr::InvalidRequest(
+                "Request has tool_calls but no tools defined. This will cause a 400 error from the API."
+                    .to_string(),
+            ));
+        }
+
+        // Determine reasoning_effort for models that support reasoning
+        let reasoning_effort = if model_info.supports_reasoning_summaries {
+            effort.or_else(|| model_info.default_reasoning_level.clone())
+        } else {
+            None
+        };
+
+        let request = ChatCompletionsRequest {
+            model: model_info.slug.clone(),
+            messages,
+            tools,
+            tool_choice: Some(serde_json::Value::String("auto".to_string())),
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            reasoning_effort,
+            parallel_tool_calls: Some(prompt.parallel_tool_calls),
+            service_tier: None, // TODO: wire through from config or turn settings
+            tool_namespace_map,
+        };
+        Ok(request)
+    }
+}
+
+/// Converts a slice of [`ContentItem`] into a [`serde_json::Value`] suitable for the
+/// `content` field of a Chat Completions API message.
+///
+/// - Text-only content is serialized as a plain `Value::String` (preserving existing
+///   wire format).
+/// - Content that includes at least one `InputImage` is serialized as a multipart
+///   `Value::Array` following the OpenAI Chat Completions multipart format:
+///   `[{"type":"text","text":"..."}, {"type":"image_url","image_url":{"url":"...","detail":"high"}}]`.
+///
+/// For assistant-role messages, `InputImage` items are intentionally dropped because
+/// the Chat Completions API does not support `image_url` parts in assistant messages.
+/// In that case, even if images were present, the result falls back to text-only string format.
+///
+/// Returns `None` when the content slice is empty or contains only dropped items.
+fn content_items_to_chat_content(
+    content: &[codex_protocol::models::ContentItem],
+    is_assistant: bool,
+) -> Option<serde_json::Value> {
+    if content.is_empty() {
+        return None;
+    }
+
+    let mut has_image = false;
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut multipart_parts: Vec<serde_json::Value> = Vec::new();
+
+    for item in content {
+        match item {
+            codex_protocol::models::ContentItem::InputText { text }
+            | codex_protocol::models::ContentItem::OutputText { text } => {
+                text_parts.push(text.clone());
+                multipart_parts.push(serde_json::json!({"type": "text", "text": text.clone()}));
+            }
+            codex_protocol::models::ContentItem::InputImage { image_url, detail } => {
+                if is_assistant {
+                    // Assistant messages in the Chat Completions API only support text
+                    // content parts; drop image items rather than erroring.
+                    continue;
+                }
+                has_image = true;
+                let mut image_url_obj = serde_json::json!({"url": image_url});
+                if let Some(d) = detail {
+                    let detail_str = match d {
+                        codex_protocol::models::ImageDetail::Auto => "auto",
+                        codex_protocol::models::ImageDetail::Low => "low",
+                        codex_protocol::models::ImageDetail::High => "high",
+                        codex_protocol::models::ImageDetail::Original => "original",
+                    };
+                    image_url_obj["detail"] = serde_json::Value::String(detail_str.to_string());
+                }
+                multipart_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": image_url_obj,
+                }));
+            }
+        }
+    }
+
+    if multipart_parts.is_empty() {
+        return None;
+    }
+
+    if has_image && !is_assistant {
+        Some(serde_json::Value::Array(multipart_parts))
+    } else {
+        let joined = text_parts.join("\n");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::String(joined))
+        }
+    }
+}
+
+/// Splits a [`FunctionCallOutputBody`] into a text-only tool message content and,
+/// if present, a multipart user message containing any images.
+///
+/// The Chat Completions API only supports plain-string `content` on `role: "tool"`
+/// messages. Images from tool results (e.g. `view_image`) cannot be placed in the
+/// tool message itself. Instead, they must be delivered via a separate `role: "user"`
+/// message using the multipart content format:
+///
+/// ```json
+/// [{"type":"text","text":"[tool result image]"},
+///  {"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"high"}}]
+/// ```
+///
+/// Ensures that tool call `arguments` is a valid JSON object string.
+///
+/// Some providers return empty arguments (`""`) for tools with no parameters,
+/// while legacy history can contain bare command strings. Strict Chat
+/// Completions providers reject those values because function call arguments
+/// must be a JSON object string. Preserve valid JSON objects as-is, normalize
+/// empty arguments to `"{}"`, and wrap non-object values in an object.
+fn ensure_valid_json_arguments(name: &str, arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return "{}".to_string();
+    }
+
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        // Preserve valid JSON objects verbatim. Re-serializing would reorder
+        // keys (serde_json's default map is a BTreeMap) and waste a
+        // serialize/deserialize round-trip on the hot path; `trimmed` is
+        // already a valid JSON object string.
+        Ok(serde_json::Value::Object(_)) => trimmed.to_string(),
+        Ok(value) => wrap_non_object_tool_arguments(name, value),
+        // Non-JSON text (e.g. legacy bare command strings): wrap the trimmed
+        // text so leading/trailing whitespace is not smuggled into the value.
+        Err(_) => {
+            wrap_non_object_tool_arguments(name, serde_json::Value::String(trimmed.to_string()))
+        }
+    }
+}
+
+fn wrap_non_object_tool_arguments(name: &str, value: serde_json::Value) -> String {
+    let key = match name {
+        "exec_command" | "shell" => "cmd",
+        _ => "input",
+    };
+    serde_json::json!({ key: value }).to_string()
+}
+
+/// Returns `(tool_content, optional_user_content)`:
+/// - `tool_content`: `Some(Value::String(..))` with the text portion for the tool message,
+///   or `None` when the body is empty.
+/// - `optional_user_content`: `Some(Value::Array(..))` with multipart content including
+///   images when the body contains `InputImage` items, otherwise `None`.
+fn split_tool_output_into_tool_and_user_content(
+    body: &codex_protocol::models::FunctionCallOutputBody,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    use codex_protocol::models::FunctionCallOutputBody;
+    use codex_protocol::models::FunctionCallOutputContentItem;
+    use codex_protocol::models::ImageDetail;
+
+    match body {
+        FunctionCallOutputBody::Text(text) => {
+            if text.is_empty() {
+                (None, None)
+            } else {
+                (Some(serde_json::Value::String(text.clone())), None)
+            }
+        }
+        FunctionCallOutputBody::ContentItems(items) => {
+            if items.is_empty() {
+                return (None, None);
+            }
+
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut image_parts: Vec<serde_json::Value> = Vec::new();
+
+            for item in items {
+                match item {
+                    FunctionCallOutputContentItem::InputText { text } => {
+                        text_parts.push(text.clone());
+                    }
+                    FunctionCallOutputContentItem::InputImage { image_url, detail } => {
+                        let mut image_url_obj = serde_json::json!({"url": image_url});
+                        if let Some(d) = detail {
+                            let detail_str = match d {
+                                ImageDetail::Auto => "auto",
+                                ImageDetail::Low => "low",
+                                ImageDetail::High => "high",
+                                ImageDetail::Original => "original",
+                            };
+                            image_url_obj["detail"] =
+                                serde_json::Value::String(detail_str.to_string());
+                        }
+                        image_parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": image_url_obj,
+                        }));
+                    }
+                    FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
+                        text_parts.push(encrypted_content.clone());
+                    }
+                }
+            }
+
+            let tool_content = if text_parts.is_empty() {
+                // If there are only images, the tool message needs at least an empty
+                // string so it is not null (some providers reject null tool content).
+                Some(serde_json::Value::String("[image result]".to_string()))
+            } else {
+                Some(serde_json::Value::String(text_parts.join("\n")))
+            };
+
+            let user_content = if image_parts.is_empty() {
+                None
+            } else {
+                // Build multipart user message: a text label + all image parts
+                let mut parts: Vec<serde_json::Value> = Vec::new();
+                for img_part in image_parts {
+                    parts.push(img_part);
+                }
+                Some(serde_json::Value::Array(parts))
+            };
+
+            (tool_content, user_content)
+        }
+    }
+}
+/// Builds a map from flat tool name to namespace prefix for MCP tools.
+/// When the Chat Completions API returns a tool call with a flat name like
+/// `ast_grep_search`, this map lets us look up the namespace (e.g. `omx_code_intel__`)
+/// so the resulting `ResponseItem::FunctionCall` carries the correct namespace
+/// for tool resolution.
+fn build_tool_namespace_map(tools: &[ToolSpec]) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for tool in tools {
+        if let ToolSpec::Namespace(ns) = tool {
+            for ns_tool in &ns.tools {
+                let ResponsesApiNamespaceTool::Function(func) = ns_tool;
+                map.insert(func.name.clone(), ns.name.clone());
+            }
+        }
+    }
+    map
+}
+
+#[cfg(test)]
+mod chat_completions_request_tests {
+    use super::ModelClient;
+    use super::ModelClientSession;
+    use crate::client_common::Prompt;
+    use crate::tools::handlers::shell_spec::CommandToolOptions;
+    use crate::tools::handlers::shell_spec::create_exec_command_tool;
+    use codex_api::ChatCompletionsRequest;
+    use codex_model_provider_info::WireApi;
+    use codex_model_provider_info::create_oss_provider_with_base_url;
+    use codex_protocol::ThreadId;
+    use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ImageDetail;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ReasoningItemReasoningSummary;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::openai_models::ModelInfo;
+    use codex_protocol::protocol::SessionSource;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    fn test_model_client() -> ModelClient {
+        let provider =
+            create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+        ModelClient::new(
+            /*auth_manager*/ None,
+            ThreadId::new(),
+            provider,
+            SessionSource::Cli,
+            /*model_verbosity*/ None,
+            /*enable_request_compression*/ false,
+            /*include_timing_metrics*/ false,
+            /*beta_features_header*/ None,
+            /*attestation_provider*/ None,
+        )
+    }
+
+    fn test_model_info() -> ModelInfo {
+        serde_json::from_value(json!({
+            "slug": "gpt-test",
+            "display_name": "gpt-test",
+            "description": "desc",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "medium", "description": "medium"}
+            ],
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": 1,
+            "upgrade": null,
+            "base_instructions": "base instructions",
+            "model_messages": null,
+            "supports_reasoning_summaries": false,
+            "support_verbosity": false,
+            "default_verbosity": null,
+            "apply_patch_tool_type": null,
+            "truncation_policy": {"mode": "bytes", "limit": 10000},
+            "supports_parallel_tool_calls": false,
+            "supports_image_detail_original": false,
+            "context_window": 272000,
+            "auto_compact_token_limit": null,
+            "experimental_supported_tools": []
+        }))
+        .expect("deserialize test model info")
+    }
+
+    fn test_prompt(input: Vec<ResponseItem>) -> Prompt {
+        Prompt {
+            input,
+            tools: vec![create_exec_command_tool(CommandToolOptions {
+                allow_login_shell: false,
+                exec_permission_approvals_enabled: false,
+            })],
+            parallel_tool_calls: false,
+            base_instructions: BaseInstructions {
+                text: String::new(),
+            },
+            personality: None,
+            output_schema: None,
+            output_schema_strict: true,
+        }
+    }
+
+    fn build_request(input: Vec<ResponseItem>) -> ChatCompletionsRequest {
+        test_model_session()
+            .build_chat_completions_request(&test_prompt(input), &test_model_info(), None)
+            .expect("build chat completions request")
+    }
+
+    fn test_model_session() -> ModelClientSession {
+        test_model_client().new_session()
+    }
+
+    fn warning_item(message: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: message.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn assistant_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn reasoning_item(text: &str) -> ResponseItem {
+        ResponseItem::Reasoning {
+            id: "reasoning-id".to_string(),
+            summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                text: text.to_string(),
+            }],
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: text.to_string(),
+            }]),
+            encrypted_content: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn function_call(call_id: &str, arguments: &str) -> ResponseItem {
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: arguments.to_string(),
+            call_id: call_id.to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn function_call_named(call_id: &str, name: &str, arguments: &str) -> ResponseItem {
+        ResponseItem::FunctionCall {
+            id: None,
+            name: name.to_string(),
+            namespace: None,
+            arguments: arguments.to_string(),
+            call_id: call_id.to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn function_call_output(call_id: &str, output: &str) -> ResponseItem {
+        ResponseItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload::from_text(output.to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn custom_tool_call(call_id: &str, input: &str) -> ResponseItem {
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: call_id.to_string(),
+            name: "exec_command".to_string(),
+            input: input.to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn custom_tool_call_output(call_id: &str, output: &str) -> ResponseItem {
+        ResponseItem::CustomToolCallOutput {
+            call_id: call_id.to_string(),
+            name: None,
+            output: FunctionCallOutputPayload::from_text(output.to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn function_call_output_with_image(call_id: &str, text: &str, image_url: &str) -> ResponseItem {
+        use codex_protocol::models::FunctionCallOutputContentItem;
+        ResponseItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload::from_content_items(vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: text.to_string(),
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: image_url.to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+            ]),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    #[test]
+    fn chat_completions_request_moves_tool_warning_after_matching_tool_result() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            warning_item(
+                "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
+            ),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command."
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_warning_with_later_tool_result() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            function_call_output("call-1", "first"),
+            function_call("call-2", r#"{"cmd":"ls"}"#),
+            warning_item("Warning: tool pressure warning"),
+            function_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: tool pressure warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_flushes_warnings_after_last_tool_result_in_turn() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            function_call("call-2", r#"{"cmd":"ls"}"#),
+            warning_item("Warning: first tool warning"),
+            function_call_output("call-1", "first"),
+            warning_item("Warning: second tool warning"),
+            function_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: first tool warning"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: second tool warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_flushes_custom_tool_warnings_after_last_tool_result_in_turn() {
+        let request = build_request(vec![
+            custom_tool_call("call-1", "pwd"),
+            custom_tool_call("call-2", "ls"),
+            warning_item("Warning: custom tool warning"),
+            custom_tool_call_output("call-1", "first"),
+            custom_tool_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: custom tool warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_flushes_mixed_tool_warnings_after_last_tool_result_in_turn() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            custom_tool_call("call-2", "ls"),
+            warning_item("Warning: mixed tool warning"),
+            function_call_output("call-1", "first"),
+            custom_tool_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "first",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: mixed tool warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_assistant_text_before_tool_warning() {
+        let request = build_request(vec![
+            assistant_message("Running command"),
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            warning_item("Warning: merged assistant warning"),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Running command",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: merged assistant warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_assistant_text_after_tool_warning() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            assistant_message("Running command"),
+            warning_item("Warning: merged assistant warning"),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Running command",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: merged assistant warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_preserves_warning_before_new_assistant_turn() {
+        let request = build_request(vec![
+            warning_item("Warning: fallback model was used"),
+            assistant_message("Fallback complete"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "user",
+                    "content": "Warning: fallback model was used"
+                },
+                {
+                    "role": "assistant",
+                    "content": "Fallback complete",
+                    "reasoning_content": "No reasoning required"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_normalizes_tool_call_arguments_to_json_objects() {
+        let request = build_request(vec![
+            function_call("call-empty", ""),
+            function_call("call-bare", "pwd"),
+            custom_tool_call("call-string", r#""ls""#),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-empty",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{}"
+                            }
+                        },
+                        {
+                            "id": "call-bare",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-string",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_preserves_object_arguments_and_wraps_other_tools() {
+        // Multi-key object with keys in non-sorted order: must be preserved
+        // verbatim (no BTreeMap reordering, no redundant re-serialization).
+        // Non-exec/shell tool names wrap into `{"input": ...}`. Bare text is
+        // trimmed before wrapping so whitespace is not smuggled into the value.
+        let request = build_request(vec![
+            function_call("call-obj", r#"{"workdir":"/tmp","cmd":"pwd"}"#),
+            function_call_named("call-input", "summarize", "some text"),
+            function_call_named("call-num", "summarize", "42"),
+            function_call("call-ws", "  pwd  "),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-obj",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"workdir\":\"/tmp\",\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call-input",
+                            "type": "function",
+                            "function": {
+                                "name": "summarize",
+                                "arguments": "{\"input\":\"some text\"}"
+                            }
+                        },
+                        {
+                            "id": "call-num",
+                            "type": "function",
+                            "function": {
+                                "name": "summarize",
+                                "arguments": "{\"input\":42}"
+                            }
+                        },
+                        {
+                            "id": "call-ws",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_keeps_reasoning_between_assistant_text_and_tool_call() {
+        let request = build_request(vec![
+            assistant_message("Running command"),
+            reasoning_item("Need to call a tool"),
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Running command",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "Need to call a tool"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                }
+            ])
+        );
+    }
+    #[test]
+    fn chat_completions_request_user_message_with_image_uses_multipart_content() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "Describe this image".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]);
+
+        let messages = &request.messages;
+        // System message + user message
+        assert_eq!(messages.len(), 1);
+        let user_msg = &messages[0];
+        assert_eq!(user_msg.role, "user");
+        let content = user_msg
+            .content
+            .as_ref()
+            .expect("user message should have content");
+        // Should be multipart array format
+        assert!(
+            content.is_array(),
+            "content with image should be multipart array"
+        );
+        let arr = content.as_array().expect("content should be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "Describe this image");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,abc");
+        assert_eq!(arr[1]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_text_only_remains_string() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]);
+
+        let messages = &request.messages;
+        assert_eq!(messages.len(), 1);
+        let user_msg = &messages[0];
+        assert_eq!(user_msg.role, "user");
+        let content = user_msg.content.as_ref().expect("should have content");
+        // Text-only should remain as plain string
+        assert!(content.is_string(), "text-only content should be a string");
+        assert_eq!(content.as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn chat_completions_request_assistant_message_drops_image() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![
+                ContentItem::OutputText {
+                    text: "Here is the result".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]);
+
+        let messages = &request.messages;
+        let assistant_msg = &messages[0];
+        assert_eq!(assistant_msg.role, "assistant");
+        let content = assistant_msg.content.as_ref().expect("should have content");
+        // Assistant messages should be text-only (images dropped)
+        assert!(
+            content.is_string(),
+            "assistant content should be plain string"
+        );
+        assert_eq!(content.as_str().unwrap(), "Here is the result");
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_image_only() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: "data:image/png;base64,xyz".to_string(),
+                detail: Some(ImageDetail::High),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]);
+
+        let messages = &request.messages;
+        let user_msg = &messages[0];
+        assert_eq!(user_msg.role, "user");
+        let content = user_msg.content.as_ref().expect("should have content");
+        assert!(
+            content.is_array(),
+            "image-only content should be multipart array"
+        );
+        let arr = content.as_array().expect("content should be array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "image_url");
+        assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,xyz");
+        assert_eq!(arr[0]["image_url"]["detail"], "auto");
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_image_detail_none_omits_field() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: "data:image/png;base64,test".to_string(),
+                detail: None,
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]);
+
+        let messages = &request.messages;
+        let user_msg = &messages[0];
+        let content = user_msg.content.as_ref().expect("should have content");
+        let arr = content.as_array().expect("content should be array");
+        // When detail is None, the detail field should be omitted
+        assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,test");
+        assert!(
+            arr[0]["image_url"].get("detail").is_none(),
+            "detail should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_user_message_multiple_images() {
+        let request = build_request(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "Compare these".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,aaa".to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/jpeg;base64,bbb".to_string(),
+                    detail: Some(ImageDetail::Original),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]);
+
+        let messages = &request.messages;
+        let user_msg = &messages[0];
+        let content = user_msg.content.as_ref().expect("should have content");
+        let arr = content
+            .as_array()
+            .expect("content should be multipart array");
+        assert_eq!(arr.len(), 3);
+        // Text part
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "Compare these");
+        // First image
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,aaa");
+        assert_eq!(arr[1]["image_url"]["detail"], "high");
+        // Second image
+        assert_eq!(arr[2]["type"], "image_url");
+        assert_eq!(arr[2]["image_url"]["url"], "data:image/jpeg;base64,bbb");
+        assert_eq!(arr[2]["image_url"]["detail"], "low");
+    }
+
+    #[test]
+    fn chat_completions_request_tool_output_with_image_splits_into_tool_and_user() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"view_image"}"#),
+            function_call_output_with_image(
+                "call-1",
+                "Here is the image:",
+                "data:image/png;base64,abc123",
+            ),
+        ]);
+
+        let messages = &request.messages;
+        // First message: assistant with tool_calls
+        assert_eq!(messages[0].role, "assistant");
+        assert!(messages[0].tool_calls.is_some());
+        // Second message: tool with text-only content (images cannot go in tool messages)
+        assert_eq!(messages[1].role, "tool");
+        let tool_content = messages[1]
+            .content
+            .as_ref()
+            .expect("tool should have content");
+        assert!(
+            tool_content.is_string(),
+            "tool content should be plain text"
+        );
+        assert_eq!(tool_content.as_str(), Some("Here is the image:"));
+        // Third message: user with the image in multipart format
+        assert_eq!(messages[2].role, "user");
+        let user_content = messages[2]
+            .content
+            .as_ref()
+            .expect("user message should have image content");
+        assert!(
+            user_content.is_array(),
+            "user image content should be multipart array"
+        );
+        let arr = user_content.as_array().expect("content should be array");
+        assert_eq!(arr.len(), 1);
+        // Image part
+        assert_eq!(arr[0]["type"], "image_url");
+        assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,abc123");
+        assert_eq!(arr[0]["image_url"]["detail"], "high");
     }
 }
 

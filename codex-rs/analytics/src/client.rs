@@ -48,6 +48,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 const ANALYTICS_EVENTS_QUEUE_SIZE: usize = 256;
+#[allow(dead_code)]
 const ANALYTICS_EVENTS_TIMEOUT: Duration = Duration::from_secs(10);
 const ANALYTICS_EVENT_DEDUPE_MAX_KEYS: usize = 4096;
 
@@ -496,26 +497,17 @@ impl AnalyticsEventsClient {
 }
 
 async fn send_track_events(
-    auth_manager: &AuthManager,
-    destination: &AnalyticsEventsDestination,
-    events: Vec<TrackEventRequest>,
+    _auth_manager: &AuthManager,
+    _destination: &AnalyticsEventsDestination,
+    _events: Vec<TrackEventRequest>,
 ) {
-    if events.is_empty() {
-        return;
-    }
-
-    let Some(auth) = auth_manager.auth().await else {
-        return;
-    };
-    if !auth.uses_codex_backend() {
-        return;
-    }
-
-    for events in track_event_request_batches(events) {
-        send_track_events_request(&auth, destination, events).await;
-    }
+    // DISABLED: Internal deployment - never send analytics externally.
+    // This fork intentionally short-circuits the analytics pipeline so no
+    // tracking payloads leave the host. Re-enable by restoring the upstream
+    // body if you need full analytics behavior again.
 }
 
+#[allow(dead_code)]
 fn track_event_request_batches(events: Vec<TrackEventRequest>) -> Vec<Vec<TrackEventRequest>> {
     let mut batches = Vec::new();
     let mut current_batch = Vec::new();
@@ -539,6 +531,7 @@ fn track_event_request_batches(events: Vec<TrackEventRequest>) -> Vec<Vec<TrackE
     batches
 }
 
+#[allow(dead_code)]
 async fn send_track_events_request(
     auth: &CodexAuth,
     destination: &AnalyticsEventsDestination,
@@ -583,6 +576,7 @@ async fn send_track_events_request(
 }
 
 #[cfg(debug_assertions)]
+#[allow(dead_code)]
 fn capture_track_events_request(
     destination: &AnalyticsEventsDestination,
     payload: &TrackEventsRequest,

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
@@ -14,6 +16,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
 #[cfg(test)]
 use crate::session::PreviousTurnSettings;
 use crate::session::session::Session;
+use crate::session::turn::built_tools;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
@@ -236,8 +239,19 @@ async fn run_compact_task_inner_impl(
             .clone()
             .for_prompt(&turn_context.model_info.input_modalities);
         let turn_input_len = turn_input.len();
+
+        // Get tools for the prompt (same as in turn.rs build_prompt)
+        let tool_router = built_tools(
+            sess.as_ref(),
+            turn_context.as_ref(),
+            &CancellationToken::new(),
+        )
+        .await?;
+
         let prompt = Prompt {
             input: turn_input,
+            tools: tool_router.model_visible_specs(),
+            parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
             base_instructions: sess.get_base_instructions().await,
             ..Default::default()
         };

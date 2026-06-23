@@ -1113,6 +1113,139 @@ pub(crate) fn build_prompt(
     }
 }
 
+/// Maximum number of bytes of script output to include in the prompt.
+/// Prevents accidentally exhausting the context window with large output.
+const MAX_DYNAMIC_CONTEXT_BYTES: usize = 4096;
+
+async fn append_dynamic_context(
+    mut input: Vec<ResponseItem>,
+    turn_context: &TurnContext,
+) -> Vec<ResponseItem> {
+    let Some(script_path) = turn_context.config.dynamic_context_script.as_ref() else {
+        return input;
+    };
+
+    if script_path.trim().is_empty() {
+        return input;
+    }
+
+    let script_path_trimmed = script_path.trim();
+
+    #[allow(deprecated)]
+    let cwd: std::path::PathBuf = turn_context
+        .environments
+        .primary()
+        .map(|env| env.cwd().to_path_buf())
+        .unwrap_or_else(|| turn_context.cwd.to_path_buf());
+
+    // Resolve and validate the script path.
+    let resolved_path = if script_path_trimmed.starts_with('/') {
+        std::path::PathBuf::from(script_path_trimmed)
+    } else {
+        cwd.join(script_path_trimmed)
+    };
+
+    if !resolved_path.is_file() {
+        warn!(
+            script = %script_path_trimmed,
+            resolved = %resolved_path.display(),
+            "dynamic_context_script path does not exist or is not a file"
+        );
+        return input;
+    }
+
+    let timeout = turn_context.config.dynamic_context_script_timeout;
+    trace!(
+        script = %script_path_trimmed,
+        resolved = %resolved_path.display(),
+        cwd = %cwd.display(),
+        timeout_secs = timeout.as_secs(),
+        "executing dynamic_context_script"
+    );
+
+    let output = match tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(&resolved_path)
+            .current_dir(&cwd)
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            warn!(
+                script = %script_path_trimmed,
+                resolved = %resolved_path.display(),
+                error = %err,
+                "failed to execute dynamic_context_script"
+            );
+            return input;
+        }
+        Err(_) => {
+            warn!(
+                script = %script_path_trimmed,
+                timeout_secs = timeout.as_secs(),
+                "dynamic_context_script timed out"
+            );
+            return input;
+        }
+    };
+
+    if !output.status.success() {
+        warn!(
+            script = %script_path_trimmed,
+            exit_code = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "dynamic_context_script exited with non-zero status"
+        );
+        return input;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return input;
+    }
+
+    // Truncate output to prevent exhausting context window.
+    let (text, truncated) = if trimmed.len() > MAX_DYNAMIC_CONTEXT_BYTES {
+        let byte_boundary = trimmed
+            .char_indices()
+            .take_while(|(i, _)| *i < MAX_DYNAMIC_CONTEXT_BYTES)
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        (&trimmed[..byte_boundary], true)
+    } else {
+        (trimmed, false)
+    };
+
+    if truncated {
+        warn!(
+            script = %script_path_trimmed,
+            original_len = trimmed.len(),
+            truncated_len = text.len(),
+            "dynamic_context_script output truncated"
+        );
+    }
+
+    trace!(
+        script = %script_path_trimmed,
+        text_len = text.len(),
+        "appending dynamic context to prompt"
+    );
+    input.push(ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    });
+
+    input
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
 #[instrument(level = "trace",
@@ -1161,6 +1294,7 @@ async fn run_sampling_request(
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        let prompt_input = append_dynamic_context(prompt_input, turn_context.as_ref()).await;
         let prompt = build_prompt(
             prompt_input,
             router.as_ref(),

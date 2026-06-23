@@ -1,3 +1,5 @@
+pub(crate) mod anthropic;
+pub(crate) mod chat_completions;
 pub(crate) mod compact;
 pub(crate) mod images;
 pub(crate) mod memories;
@@ -9,6 +11,8 @@ pub(crate) mod responses_websocket;
 pub(crate) mod search;
 mod session;
 
+pub use anthropic::AnthropicClient;
+pub use chat_completions::ChatCompletionsClient;
 pub use compact::CompactClient;
 pub use images::ImagesClient;
 pub use memories::MemoriesClient;
