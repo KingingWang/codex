@@ -5,9 +5,8 @@ use std::path::PathBuf;
 use tempfile::Builder;
 use tokio::process::Command;
 
-const CODEX_DMG_URL_ARM64: &str = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg";
-const CODEX_DMG_URL_X64: &str =
-    "https://persistent.oaistatic.com/codex-app-prod/Codex-latest-x64.dmg";
+const CODEX_DMG_URL_ARM64: &str = "";
+const CODEX_DMG_URL_X64: &str = "";
 
 pub async fn run_mac_app_open_or_install(
     workspace: PathBuf,

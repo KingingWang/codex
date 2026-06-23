@@ -49,8 +49,9 @@ pub struct Args {
     #[arg(long)]
     pub http_shutdown: bool,
 
-    /// Absolute URL the proxy should forward requests to (defaults to OpenAI).
-    #[arg(long, default_value = "https://api.openai.com/v1/responses")]
+    /// Absolute URL the proxy should forward requests to.
+    /// Must be explicitly set for internal deployments.
+    #[arg(long, default_value = "")]
     pub upstream_url: String,
 
     /// Directory where request/response dumps should be written as JSON.
