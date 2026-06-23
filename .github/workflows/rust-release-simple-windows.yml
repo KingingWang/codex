@@ -1,0 +1,133 @@
+name: rust-release-simple-windows
+
+# 仅编译 Windows 二进制（原生/交叉编译，不签名、不打包安装包）。
+# 风格对齐 rust-release-simple-macos.yml。
+#
+# 防内存 / 防超时的核心思路：
+#   1. v8 crate 的 build.rs 会自动从 denoland/rusty_v8 releases 下载
+#      预编译静态库（.lib），无需手动 setup（与 macOS/Linux 不同）。
+#   2. 只编 --bin codex，不开 --all-features、不开 fat LTO。
+#   3. Swatinem/rust-cache 缓存 target/，二次构建只跑增量。
+#   4. 缓存恢复后清理 v8 构建产物，强制 build.rs 重新下载/解压静态库。
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+# libgit2 拉 git 子模块间歇性失败，改用系统 git CLI
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  # ── 构建矩阵（x86_64 + aarch64）─────────────
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64: windows-latest 原生编译
+          - target: x86_64-pc-windows-msvc
+            label: x86_64
+          # aarch64: 在 x64 runner 上交叉编译
+          - target: aarch64-pc-windows-msvc
+            label: aarch64
+
+    env:
+      # workspace profile.release 默认 lto="fat" + codegen-units=4，是 OOM 元凶。
+      # 改用 thin LTO + 16 codegen-units 降低内存峰值。
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          key: ${{ matrix.target }}
+
+      # rust-cache 可能恢复了 v8 的 fingerprint 但未恢复实际的 .lib 静态库，
+      # 导致 Cargo 跳过 build.rs、链接器找不到静态库。清理后强制重新下载。
+      - name: Clean stale v8 build artifacts from cache
+        shell: bash
+        run: |
+          set -uo pipefail
+          target="${{ matrix.target }}"
+          find "target/${target}/release/build" -maxdepth 1 -type d -name 'v8-*' -exec rm -rf {} + 2>/dev/null || true
+          rm -rf "target/${target}/release/gn_out" 2>/dev/null || true
+          echo "Cleaned stale v8 build artifacts (if any)"
+
+      - name: Limit build jobs to avoid OOM
+        shell: bash
+        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+
+      # x86_64 需要 SQLITE_DISABLE_INTRINSIC，与官方 workflow 一致
+      - name: Build release binary
+        shell: bash
+        env:
+          LIBSQLITE3_FLAGS: ${{ matrix.target == 'x86_64-pc-windows-msvc' && 'SQLITE_DISABLE_INTRINSIC' || '' }}
+        run: cargo build --release --target ${{ matrix.target }} --bin codex --timings
+
+      - name: Prepare release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/codex.exe" "dist/codex-windows-${{ matrix.label }}.exe"
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-windows-${{ matrix.label }}
+          path: codex-rs/dist/*
+
+  # ── 发布（收集所有 Windows 产物）─────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: codex-windows-*
+          merge-multiple: true
+
+      - name: Set release version (date-based)
+        id: version
+        run: |
+          VERSION="$(date '+%Y%m%d-%H%M%S')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          name: windows-${{ steps.version.outputs.version }}
+          tag_name: windows-${{ steps.version.outputs.version }}
+          files: release-assets/*
+          prerelease: false
