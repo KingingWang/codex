@@ -60,7 +60,7 @@ fn user_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -72,7 +72,7 @@ fn assistant_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -83,7 +83,7 @@ fn function_call(name: &str, call_id: &str, args: &str) -> ResponseItem {
         name: name.to_string(),
         arguments: args.to_string(),
         call_id: call_id.to_string(),
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -95,18 +95,19 @@ fn developer_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
 fn function_output(call_id: &str, body: &str) -> ResponseItem {
     ResponseItem::FunctionCallOutput {
+        id: None,
         call_id: call_id.to_string(),
         output: FunctionCallOutputPayload {
             body: FunctionCallOutputBody::Text(body.to_string()),
             success: None,
         },
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -307,7 +308,7 @@ fn data_url_image_becomes_base64_source() {
             detail: None,
         }],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }];
     let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
     let blocks = match &req.messages[0].content {
@@ -799,7 +800,7 @@ fn agents_md_fragment_is_lifted_into_system_block() {
                     .to_string(),
             }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         },
         user_message("review the diff"),
     ];
@@ -886,7 +887,7 @@ fn agents_md_lifts_only_matching_block_from_mixed_message() {
             },
         ],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }];
 
     let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
