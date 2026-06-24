@@ -2367,6 +2367,10 @@ impl ModelClientSession {
             messages.append(&mut pending_warnings);
         }
 
+        // Deduplicate consecutive identical tool calls to avoid 400 errors
+        // from providers like qwen3.7-max that reject repetitive tool calls.
+        let mut messages = deduplicate_consecutive_tool_calls(messages);
+
         // DeepSeek thinking mode requires reasoning_content on ALL assistant messages
         // when the model is in thinking mode. Even if a non-thinking model was used
         // mid-session, switching back to DeepSeek requires reasoning_content to be
@@ -2430,6 +2434,169 @@ impl ModelClientSession {
 /// In that case, even if images were present, the result falls back to text-only string format.
 ///
 /// Returns `None` when the content slice is empty or contains only dropped items.
+/// Deduplicates consecutive identical tool calls in the message history.
+///
+/// Some models (e.g., qwen3.7-max) reject requests with repetitive tool calls.
+/// This function detects "streaks" of identical tool calls: sequences where
+/// `assistant(tool_call A) → tool(result) → assistant(tool_call A) → tool(result) → ...`
+/// repeats without any other tool calls or user messages in between.
+///
+/// For each streak of 2+ identical calls:
+/// - Keeps the first assistant message (with its content but NOT its tool_call)
+/// - Keeps only the last tool result (with a warning prepended)
+/// - Removes all intermediate assistant messages and tool results
+fn deduplicate_consecutive_tool_calls(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    // First pass: find consecutive streaks
+    // A streak is a sequence of indices: [assistant_idx, result_idx, assistant_idx, result_idx, ...]
+    // where all assistant messages have the same (name, arguments) signature
+    let mut streaks: Vec<Vec<usize>> = Vec::new(); // each streak is a list of message indices
+    let mut current_streak: Vec<usize> = Vec::new();
+    let mut current_sig: Option<String> = None;
+
+    let mut i = 0;
+    while i < messages.len() {
+        let msg = &messages[i];
+
+        if msg.role == "assistant" {
+            if let Some(tcs) = &msg.tool_calls {
+                if tcs.len() == 1 {
+                    let sig = format!(
+                        "{}:{}",
+                        tcs[0].function.name,
+                        tcs[0].function.arguments.as_deref().unwrap_or("")
+                    );
+
+                    if current_sig.as_deref() == Some(&sig) {
+                        // Continue the streak: add this assistant
+                        current_streak.push(i);
+                        // Look for the corresponding tool result
+                        if i + 1 < messages.len() && messages[i + 1].role == "tool" {
+                            current_streak.push(i + 1);
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                        continue;
+                    } else {
+                        // New signature - save old streak if it has 2+ calls
+                        if current_streak.len() >= 4 {
+                            // At least 2 assistant + 2 results = 4 messages
+                            streaks.push(current_streak.clone());
+                        }
+                        // Start new streak
+                        current_streak = vec![i];
+                        current_sig = Some(sig);
+                        if i + 1 < messages.len() && messages[i + 1].role == "tool" {
+                            current_streak.push(i + 1);
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // If we get here, the streak is broken
+        if current_streak.len() >= 4 {
+            streaks.push(current_streak.clone());
+        }
+        current_streak.clear();
+        current_sig = None;
+
+        // Handle the current message
+        if msg.role == "tool" {
+            // Tool result without a preceding assistant in the streak
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    // Don't forget the last streak
+    if current_streak.len() >= 4 {
+        streaks.push(current_streak);
+    }
+
+    // If no streaks found, return as-is
+    if streaks.is_empty() {
+        return messages;
+    }
+
+    // Second pass: build result, applying deduplication
+    let mut skip_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut result_modifications: HashMap<usize, (String, usize)> = HashMap::new();
+
+    for streak in &streaks {
+        // streak format: [asst1, res1, asst2, res2, ...]
+        // Keep: first assistant (but remove its tool_call), last result (with warning)
+        // Skip: everything else in the streak
+
+        let call_count = streak.len() / 2; // number of assistant calls
+        let last_result_idx = streak[streak.len() - 1];
+        let first_asst_idx = streak[0];
+
+        // Skip all assistant messages except the first
+        for j in (2..streak.len()).step_by(2) {
+            skip_indices.insert(streak[j]);
+        }
+
+        // Skip all tool results except the last
+        for j in (1..streak.len() - 1).step_by(2) {
+            skip_indices.insert(streak[j]);
+        }
+
+        // Get the function name for the warning
+        let fn_name = if let Some(tcs) = messages[first_asst_idx].tool_calls.as_ref() {
+            tcs[0].function.name.clone()
+        } else {
+            "unknown".to_string()
+        };
+
+        // Mark the last result for modification
+        result_modifications.insert(last_result_idx, (fn_name, call_count));
+
+        tracing::info!(
+            "Deduplicating {} consecutive identical tool calls: {} (msg[{}..{}])",
+            call_count,
+            if let Some(tcs) = messages[first_asst_idx].tool_calls.as_ref() { &tcs[0].function.name } else { "unknown" },
+            streak[0],
+            streak[streak.len() - 1]
+        );
+    }
+
+    // Third pass: build the output
+    let mut result: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+
+    for (i, mut msg) in messages.into_iter().enumerate() {
+        if skip_indices.contains(&i) {
+            continue;
+        }
+
+        // Modify the last tool result with warning
+        if let Some((fn_name, count)) = result_modifications.get(&i) {
+            if let Some(content) = msg.content.as_mut() {
+                let original = match content {
+                    serde_json::Value::String(s) => s.clone(),
+                    ref other => other.to_string(),
+                };
+
+                let warning = format!(
+                    "[WARNING: {count} consecutive identical tool calls to '{fn_name}'                     were detected and deduplicated. You were stuck in a loop calling                     '{fn_name}' with the same arguments. Consider using a different approach                     or checking if the operation is still needed.]\n\n"
+                );
+
+                *content = serde_json::Value::String(warning + &original);
+            }
+        }
+
+        result.push(msg);
+    }
+
+    result
+}
+
 fn content_items_to_chat_content(
     content: &[codex_protocol::models::ContentItem],
     is_assistant: bool,
