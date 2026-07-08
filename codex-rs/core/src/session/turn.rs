@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::client::ModelClientSession;
+use crate::client::StreamErrorNotifier;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::compact::InitialContextInjection;
@@ -150,6 +151,32 @@ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_tok
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the turn complete.
 ///
+/// [`StreamErrorNotifier`] implementation that surfaces Chat Completions /
+/// Anthropic retry progress to the UI via the session's stream-error event
+/// channel. Fire-and-forget: the retry loop invokes [`notify`](StreamErrorNotifier::notify)
+/// synchronously; this impl spawns a task to call the async session method so
+/// the retry backoff is not blocked.
+struct TurnStreamErrorNotifier {
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+}
+
+impl StreamErrorNotifier for TurnStreamErrorNotifier {
+    fn notify(&self, message: String, additional_details: String, http_status_code: Option<u16>) {
+        let sess = Arc::clone(&self.sess);
+        let turn_context = Arc::clone(&self.turn_context);
+        tokio::spawn(async move {
+            sess.notify_stream_retry(
+                turn_context.as_ref(),
+                message,
+                additional_details,
+                http_status_code,
+            )
+            .await;
+        });
+    }
+}
+
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
@@ -162,6 +189,10 @@ pub(crate) async fn run_turn(
 
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    client_session.set_stream_error_notifier(Some(Arc::new(TurnStreamErrorNotifier {
+        sess: Arc::clone(&sess),
+        turn_context: Arc::clone(&turn_context),
+    })));
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
