@@ -4555,6 +4555,26 @@ impl Session {
         self.send_event(turn_context, event).await;
     }
 
+    /// Variant of [`notify_stream_error`] for Chat Completions / Anthropic
+    /// retry notifications. The underlying error is passed as already-rendered
+    /// `additional_details` + optional `http_status_code`, avoiding the need
+    /// to clone a (non-`Clone`) `CodexErr`.
+    pub(crate) async fn notify_stream_retry(
+        &self,
+        turn_context: &TurnContext,
+        message: impl Into<String>,
+        additional_details: String,
+        http_status_code: Option<u16>,
+    ) {
+        let codex_error_info = CodexErrorInfo::ResponseStreamDisconnected { http_status_code };
+        let event = EventMsg::StreamError(StreamErrorEvent {
+            message: message.into(),
+            codex_error_info: Some(codex_error_info),
+            additional_details: Some(additional_details),
+        });
+        self.send_event(turn_context, event).await;
+    }
+
     pub(crate) async fn record_memory_citation_for_turn(&self, sub_id: &str) {
         let turn_state = self
             .input_queue
