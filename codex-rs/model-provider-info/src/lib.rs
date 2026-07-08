@@ -47,15 +47,7 @@ pub const AMAZON_BEDROCK_GPT_5_4_MODEL_ID: &str = "openai.gpt-5.4";
 pub const AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID: &str = "openai.gpt-5.6-sol";
 pub const AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID: &str = "openai.gpt-5.6-terra";
 pub const AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID: &str = "openai.gpt-5.6-luna";
-<<<<<<< HEAD
-pub const AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_TERRA_MODEL_ID: &str =
-    "global.openai.gpt-5.6-terra";
-pub const AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_ID: &str = "global.openai.gpt-5.6-luna";
-pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str =
-    "https://bedrock-mantle.us-east-1.api.aws/openai/v1";
-=======
 pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str = "";
->>>>>>> 82cd580c90 (Squashed commit of the following:)
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER: &str = "x-amzn-mantle-client-agent";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
@@ -462,27 +454,10 @@ pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 pub fn built_in_model_providers(
     _openai_base_url: Option<String>,
 ) -> HashMap<String, ModelProviderInfo> {
-<<<<<<< HEAD
-    use ModelProviderInfo as P;
-    let openai_provider = P::create_openai_provider(openai_base_url);
-    let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
-    let amazon_bedrock_runtime_provider =
-        P::create_amazon_bedrock_runtime_provider(/*aws*/ None);
-
-    // We do not want to be in the business of adjucating which third-party
-    // providers are bundled with Codex CLI, so we only include the OpenAI and
-    // open source ("oss") providers by default. Users are encouraged to add to
-    // `model_providers` in config.toml to add their own providers.
-=======
     // DISABLED: Internal deployment - removed OpenAI and Amazon Bedrock providers
     // Users must configure their own model_providers in config.toml
     // Only OSS providers are kept as they connect to localhost by default
->>>>>>> 82cd580c90 (Squashed commit of the following:)
     [
-        (
-            AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
-            amazon_bedrock_runtime_provider,
-        ),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
