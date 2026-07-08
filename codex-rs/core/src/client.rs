@@ -249,9 +249,54 @@ pub struct ModelClient {
 /// Create a fresh `ModelClientSession` for each Codex turn. Reusing it across turns would replay
 /// the previous turn's sticky-routing token into the next turn, which violates the client/server
 /// contract and can cause routing bugs.
+/// Callback invoked when a Chat Completions or Anthropic streaming request
+/// retries after a transient error. Used to surface retry progress (attempt
+/// number and error code) to the UI so the user understands the request is
+/// being retried rather than frozen.
+///
+/// Implementations are expected to be cheap and non-blocking; the retry loop
+/// fires the callback synchronously without awaiting it.
+pub(crate) trait StreamErrorNotifier: Send + Sync {
+    /// Fired when Chat Completions / Anthropic streaming retries.
+    ///
+    /// - `message`: human-readable retry line, e.g. "Retrying... (attempt 2) — HTTP 429".
+    /// - `additional_details`: rendering of the underlying error (its `Display` form).
+    /// - `http_status_code`: HTTP status code carried by the error, if any.
+    fn notify(&self, message: String, additional_details: String, http_status_code: Option<u16>);
+}
+
+/// Builds a short human-readable error code suffix from an `ApiError`, e.g.
+/// `HTTP 429`, `HTTP 502`, `connection timeout`, `network error`. Used by
+/// the Chat Completions / Anthropic retry notifications.
+fn api_error_code(err: &ApiError) -> String {
+    match err {
+        ApiError::Transport(TransportError::Http { status, .. }) => {
+            format!("HTTP {status}")
+        }
+        ApiError::Transport(TransportError::Timeout) => "connection timeout".to_string(),
+        ApiError::Transport(TransportError::Network(_)) => "network error".to_string(),
+        ApiError::Transport(TransportError::Build(_)) => "request build error".to_string(),
+        ApiError::Transport(TransportError::RetryLimit) => "retry limit".to_string(),
+        ApiError::Api { status, .. } => format!("HTTP {status}"),
+        ApiError::Stream(_) => "stream error".to_string(),
+        ApiError::ContextWindowExceeded => "context window exceeded".to_string(),
+        ApiError::QuotaExceeded => "HTTP 429 quota exceeded".to_string(),
+        ApiError::UsageNotIncluded => "usage not included".to_string(),
+        ApiError::Retryable { .. } => "transient error".to_string(),
+        ApiError::RateLimit(_) => "HTTP 429 rate limit".to_string(),
+        ApiError::InvalidRequest { .. } => "invalid request".to_string(),
+        ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
+        ApiError::ServerOverloaded => "HTTP 529 server overloaded".to_string(),
+    }
+}
+
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    /// Optional notifier invoked when Chat Completions / Anthropic streaming
+    /// retries after a transient error. `None` for paths that already have
+    /// their own retry notifications (e.g. Responses via `turn.rs`).
+    stream_error_notifier: Option<Arc<dyn StreamErrorNotifier>>,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -446,6 +491,7 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
+            stream_error_notifier: None,
         }
     }
 
@@ -1017,6 +1063,29 @@ impl Drop for ModelClientSession {
 impl ModelClientSession {
     pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
         Arc::clone(&self.turn_state)
+    }
+
+    /// Installs a notifier that is fired when Chat Completions or Anthropic
+    /// streaming retries after a transient error. Set by the turn layer so
+    /// retry progress (attempt number + error code) can be surfaced to the UI.
+    pub(crate) fn set_stream_error_notifier(
+        &mut self,
+        notifier: Option<Arc<dyn StreamErrorNotifier>>,
+    ) {
+        self.stream_error_notifier = notifier;
+    }
+
+    /// Fires the retry notifier, if installed. No-op when no notifier is set
+    /// (e.g. for Responses paths that have their own retry notifications).
+    fn notify_stream_retry(
+        &self,
+        message: String,
+        additional_details: String,
+        http_status_code: Option<u16>,
+    ) {
+        if let Some(notifier) = &self.stream_error_notifier {
+            notifier.notify(message, additional_details, http_status_code);
+        }
     }
 
     fn reset_websocket_session(&mut self) {
@@ -1852,6 +1921,14 @@ impl ModelClientSession {
                                     delay_ms = delay.as_millis(),
                                     "Chat Completions received 401, retrying after backoff"
                                 );
+                                self.notify_stream_retry(
+                                    format!(
+                                        "Retrying... (attempt {}) — HTTP 401",
+                                        auth_retry_count + 1
+                                    ),
+                                    err.to_string(),
+                                    Some(401),
+                                );
                                 sleep(delay).await;
                                 auth_retry_count += 1;
                                 continue;
@@ -1881,6 +1958,15 @@ impl ModelClientSession {
                         delay_ms = delay.as_millis(),
                         error = %err,
                         "Chat Completions request failed, retrying after backoff"
+                    );
+                    self.notify_stream_retry(
+                        format!(
+                            "Retrying... (attempt {}) — {}",
+                            retry_count + 1,
+                            api_error_code(&err)
+                        ),
+                        err.to_string(),
+                        api_error_http_status(&err),
                     );
                     sleep(delay).await;
                     retry_count += 1;
@@ -1992,6 +2078,14 @@ impl ModelClientSession {
                                     delay_ms = delay.as_millis(),
                                     "Anthropic received 401, retrying after backoff"
                                 );
+                                self.notify_stream_retry(
+                                    format!(
+                                        "Retrying... (attempt {}) — HTTP 401",
+                                        auth_retry_count + 1
+                                    ),
+                                    err.to_string(),
+                                    Some(401),
+                                );
                                 sleep(delay).await;
                                 auth_retry_count += 1;
                                 continue;
@@ -2020,6 +2114,15 @@ impl ModelClientSession {
                         delay_ms = delay.as_millis(),
                         error = %err,
                         "Anthropic request failed, retrying after backoff"
+                    );
+                    self.notify_stream_retry(
+                        format!(
+                            "Retrying... (attempt {}) — {}",
+                            retry_count + 1,
+                            api_error_code(&err)
+                        ),
+                        err.to_string(),
+                        api_error_http_status(&err),
                     );
                     sleep(delay).await;
                     retry_count += 1;
@@ -4177,6 +4280,7 @@ async fn handle_unauthorized(
 fn api_error_http_status(error: &ApiError) -> Option<u16> {
     match error {
         ApiError::Transport(TransportError::Http { status, .. }) => Some(status.as_u16()),
+        ApiError::Api { status, .. } => Some(status.as_u16()),
         _ => None,
     }
 }
