@@ -13,7 +13,6 @@ use codex_http_client::OutboundProxyPolicy;
 pub use codex_http_client::RequestBuilder as CodexRequestBuilder;
 use codex_http_client::build_reqwest_client_with_custom_ca;
 use codex_http_client::with_chatgpt_cloudflare_cookie_store;
-use codex_terminal_detection::user_agent;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
 use reqwest::header::USER_AGENT;

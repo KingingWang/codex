@@ -258,10 +258,14 @@ async fn run_compact_task_inner_impl(
             .for_prompt(&turn_context.model_info.input_modalities);
         let turn_input_len = turn_input.len();
 
-        // Get tools for the prompt (same as in turn.rs build_prompt)
+        // Get tools for the prompt (same as in turn.rs build_prompt).
+        //built_tools now requires a StepContext (request-scoped view of dynamic state such as
+        //the MCP runtime and environment snapshot). Capture one from the Session for this
+        //compaction step and pass it through.
+        let step_context = sess.capture_step_context(Arc::clone(&turn_context)).await;
         let tool_router = built_tools(
             sess.as_ref(),
-            turn_context.as_ref(),
+            step_context.as_ref(),
             &CancellationToken::new(),
         )
         .await?;
