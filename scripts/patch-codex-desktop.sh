@@ -10,21 +10,20 @@
 # 但桌面端 UI 是 Electron 渲染的 webview，模型选择器在 JS 端做了一次二次过滤：
 #
 #     // webview picker chunk（minified，hash 文件名每次发版都会变）
-#     let a=[],o=null,s=<i>&&<e>!==`amazonBedrock`;   // i = useHiddenModels
-#     r.forEach(n => {
-#       if (s ? availableModels.has(n.model) : !n.hidden) { ... 显示 ... }
-#     });
+#     // 旧版本（~v0.5x）：
+#     //   o=null,s=useHiddenModels&&authMethod!==`amazonBedrock`;
+#     //   if (s) { availableModels.has(n.model) } else { !n.hidden }
+#     //
+#     // 新版本（v0.60+）：
+#     //   c=null,l=useHiddenModels&&authMethod!==`amazonBedrock`,u=...
+#     //   if (l) { t.has(n.model) } else { !n.hidden }
+#     //
+#     // 当 Statsig 动态配置命中（生产环境会命中），返回的
+#     // {use_hidden_models:true, available_models:[gpt-*...]} 让过滤
+#     // 走白名单分支，所有非 gpt 模型都被前端挡掉。
 #
-# 当 Statsig 动态配置 `107580212` 命中（生产环境会命中），返回的
-# `{use_hidden_models:true, available_models:[gpt-*...]}` 让 `s=true`，过滤
-# 走白名单分支，所有非 gpt 模型（GLM/Qwen/Claude/Kimi/...）都被前端挡掉，
-# 跟 CLI 后端完全无关。
-#
-# 这个脚本把那一行的 `s` 强制设成 `false`，过滤就永远走 `!n.hidden` 分支，
+# 这个脚本把那个过滤标志变量强制设成 `false`，过滤就永远走 `!n.hidden` 分支，
 # 让所有 `visibility:"list"` 的 catalog 模型都显示。
-#
-# VS Code 扩展上的同一处 patch 已经在 codex fork 里落地（见
-# `scripts/patch-codex-extension.sh`）；这个脚本是桌面端版本。
 #
 # 用法
 # -----
@@ -56,17 +55,21 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # 内容签名（用特征定位文件，不写死 hash 文件名）
 #
-#   原始：    o=null,s=<var>&&<var>!==`amazonBedrock`;
-#   patched： o=null,s=false;
+#   核心模式（新旧版本通用）：
+#     <assign_var> = <useHiddenModels_var> && <authMethod_var> !== `amazonBedrock`
 #
-# 这两个串在 VS Code 扩展和桌面端应该是一致的（同一份 webview bundle）。
-# 如果 minifier 变量名换了，签名会失败，脚本会落到 fallback 搜索。
+#   旧版本（~v0.5x）：  o=null,s=X&&Y!==`amazonBedrock`;    （结尾是 ;）
+#   新版本（v0.60+）：  c=null,l=X&&Y!==`amazonBedrock`,    （结尾是 ,）
+#
+#   patched：<assign_var>=false<terminator>
+#
+# 正则用 [;,] 匹配两种结尾，保持向前兼容。
 # ---------------------------------------------------------------------------
-UNPATCHED_RE='o=null,s=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`;'
-PATCHED_MARKER='o=null,s=false;'
+UNPATCHED_RE='[A-Za-z_$][A-Za-z_$0-9]*=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`[;,]'
+PATCHED_RE='[A-Za-z_$][A-Za-z_$0-9]*=false[;,]'
 
 # ---------------------------------------------------------------------------
-# 模式解析（先解析，再校验环境，错误信息更清晰）
+# 模式解析
 # ---------------------------------------------------------------------------
 mode="patch"
 case "${1:-}" in
@@ -95,18 +98,15 @@ HELP
 esac
 
 # ---------------------------------------------------------------------------
-# 拒绝在非 macOS 上跑：避免有人在 Linux/WSL 上误执行后 sudo cp 出乱子
+# 拒绝在非 macOS 上跑
 # ---------------------------------------------------------------------------
 if [ "$(uname)" != "Darwin" ]; then
   echo "error: this script targets macOS only (uname=$(uname))" >&2
-  echo "       for VS Code extension, use patch-codex-extension.sh instead:" >&2
-  echo "         https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-extension.sh" >&2
   exit 1
 fi
 
 # ---------------------------------------------------------------------------
 # 定位 Codex.app
-# 优先级：环境变量 CODEX_APP → /Applications/Codex.app → ~/Applications/Codex.app
 # ---------------------------------------------------------------------------
 APP="${CODEX_APP:-}"
 if [ -z "$APP" ]; then
@@ -131,14 +131,12 @@ fi
 ASAR_BAK="$ASAR.bak"
 
 # ---------------------------------------------------------------------------
-# Codex 不能在跑——替换运行中的 .app 资源是 racy 的
-# 桌面端的进程名通常是 "Codex"，主二进制在 .app/Contents/MacOS/ 下
+# Codex 不能在跑
 # ---------------------------------------------------------------------------
 if pgrep -x "Codex" >/dev/null 2>&1; then
   echo "error: Codex is running. Quit it first (Cmd+Q), then re-run this script." >&2
   exit 1
 fi
-# 兜底：按 .app 路径搜，进程名可能不同（Insiders、自定义重命名等）
 if pgrep -f "$APP/Contents/MacOS/" >/dev/null 2>&1; then
   echo "error: a process under $APP is still running. Quit Codex first." >&2
   exit 1
@@ -146,7 +144,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # 解析 asar 命令
-# 优先用 PATH 里的 asar，没有则用 npx -y @electron/asar（自动下载，无需 sudo）
 # ---------------------------------------------------------------------------
 resolve_asar_cmd() {
   if command -v asar >/dev/null 2>&1; then
@@ -164,7 +161,6 @@ if ! ASAR_CMD=$(resolve_asar_cmd); then
   echo "       install Node (which ships npx), or run: npm install -g @electron/asar" >&2
   exit 3
 fi
-# 注意：ASAR_CMD 一定要不带引号展开（"npx -y @electron/asar" 是 4 个 token）
 
 # ---------------------------------------------------------------------------
 # 临时目录 & 清理
@@ -189,7 +185,6 @@ if [ "$mode" = "revert" ]; then
   sudo cp -p "$ASAR_BAK" "$ASAR"
 
   echo "==> Re-signing app (ad-hoc)..."
-  # codesign 的 stderr 故意不吞，让用户看到所有子组件的签名状态
   if ! sudo codesign --force --deep --sign - "$APP"; then
     echo "warning: codesign reported errors above. App may fail to launch." >&2
     echo "         try manually: sudo codesign --force --deep --sign - '$APP'" >&2
@@ -217,11 +212,6 @@ mkdir -p "$EXTRACTED"
 $ASAR_CMD extract "$ASAR" "$EXTRACTED"
 
 # 2. find target chunk ------------------------------------------------------
-# 不写死 webview/assets/ ——桌面端 bundle 路径可能不一样，全树搜更稳。
-# 但跳过 sourcemap 和 node_modules，把搜索从几秒压到几百毫秒。
-#
-# pipeline 末尾必须 `|| true`：在 `set -o pipefail` 下，grep 找不到 → 退出 1，
-# 整个 pipeline 退出 1，`set -e` 会立刻终止脚本，跳过下面友好的错误处理。
 echo "==> Locating picker chunk by content signature..."
 TARGET=$(
   grep -Elr --exclude='*.map' --exclude-dir=node_modules \
@@ -229,10 +219,16 @@ TARGET=$(
 )
 
 if [ -z "$TARGET" ]; then
-  # 先看看是不是已经 patch 过（避免误报 "bundle layout changed"）
+  # 先看看是不是已经 patch 过
   ALREADY=$(
-    grep -Flr --exclude='*.map' --exclude-dir=node_modules \
-      -e "$PATCHED_MARKER" "$EXTRACTED" 2>/dev/null | head -n 1 || true
+    grep -Elr --exclude='*.map' --exclude-dir=node_modules \
+      -e "$PATCHED_RE" "$EXTRACTED" 2>/dev/null | while read -r candidate; do
+        # 确认同一个文件里也有 amazonBedrock（排除误命中）
+        if grep -qF 'amazonBedrock' "$candidate" 2>/dev/null; then
+          printf '%s\n' "$candidate"
+          break
+        fi
+      done || true
   )
   if [ -n "$ALREADY" ]; then
     echo "==> Already patched: ${ALREADY#$EXTRACTED/}"
@@ -240,7 +236,7 @@ if [ -z "$TARGET" ]; then
     exit 0
   fi
 
-  # 真没找到 → 用更宽松的锚点定位"哪一行 JS 引用了 amazonBedrock"
+  # 真没找到 → fallback
   echo "error: unpatched signature not found in extracted bundle." >&2
   echo "       tried regex: $UNPATCHED_RE" >&2
   echo "       fallback: searching for any 'amazonBedrock' reference..." >&2
@@ -263,14 +259,22 @@ echo "==> Target: ${TARGET#$EXTRACTED/}"
 
 # 3. patch ------------------------------------------------------------------
 echo "==> Applying patch in extracted bundle..."
-# perl 看到的字符串：
-#   s/o=null,s=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`;/o=null,s=false;/g
-# $ 在字符类里是字面量；backtick 是字面 backtick；分号是字面分号。
-# 单引号在 bash 里防止 $ 和 ` 被展开。
-perl -i -pe 's/o=null,s=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`;/o=null,s=false;/g' "$TARGET"
+# perl 替换：把 <var>=<var>&&<var>!==`amazonBedrock`[;,] 替换成 <var>=false[;,]
+# 捕获赋值目标变量名，保留结尾分隔符（; 或 ,）
+perl -i -pe 's/([A-Za-z_$][A-Za-z_$0-9]*)=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`([;,])/$1=false$2/g' "$TARGET"
 
 # 4. verify in extracted ----------------------------------------------------
-if ! grep -qF -- "$PATCHED_MARKER" "$TARGET"; then
+# 确认 patch 生效：同一个文件里有 amazonBedrock 且 patched 模式存在
+VERIFY_OK=false
+if grep -qF 'amazonBedrock' "$TARGET"; then
+  if grep -Eq "$PATCHED_RE" "$TARGET"; then
+    # 还要确认 unpatched 模式已经消失
+    if ! grep -Eq "$UNPATCHED_RE" "$TARGET"; then
+      VERIFY_OK=true
+    fi
+  fi
+fi
+if [ "$VERIFY_OK" != "true" ]; then
   echo "error: perl substitution did not take effect in: $TARGET" >&2
   exit 1
 fi
@@ -282,15 +286,18 @@ echo "==> Repacking asar..."
 $ASAR_CMD pack "$EXTRACTED" "$PACKED"
 
 # 6. verify packed ----------------------------------------------------------
-# 关键修复点：之前那个脚本在这里写错了 asar extract 的目标路径，
-# 导致 verify 永远失败。这里 extract 到一个干净的 VERIFY_DIR。
 mkdir -p "$VERIFY_DIR"
 # shellcheck disable=SC2086
 $ASAR_CMD extract "$PACKED" "$VERIFY_DIR"
 if ! grep -Flr --exclude='*.map' --exclude-dir=node_modules \
-     -e "$PATCHED_MARKER" "$VERIFY_DIR" >/dev/null 2>&1; then
-  echo "error: repacked asar does not contain the patch" >&2
-  echo "       (asar pack/extract round-trip may have dropped the file)" >&2
+     -e 'amazonBedrock' "$VERIFY_DIR" >/dev/null 2>&1; then
+  echo "error: repacked asar lost amazonBedrock references" >&2
+  exit 1
+fi
+# 确认 repacked 里 unpatched 模式不存在
+if grep -Elr --exclude='*.map' --exclude-dir=node_modules \
+     -e "$UNPATCHED_RE" "$VERIFY_DIR" >/dev/null 2>&1; then
+  echo "error: repacked asar still contains unpatched pattern" >&2
   exit 1
 fi
 echo "==> Repacked asar verified."
@@ -304,14 +311,7 @@ else
 fi
 
 # 8. atomic install ---------------------------------------------------------
-# 先 sudo install 到一个临时名，再 mv 覆盖；mv 是原子的，避免半状态。
 echo "==> Installing patched asar..."
-# macOS 标准：/Applications/*.app 里的资源典型归属是 root:admin 0644。
-# `admin` 是 macOS 内置系统组，对任何 sudo 用户都存在；这里不需要为
-# 其他平台做兜底（脚本已经在最前面通过 uname 守卫拒绝非 macOS）。
-# 不用 cp -p：$PACKED 是当前用户写的，cp -p 会把 owner 也带过来变成 user:admin，
-# 跟系统装的 Codex 不一致，可能让后续 codesign 报权限异常。install 强制
-# 归属更安全。
 sudo install -o root -g admin -m 0644 "$PACKED" "$ASAR.tmp.$$"
 sudo mv -f "$ASAR.tmp.$$" "$ASAR"
 
@@ -324,7 +324,6 @@ if ! sudo codesign --force --deep --sign - "$APP"; then
   echo "         then:" >&2
   echo "           sudo xattr -dr com.apple.quarantine '$APP'" >&2
 fi
-# 清 quarantine：第一次启动 macOS 才不会弹"已损坏"
 sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
