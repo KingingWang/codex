@@ -3080,20 +3080,29 @@ mod chat_completions_request_tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
+    use codex_login::auth::AgentIdentityAuthPolicy;
+
     fn test_model_client() -> ModelClient {
         let provider =
             create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
         ModelClient::new(
             /*auth_manager*/ None,
+            /*agent_identity_policy*/ AgentIdentityAuthPolicy::JwtOnly,
             ThreadId::new(),
             provider,
             SessionSource::Cli,
+            /*originator*/ "test_originator".to_string(),
             /*model_verbosity*/ None,
             /*enable_request_compression*/ false,
             /*include_timing_metrics*/ false,
             /*beta_features_header*/ None,
             /*item_ids_enabled*/ false,
+            /*concurrent_reasoning_summaries_enabled*/ false,
             /*attestation_provider*/ None,
+            /*http_client_factory*/
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         )
     }
 
@@ -3228,6 +3237,7 @@ mod chat_completions_request_tests {
             status: None,
             call_id: call_id.to_string(),
             name: "exec_command".to_string(),
+            namespace: None,
             input: input.to_string(),
             internal_chat_message_metadata_passthrough: None,
         }
