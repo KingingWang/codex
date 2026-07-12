@@ -97,7 +97,7 @@ impl<T: HttpTransport> EndpointSession<T> {
             configure(&mut req);
             req
         };
-        let base_delay = Duration::from_secs(5);
+        let base_delay = Duration::from_secs(1);
         let max_delay = Duration::from_secs(600);
         let mut retry_count: u32 = 0;
 
@@ -161,7 +161,7 @@ impl<T: HttpTransport> EndpointSession<T> {
         configure(&mut request);
         let request = request.into_prepared().map_err(TransportError::Build)?;
         let make_request = || request.clone();
-        let base_delay = Duration::from_secs(5);
+        let base_delay = Duration::from_secs(1);
         let max_delay = Duration::from_secs(600);
         let mut retry_count: u32 = 0;
 
