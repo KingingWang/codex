@@ -106,19 +106,28 @@ if [ "$(uname)" != "Darwin" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 定位 Codex.app
+# 定位桌面端 .app
+#
+# 新版本（2025-07 起）OpenAI 把桌面端 .app 从 Codex.app 改名成 ChatGPT.app，
+# 两者的 Contents/Resources/app.asar 布局一致，picker 过滤逻辑也相同。
+# 这里同时支持新旧名字，优先找 ChatGPT.app（新），再回退 Codex.app（旧）。
 # ---------------------------------------------------------------------------
 APP="${CODEX_APP:-}"
 if [ -z "$APP" ]; then
-  if [ -d "/Applications/Codex.app" ]; then
-    APP="/Applications/Codex.app"
-  elif [ -d "$HOME/Applications/Codex.app" ]; then
-    APP="$HOME/Applications/Codex.app"
-  fi
+  for candidate in \
+    "/Applications/ChatGPT.app" \
+    "/Applications/Codex.app" \
+    "$HOME/Applications/ChatGPT.app" \
+    "$HOME/Applications/Codex.app"; do
+    if [ -d "$candidate" ]; then
+      APP="$candidate"
+      break
+    fi
+  done
 fi
 if [ -z "$APP" ] || [ ! -d "$APP" ]; then
-  echo "error: Codex.app not found under /Applications or \$HOME/Applications" >&2
-  echo "       set CODEX_APP=/path/to/Codex.app to override" >&2
+  echo "error: ChatGPT.app / Codex.app not found under /Applications or \$HOME/Applications" >&2
+  echo "       set CODEX_APP=/path/to/ChatGPT.app to override" >&2
   exit 1
 fi
 
@@ -131,14 +140,18 @@ fi
 ASAR_BAK="$ASAR.bak"
 
 # ---------------------------------------------------------------------------
-# Codex 不能在跑
+# 桌面端不能在跑
+#
+# 进程名取自 .app 的 basename（ChatGPT.app → ChatGPT，Codex.app → Codex），
+# 这样新旧两个版本都能正确检测。
 # ---------------------------------------------------------------------------
-if pgrep -x "Codex" >/dev/null 2>&1; then
-  echo "error: Codex is running. Quit it first (Cmd+Q), then re-run this script." >&2
+APP_PROC="$(basename "$APP" .app)"
+if pgrep -x "$APP_PROC" >/dev/null 2>&1; then
+  echo "error: $APP_PROC is running. Quit it first (Cmd+Q), then re-run this script." >&2
   exit 1
 fi
 if pgrep -f "$APP/Contents/MacOS/" >/dev/null 2>&1; then
-  echo "error: a process under $APP is still running. Quit Codex first." >&2
+  echo "error: a process under $APP is still running. Quit $APP_PROC first." >&2
   exit 1
 fi
 
