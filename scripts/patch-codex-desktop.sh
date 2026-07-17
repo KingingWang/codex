@@ -277,18 +277,12 @@ echo "==> Applying patch in extracted bundle..."
 perl -i -pe 's/([A-Za-z_$][A-Za-z_$0-9]*)=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`([;,])/$1=false$2/g' "$TARGET"
 
 # 4. verify in extracted ----------------------------------------------------
-# 确认 patch 生效：同一个文件里有 amazonBedrock 且 patched 模式存在
-VERIFY_OK=false
-if grep -qF 'amazonBedrock' "$TARGET"; then
-  if grep -Eq "$PATCHED_RE" "$TARGET"; then
-    # 还要确认 unpatched 模式已经消失
-    if ! grep -Eq "$UNPATCHED_RE" "$TARGET"; then
-      VERIFY_OK=true
-    fi
-  fi
-fi
-if [ "$VERIFY_OK" != "true" ]; then
+# 确认 patch 生效：UNPATCHED 模式已消失。
+# 注意：不能检查 amazonBedrock 是否还在文件里——如果该文件中只有 picker
+# 表达式这一处 amazonBedrock，替换后它就完全消失了（新版本已证实如此）。
+if grep -Eq "$UNPATCHED_RE" "$TARGET"; then
   echo "error: perl substitution did not take effect in: $TARGET" >&2
+  echo "       the unpatched pattern is still present." >&2
   exit 1
 fi
 echo "==> Patch verified in extracted bundle."
@@ -302,9 +296,12 @@ $ASAR_CMD pack "$EXTRACTED" "$PACKED"
 mkdir -p "$VERIFY_DIR"
 # shellcheck disable=SC2086
 $ASAR_CMD extract "$PACKED" "$VERIFY_DIR"
+# 确认 bundle 整体完整性：其他 JS chunk 中仍有 amazonBedrock 引用
+# （如 auth type switch/case），说明 asar pack/extract 没有丢文件。
 if ! grep -Flr --exclude='*.map' --exclude-dir=node_modules \
      -e 'amazonBedrock' "$VERIFY_DIR" >/dev/null 2>&1; then
-  echo "error: repacked asar lost amazonBedrock references" >&2
+  echo "error: repacked asar lost all amazonBedrock references" >&2
+  echo "       (other chunks should still have auth-type references)" >&2
   exit 1
 fi
 # 确认 repacked 里 unpatched 模式不存在
