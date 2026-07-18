@@ -88,12 +88,18 @@ pub async fn process_chat_completions_sse(
     let mut accumulated_reasoning = String::new();
     // Whether an OutputItemAdded for reasoning has been emitted.
     let mut reasoning_item_added = false;
+    // Whether an OutputItemDone for reasoning has been emitted. Prevents the
+    // finish_reason handler and the [DONE] handler from each emitting a
+    // duplicate reasoning done event for the same item.
+    let mut reasoning_item_done = false;
     // The last finish_reason seen across all choices, used to infer
     // end_turn for the Completed event.
     let mut last_finish_reason: Option<String> = None;
-    // Whether any output item was emitted during the stream (text or tool call).
-    // This is distinct from the accumulation buffers, which may be drained
-    // before [DONE] arrives (e.g. by finish_reason handling).
+    // Whether any deliverable output item was emitted during the stream
+    // (assistant text or tool call). Reasoning/thinking content is NOT
+    // considered a deliverable: a turn that only produced reasoning and no
+    // text or tool calls must be treated as an empty response so the turn
+    // layer can retry the request.
     let mut output_emitted = false;
 
     loop {
@@ -151,8 +157,9 @@ pub async fn process_chat_completions_sse(
                 // returns from this function once it finishes flushing.
             }
 
-            // Emit OutputItemDone for reasoning if we started one.
-            if reasoning_item_added {
+            // Emit OutputItemDone for reasoning if we started one and have not
+            // already finalized it via the finish_reason handler.
+            if reasoning_item_added && !reasoning_item_done {
                 let reasoning_done = ResponseItem::Reasoning {
                     id: Some(String::new()),
                     summary: Vec::new(),
@@ -167,6 +174,8 @@ pub async fn process_chat_completions_sse(
                 let _ = tx_event
                     .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
                     .await;
+                // No need to update `reasoning_item_done`: the [DONE] handler
+                // returns from this function once it finishes flushing.
             }
 
             // Emit any remaining tool calls with the proper event sequence
@@ -217,6 +226,17 @@ pub async fn process_chat_completions_sse(
             // Check if stream had no meaningful output - treat as retryable error.
             // Must happen AFTER flushing accumulated tool calls and text items,
             // since those flushes may produce output not tracked during streaming.
+            //
+            // Retry semantics (see codex-core/src/responses_retry.rs):
+            //   - max retries: `stream_max_retries()` (default 5, hard cap 100).
+            //   - backoff is applied BEFORE each retry (sleep, then resend):
+            //     delay = 200ms * 2^(n-1) * jitter(0.9..1.1), no upper bound.
+            //   - after max retries exhausted (and no transport fallback), the
+            //     error is surfaced to the turn layer and the turn ends.
+            // A reasoning-only response falls into this branch, so a provider
+            // that persistently returns reasoning-only will retry up to the
+            // configured limit before failing the turn; worst-case extra
+            // requests = max_retries (default 5) per affected turn.
             if !output_emitted {
                 let _ = tx_event
                     .send(Err(ApiError::Retryable {
@@ -288,6 +308,7 @@ pub async fn process_chat_completions_sse(
                 &mut accumulated_tool_calls,
                 &mut accumulated_reasoning,
                 &mut reasoning_item_added,
+                &mut reasoning_item_done,
                 &mut text_item_added,
                 &mut text_item_done,
                 &mut accumulated_text,
@@ -311,6 +332,7 @@ async fn process_chat_choice(
     accumulated_tool_calls: &mut HashMap<i64, ToolCallAccumulator>,
     accumulated_reasoning: &mut String,
     reasoning_item_added: &mut bool,
+    reasoning_item_done: &mut bool,
     text_item_added: &mut bool,
     text_item_done: &mut bool,
     accumulated_text: &mut String,
@@ -377,7 +399,9 @@ async fn process_chat_choice(
                 *reasoning_item_added = true;
             }
             accumulated_reasoning.push_str(&reasoning_text);
-            *output_emitted = true;
+            // Reasoning is not a deliverable; do not set output_emitted here.
+            // Only assistant text or tool calls count as real output so that
+            // a reasoning-only response is retried by the turn layer.
             let _ = tx_event
                 .send(Ok(ResponseEvent::ReasoningContentDelta {
                     delta: reasoning_text,
@@ -449,8 +473,9 @@ async fn process_chat_choice(
             *text_item_done = true;
         }
 
-        // Emit OutputItemDone for reasoning if we started one.
-        if *reasoning_item_added {
+        // Emit OutputItemDone for reasoning if we started one and have not
+        // already finalized it (e.g. via a previous finish_reason chunk).
+        if *reasoning_item_added && !*reasoning_item_done {
             let reasoning_done = ResponseItem::Reasoning {
                 id: Some(String::new()),
                 summary: Vec::new(),
@@ -465,6 +490,7 @@ async fn process_chat_choice(
             let _ = tx_event
                 .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
                 .await;
+            *reasoning_item_done = true;
         }
 
         // Emit accumulated tool calls with the proper event sequence
@@ -519,8 +545,11 @@ async fn process_chat_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ApiError;
     use codex_client::TransportError;
+    use codex_protocol::models::ResponseItem;
     use futures::TryStreamExt;
+    use pretty_assertions::assert_eq;
     use tokio_test::io::Builder as IoBuilder;
     use tokio_util::io::ReaderStream;
 
@@ -801,5 +830,206 @@ mod tests {
             if name == "shell"
         ));
         assert!(matches!(&events[6], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_stream_is_treated_as_empty_and_retried() {
+        // Regression: a response that only produced reasoning/thinking content
+        // and no assistant text or tool calls must NOT be considered a complete
+        // turn. The stream should surface a retryable error so the turn layer
+        // can retry the request instead of ending the turn with no deliverable
+        // output.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"thinking about it\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        // Expected ordered sequence:
+        //   [0] OutputItemAdded(Reasoning)
+        //   [1] ReasoningContentDelta("thinking about it")
+        //   [2] OutputItemDone(Reasoning)
+        //   [3] Err(Retryable { "no output content" })
+        // No OutputItemDone(Message), no OutputTextDelta, no Completed.
+        assert_eq!(events.len(), 4, "expected exactly 4 events, got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(
+                ResponseItem::Reasoning { .. }
+            ))
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) if delta == "thinking about it"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(
+                ResponseItem::Reasoning { .. }
+            ))
+        ));
+        assert!(
+            matches!(
+                &events[3],
+                Err(ApiError::Retryable { message, .. })
+                    if message.contains("no output content")
+            ),
+            "last event must be Retryable 'no output content', got {:?}",
+            &events[3]
+        );
+
+        // Negative assertions: no deliverable output and no Completed.
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::OutputTextDelta(_))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "reasoning-only stream must not emit assistant text or Completed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_then_text_completes_normally() {
+        // Sanity: when reasoning is followed by real assistant text, the
+        // response completes normally (no retryable error) and the text item
+        // is finalized.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hmm\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        let mut saw_completed = false;
+        let mut saw_text_done = false;
+        for ev in &events {
+            match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                    role, content, ..
+                })) if role == "assistant"
+                    && content.iter().any(
+                        |c| matches!(c, ContentItem::OutputText { text } if text == "Hello"),
+                    ) =>
+                {
+                    saw_text_done = true;
+                }
+                Ok(ResponseEvent::Completed { .. }) => saw_completed = true,
+                Err(ApiError::Retryable { .. }) => panic!("must not retry when text is present"),
+                _ => {}
+            }
+        }
+        assert!(saw_text_done, "assistant text item should be finalized");
+        assert!(saw_completed, "stream should complete normally");
+    }
+
+    #[tokio::test]
+    async fn mixed_choices_stream_with_text_completes_normally() {
+        // Multi-choice stream: choice 0 only has reasoning, choice 1 has
+        // assistant text. A deliverable exists (choice 1 text), so the stream
+        // must complete normally without a retryable error.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"think0\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":1,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"answer1\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"},{\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        let mut saw_completed = false;
+        let mut saw_text_done = false;
+        for ev in &events {
+            match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                    role, content, ..
+                })) if role == "assistant"
+                    && content.iter().any(
+                        |c| matches!(c, ContentItem::OutputText { text } if text == "answer1"),
+                    ) =>
+                {
+                    saw_text_done = true;
+                }
+                Ok(ResponseEvent::Completed { .. }) => saw_completed = true,
+                Err(ApiError::Retryable { .. }) => {
+                    panic!("must not retry when a choice has assistant text: {events:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_text_done, "choice 1 text should be finalized");
+        assert!(saw_completed, "stream should complete normally");
+    }
+
+    #[tokio::test]
+    async fn all_choices_reasoning_only_stream_yields_retryable() {
+        // Multi-choice stream: every choice only has reasoning, no
+        // deliverable anywhere. Must be treated as empty and retried; no
+        // Completed, no assistant Message.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"t0\"},\"finish_reason\":null},{\"index\":1,\"delta\":{\"reasoning\":\"t1\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"},{\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk3 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3]).await;
+
+        let last = events.last().expect("expected at least one event");
+        assert!(
+            matches!(
+                last,
+                Err(ApiError::Retryable { message, .. }) if message.contains("no output content")
+            ),
+            "last event must be Retryable 'no output content', got {last:?}"
+        );
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::OutputTextDelta(_))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "all-reasoning multi-choice stream must not emit assistant text or Completed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_done_not_emitted_twely_across_finish_reason_and_done() {
+        // Regression: when a reasoning-only stream carries finish_reason in a
+        // chunk (flushing reasoning done via the finish_reason handler) and
+        // then terminates with [DONE] (which also has a reasoning-done flush
+        // branch), the reasoning OutputItemDone must be emitted exactly once.
+        // Before the reasoning_item_done dedup flag was introduced, this
+        // produced a duplicate OutputItemDone(Reasoning).
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"thinking\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk3 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3]).await;
+
+        let reasoning_done_count = events
+            .iter()
+            .filter(|ev| {
+                matches!(
+                    ev,
+                    Ok(ResponseEvent::OutputItemDone(
+                        ResponseItem::Reasoning { .. }
+                    ))
+                )
+            })
+            .count();
+        assert_eq!(
+            reasoning_done_count, 1,
+            "reasoning OutputItemDone must be emitted exactly once across finish_reason + [DONE], got {events:?}"
+        );
+        // No Completed (reasoning-only is retried), no assistant Message.
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "reasoning-only stream must not emit assistant text or Completed: {events:?}"
+        );
     }
 }
