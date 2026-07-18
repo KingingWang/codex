@@ -203,9 +203,10 @@ async fn convert_response_to_events(
         return;
     }
 
-    // Track whether any output was emitted during conversion.
-    // When the API returns HTTP 200 with empty content, the stream
-    // completes with no real output, which should trigger a retry.
+    // Track whether any deliverable output was emitted during conversion
+    // (assistant text or tool calls). Reasoning/thinking content is NOT
+    // a deliverable: a response that only produced reasoning is treated as
+    // empty so the turn layer retries the request.
     let mut output_emitted = false;
     let mut last_finish_reason: Option<String> = None;
 
@@ -238,7 +239,7 @@ async fn convert_response_to_events(
                     encrypted_content: None,
                     internal_chat_message_metadata_passthrough: None,
                 };
-                output_emitted = true;
+                // Reasoning is not a deliverable; do not set output_emitted here.
                 if tx
                     .send(Ok(ResponseEvent::OutputItemAdded(reasoning_added)))
                     .await
@@ -370,6 +371,17 @@ async fn convert_response_to_events(
 
     // If no output was emitted (empty response from the API),
     // treat as a transient error so the turn layer retries.
+    //
+    // Retry semantics (see codex-core/src/responses_retry.rs):
+    //   - max retries: `stream_max_retries()` (default 5, hard cap 100).
+    //   - backoff is applied BEFORE each retry (sleep, then resend):
+    //     delay = 200ms * 2^(n-1) * jitter(0.9..1.1), no upper bound.
+    //   - after max retries exhausted (and no transport fallback), the
+    //     error is surfaced to the turn layer and the turn ends.
+    // A reasoning-only response falls into this branch, so a provider that
+    // persistently returns reasoning-only will retry up to the configured
+    // limit before failing the turn; worst-case extra requests = max_retries
+    // (default 5) per affected turn.
     if !output_emitted {
         let _ = tx
             .send(Err(ApiError::Retryable {
@@ -418,6 +430,7 @@ mod tests {
     use crate::common::ChatCompletionResponseToolCall;
     use crate::common::ChatCompletionUsage;
     use crate::common::ChatCompletionsResponse;
+    use pretty_assertions::assert_eq;
 
     async fn collect_events(
         response: ChatCompletionsResponse,
@@ -621,6 +634,254 @@ mod tests {
         assert!(
             events.iter().all(std::result::Result::is_ok),
             "expected all Ok events, got {events:?}"
+        );
+    }
+
+    fn reasoning_only_response() -> ChatCompletionsResponse {
+        ChatCompletionsResponse {
+            id: "resp-reasoning".to_string(),
+            object: "chat.completion".to_string(),
+            created: Some(1234567890),
+            model: Some("test-model".to_string()),
+            choices: vec![ChatCompletionResponseChoice {
+                index: 0,
+                message: ChatCompletionResponseMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: None,
+                    reasoning: Some(serde_json::Value::String("thinking about it".to_string())),
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        }
+    }
+
+    fn reasoning_then_text_response() -> ChatCompletionsResponse {
+        ChatCompletionsResponse {
+            id: "resp-reasoning-text".to_string(),
+            object: "chat.completion".to_string(),
+            created: Some(1234567890),
+            model: Some("test-model".to_string()),
+            choices: vec![ChatCompletionResponseChoice {
+                index: 0,
+                message: ChatCompletionResponseMessage {
+                    role: "assistant".to_string(),
+                    content: Some("Hello from test!".to_string()),
+                    tool_calls: None,
+                    reasoning: Some(serde_json::Value::String("hmm".to_string())),
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_yields_retryable() {
+        // Regression: a non-streaming response that only produced reasoning
+        // content (no assistant text, no tool calls) must be treated as an
+        // empty response so the turn layer retries the request, rather than
+        // completing the turn with no deliverable output.
+        let events = collect_events(reasoning_only_response()).await;
+
+        // Expected ordered sequence:
+        //   [0] Created
+        //   [1] OutputItemAdded(Reasoning)
+        //   [2] ReasoningContentDelta("thinking about it")
+        //   [3] OutputItemDone(Reasoning)
+        //   [4] Err(Retryable { "no output content" })
+        // No OutputItemDone(Message), no Completed.
+        assert_eq!(events.len(), 5, "expected exactly 5 events, got {events:?}");
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputItemAdded(
+                ResponseItem::Reasoning { .. }
+            ))
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) if delta == "thinking about it"
+        ));
+        assert!(matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemDone(
+                ResponseItem::Reasoning { .. }
+            ))
+        ));
+        assert!(
+            matches!(
+                &events[4],
+                Err(ApiError::Retryable { message, .. })
+                    if message.contains("no output content")
+            ),
+            "last event must be Retryable 'no output content', got {:?}",
+            &events[4]
+        );
+
+        // Negative assertions: no deliverable output and no Completed.
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "reasoning-only response must not emit assistant text or Completed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_then_text_completes_normally() {
+        // Sanity: reasoning followed by real assistant text must complete
+        // normally without a retryable error.
+        let events = collect_events(reasoning_then_text_response()).await;
+
+        let mut saw_completed = false;
+        let mut saw_text_done = false;
+        for ev in &events {
+            match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. }))
+                    if role == "assistant"
+                        && content.iter().any(
+                            |c| matches!(c, ContentItem::OutputText { text } if text == "Hello from test!"),
+                        ) =>
+                {
+                    saw_text_done = true;
+                }
+                Ok(ResponseEvent::Completed { .. }) => saw_completed = true,
+                Err(ApiError::Retryable { .. }) => {
+                    panic!("must not retry when assistant text is present: {events:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_text_done, "assistant text item should be finalized");
+        assert!(saw_completed, "response should complete normally");
+    }
+
+    fn mixed_choices_one_reasoning_one_text_response() -> ChatCompletionsResponse {
+        // Multi-choice response where choice 0 only has reasoning and
+        // choice 1 has assistant text. A deliverable exists (choice 1 text),
+        // so this must complete normally and not be treated as empty.
+        ChatCompletionsResponse {
+            id: "resp-mixed".to_string(),
+            object: "chat.completion".to_string(),
+            created: Some(1234567890),
+            model: Some("test-model".to_string()),
+            choices: vec![
+                ChatCompletionResponseChoice {
+                    index: 0,
+                    message: ChatCompletionResponseMessage {
+                        role: "assistant".to_string(),
+                        content: None,
+                        tool_calls: None,
+                        reasoning: Some(serde_json::Value::String("think0".to_string())),
+                    },
+                    finish_reason: Some("stop".to_string()),
+                },
+                ChatCompletionResponseChoice {
+                    index: 1,
+                    message: ChatCompletionResponseMessage {
+                        role: "assistant".to_string(),
+                        content: Some("answer1".to_string()),
+                        tool_calls: None,
+                        reasoning: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                },
+            ],
+            usage: None,
+        }
+    }
+
+    fn all_choices_reasoning_only_response() -> ChatCompletionsResponse {
+        // Multi-choice response where every choice only has reasoning and
+        // none has assistant text or tool calls. No deliverable exists across
+        // any choice, so this must be treated as empty and retried.
+        ChatCompletionsResponse {
+            id: "resp-all-reasoning".to_string(),
+            object: "chat.completion".to_string(),
+            created: Some(1234567890),
+            model: Some("test-model".to_string()),
+            choices: vec![
+                ChatCompletionResponseChoice {
+                    index: 0,
+                    message: ChatCompletionResponseMessage {
+                        role: "assistant".to_string(),
+                        content: None,
+                        tool_calls: None,
+                        reasoning: Some(serde_json::Value::String("t0".to_string())),
+                    },
+                    finish_reason: Some("stop".to_string()),
+                },
+                ChatCompletionResponseChoice {
+                    index: 1,
+                    message: ChatCompletionResponseMessage {
+                        role: "assistant".to_string(),
+                        content: None,
+                        tool_calls: None,
+                        reasoning: Some(serde_json::Value::String("t1".to_string())),
+                    },
+                    finish_reason: Some("stop".to_string()),
+                },
+            ],
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_choices_with_text_completes_normally() {
+        // Multi-choice: one reasoning-only choice + one text choice. The text
+        // choice is a deliverable, so the response must complete normally
+        // without a retryable error.
+        let events = collect_events(mixed_choices_one_reasoning_one_text_response()).await;
+
+        let mut saw_completed = false;
+        let mut saw_text_done = false;
+        for ev in &events {
+            match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                    role, content, ..
+                })) if role == "assistant"
+                    && content.iter().any(
+                        |c| matches!(c, ContentItem::OutputText { text } if text == "answer1"),
+                    ) =>
+                {
+                    saw_text_done = true;
+                }
+                Ok(ResponseEvent::Completed { .. }) => saw_completed = true,
+                Err(ApiError::Retryable { .. }) => {
+                    panic!("must not retry when a choice has assistant text: {events:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_text_done, "choice 1 text should be finalized");
+        assert!(saw_completed, "response should complete normally");
+    }
+
+    #[tokio::test]
+    async fn all_choices_reasoning_only_yields_retryable() {
+        // Multi-choice: every choice only has reasoning, no deliverable
+        // anywhere. Must be treated as empty and retried; no Completed.
+        let events = collect_events(all_choices_reasoning_only_response()).await;
+
+        let last = events.last().expect("expected at least one event");
+        assert!(
+            matches!(
+                last,
+                Err(ApiError::Retryable { message, .. }) if message.contains("no output content")
+            ),
+            "last event must be Retryable 'no output content', got {last:?}"
+        );
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "all-reasoning multi-choice must not emit assistant text or Completed: {events:?}"
         );
     }
 }
