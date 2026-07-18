@@ -162,12 +162,12 @@ pub async fn process_chat_completions_sse(
             if reasoning_item_added && !reasoning_item_done {
                 let reasoning_done = ResponseItem::Reasoning {
                     id: Some(String::new()),
-                    summary: Vec::new(),
-                    content: Some(vec![
-                        codex_protocol::models::ReasoningItemContent::ReasoningText {
+                    summary: vec![
+                        codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
                             text: accumulated_reasoning.clone(),
                         },
-                    ]),
+                    ],
+                    content: None,
                     encrypted_content: None,
                     internal_chat_message_metadata_passthrough: None,
                 };
@@ -478,12 +478,12 @@ async fn process_chat_choice(
         if *reasoning_item_added && !*reasoning_item_done {
             let reasoning_done = ResponseItem::Reasoning {
                 id: Some(String::new()),
-                summary: Vec::new(),
-                content: Some(vec![
-                    codex_protocol::models::ReasoningItemContent::ReasoningText {
+                summary: vec![
+                    codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
                         text: accumulated_reasoning.clone(),
                     },
-                ]),
+                ],
+                content: None,
                 encrypted_content: None,
                 internal_chat_message_metadata_passthrough: None,
             };
@@ -863,12 +863,32 @@ mod tests {
             &events[1],
             Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) if delta == "thinking about it"
         ));
+        // The done item carries the full reasoning text in `summary` (not
+        // `content`), so the legacy event expansion emits a single
+        // AgentReasoning that codex-acp's seen_reasoning_deltas flag (set by
+        // the delta above) suppresses — preventing the duplicate reasoning
+        // render in Zed. `content` is None so no AgentReasoningRawContent is
+        // emitted alongside.
         assert!(matches!(
             &events[2],
             Ok(ResponseEvent::OutputItemDone(
-                ResponseItem::Reasoning { .. }
-            ))
+                ResponseItem::Reasoning { summary, content: None, .. }
+            )) if summary.len() == 1
         ));
+        if let Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { summary, .. })) =
+            &events[2]
+        {
+            match &summary[0] {
+                codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => {
+                    assert_eq!(
+                        text, "thinking about it",
+                        "summary carries full reasoning text: {events:?}"
+                    );
+                }
+            }
+        } else {
+            panic!("expected OutputItemDone(Reasoning) with summary: {events:?}");
+        }
         assert!(
             matches!(
                 &events[3],

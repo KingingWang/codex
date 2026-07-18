@@ -2300,22 +2300,36 @@ impl ModelClientSession {
         }
 
         // Convert ResponseItems to ChatMessages
-        // First pass: collect reasoning content by anchor index
+        // First pass: collect reasoning content by anchor index.
+        // Read from `summary` first: the fork's chat-completions provider puts
+        // the full reasoning text there (mirroring the upstream Responses API
+        // summary path) so codex-acp's seen_reasoning_deltas dedup suppresses
+        // the duplicate complete-reasoning event. Fall back to `content` for
+        // legacy reasoning items that still carry text there.
         let mut reasoning_by_index: HashMap<usize, String> = HashMap::new();
         for (idx, item) in input.iter().enumerate() {
             if let ResponseItem::Reasoning {
-                content: Some(items),
-                ..
+                summary, content, ..
             } = item
             {
                 let mut text = String::new();
-                for entry in items {
-                    match entry {
-                        codex_protocol::models::ReasoningItemContent::ReasoningText {
-                            text: segment,
-                        }
-                        | codex_protocol::models::ReasoningItemContent::Text { text: segment } => {
-                            text.push_str(segment)
+                for entry in summary {
+                    let codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
+                        text: segment,
+                    } = entry;
+                    text.push_str(segment);
+                }
+                if text.trim().is_empty()
+                    && let Some(items) = content
+                {
+                    for entry in items {
+                        match entry {
+                            codex_protocol::models::ReasoningItemContent::ReasoningText {
+                                text: segment,
+                            }
+                            | codex_protocol::models::ReasoningItemContent::Text {
+                                text: segment,
+                            } => text.push_str(segment),
                         }
                     }
                 }
