@@ -221,55 +221,32 @@ async fn convert_response_to_events(
     for choice in &response.choices {
         let message = &choice.message;
 
-        // Handle reasoning content if present
+        // Handle reasoning content if present.
+        // Non-streaming responses already carry the full reasoning text in the
+        // completed item. Do not synthesize an OutputItemAdded +
+        // ReasoningContentDelta too; clients (e.g. Zed via codex-acp) that
+        // render both the delta and the completed item would display the same
+        // reasoning twice. The full text goes into `summary` (the Responses
+        // API summary path that codex-acp's seen_reasoning_deltas dedup is
+        // designed for; with no delta stream here the flag stays false and the
+        // single AgentReasoning is rendered once). `content` is left None so
+        // no second complete-reasoning event (AgentReasoningRawContent, which
+        // some codex-acp versions do not dedup) is emitted.
         if let Some(reasoning) = &message.reasoning {
             let reasoning_text = extract_reasoning_text(reasoning);
             if !reasoning_text.is_empty() {
-                // Emit OutputItemAdded with empty content to establish the active
-                // item, mirroring the streaming path. The turn processor needs an
-                // active_item before it can handle delta events.
-                let reasoning_added = ResponseItem::Reasoning {
+                let reasoning_done = ResponseItem::Reasoning {
                     id: Some(format!("reasoning_{}", choice.index)),
-                    summary: Vec::new(),
-                    content: Some(vec![
-                        codex_protocol::models::ReasoningItemContent::ReasoningText {
-                            text: String::new(),
+                    summary: vec![
+                        codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
+                            text: reasoning_text,
                         },
-                    ]),
+                    ],
+                    content: None,
                     encrypted_content: None,
                     internal_chat_message_metadata_passthrough: None,
                 };
                 // Reasoning is not a deliverable; do not set output_emitted here.
-                if tx
-                    .send(Ok(ResponseEvent::OutputItemAdded(reasoning_added)))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                // Emit reasoning content delta with the full text
-                if tx
-                    .send(Ok(ResponseEvent::ReasoningContentDelta {
-                        delta: reasoning_text.clone(),
-                        content_index: choice.index,
-                    }))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                // Emit OutputItemDone with the full content
-                let reasoning_done = ResponseItem::Reasoning {
-                    id: Some(format!("reasoning_{}", choice.index)),
-                    summary: Vec::new(),
-                    content: Some(vec![
-                        codex_protocol::models::ReasoningItemContent::ReasoningText {
-                            text: reasoning_text,
-                        },
-                    ]),
-                    encrypted_content: None,
-                    internal_chat_message_metadata_passthrough: None,
-                };
                 if tx
                     .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
                     .await
@@ -687,37 +664,64 @@ mod tests {
 
         // Expected ordered sequence:
         //   [0] Created
-        //   [1] OutputItemAdded(Reasoning)
-        //   [2] ReasoningContentDelta("thinking about it")
-        //   [3] OutputItemDone(Reasoning)
-        //   [4] Err(Retryable { "no output content" })
-        // No OutputItemDone(Message), no Completed.
-        assert_eq!(events.len(), 5, "expected exactly 5 events, got {events:?}");
+        //   [1] OutputItemDone(Reasoning)  <- summary carries full text, content None
+        //   [2] Err(Retryable { "no output content" })
+        //
+        // Non-streaming responses already carry the full reasoning text in the
+        // completed item, so we emit only a single OutputItemDone (no
+        // OutputItemAdded + ReasoningContentDelta). Clients (e.g. Zed via
+        // codex-acp) that render both a delta and the completed item would
+        // otherwise display the same reasoning twice. The full text lives in
+        // `summary` (the Responses API summary path that codex-acp's
+        // seen_reasoning_deltas dedup is designed for); `content` is None so
+        // no second complete-reasoning event (AgentReasoningRawContent) is
+        // emitted by the legacy event expansion.
+        assert_eq!(events.len(), 3, "expected exactly 3 events, got {events:?}");
         assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
         assert!(matches!(
             &events[1],
-            Ok(ResponseEvent::OutputItemAdded(
-                ResponseItem::Reasoning { .. }
-            ))
-        ));
-        assert!(matches!(
-            &events[2],
-            Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) if delta == "thinking about it"
-        ));
-        assert!(matches!(
-            &events[3],
             Ok(ResponseEvent::OutputItemDone(
-                ResponseItem::Reasoning { .. }
-            ))
+                ResponseItem::Reasoning {
+                    summary,
+                    content: None,
+                    ..
+                }
+            )) if summary.len() == 1
         ));
+        // The single done item carries the full reasoning text exactly once.
+        if let Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { summary, .. })) =
+            &events[1]
+        {
+            match &summary[0] {
+                codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => {
+                    assert_eq!(text, "thinking about it");
+                }
+            }
+        } else {
+            panic!("expected OutputItemDone(Reasoning) with summary text: {events:?}");
+        }
         assert!(
             matches!(
-                &events[4],
+                &events[2],
                 Err(ApiError::Retryable { message, .. })
                     if message.contains("no output content")
             ),
             "last event must be Retryable 'no output content', got {:?}",
-            &events[4]
+            &events[2]
+        );
+
+        // No-duplicate assertions: a non-streaming response must NOT emit an
+        // OutputItemAdded or a ReasoningContentDelta for reasoning — those
+        // would be rendered alongside the completed item and show the same
+        // reasoning twice.
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemAdded(
+                    ResponseItem::Reasoning { .. }
+                )) | Ok(ResponseEvent::ReasoningContentDelta { .. })
+            )),
+            "non-streaming reasoning must not emit Added/Delta (would duplicate): {events:?}"
         );
 
         // Negative assertions: no deliverable output and no Completed.
