@@ -463,7 +463,15 @@ pub fn merge_configured_model_providers(
     configured_model_providers: HashMap<String, ModelProviderInfo>,
 ) -> Result<HashMap<String, ModelProviderInfo>, String> {
     for (key, mut provider) in configured_model_providers {
-        if key == AMAZON_BEDROCK_PROVIDER_ID {
+        if key == AMAZON_BEDROCK_PROVIDER_ID
+            && model_providers.contains_key(AMAZON_BEDROCK_PROVIDER_ID)
+        {
+            // Built-in Amazon Bedrock provider is present: only `aws.profile`
+            // and `aws.region` may be overridden via config; other fields must
+            // remain at their defaults. When the built-in Bedrock provider is
+            // not present (e.g. internal deployment with built-in defaults
+            // disabled), a configured Bedrock entry falls through to the
+            // regular custom-provider path below.
             let aws_override = provider.aws.take();
             if provider != ModelProviderInfo::default() {
                 return Err(format!(

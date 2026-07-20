@@ -304,7 +304,7 @@ fn test_create_amazon_bedrock_provider() {
         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
         ModelProviderInfo {
             name: "Amazon Bedrock".to_string(),
-            base_url: Some("https://bedrock-mantle.us-east-1.api.aws/openai/v1".to_string()),
+            base_url: Some(AMAZON_BEDROCK_DEFAULT_BASE_URL.to_string()),
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
@@ -347,14 +347,14 @@ fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
 }
 
 #[test]
-fn test_built_in_model_providers_include_amazon_bedrock() {
+fn test_built_in_model_providers_exclude_amazon_bedrock() {
+    // Internal deployment: OpenAI and Amazon Bedrock built-in defaults are
+    // disabled. Users must configure their own model_providers in config.toml.
     let providers = built_in_model_providers(/*openai_base_url*/ None);
 
-    assert_eq!(
-        providers
-            .get(AMAZON_BEDROCK_PROVIDER_ID)
-            .map(ModelProviderInfo::is_amazon_bedrock),
-        Some(true)
+    assert!(
+        providers.get(AMAZON_BEDROCK_PROVIDER_ID).is_none(),
+        "Amazon Bedrock must not be a built-in provider in internal deployment"
     );
 }
 
@@ -381,26 +381,24 @@ fn test_merge_configured_model_providers_adds_custom_provider() {
 }
 
 #[test]
-fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override() {
+fn test_merge_configured_model_providers_adds_amazon_bedrock_when_configured() {
+    // Amazon Bedrock is not built-in for internal deployment; a configured
+    // Bedrock entry is added as a new custom provider rather than as a profile
+    // override of a built-in one.
+    let configured_bedrock = ModelProviderInfo {
+        aws: Some(ModelProviderAwsAuthInfo {
+            profile: Some("codex-bedrock".to_string()),
+            region: Some("us-west-2".to_string()),
+        }),
+        ..ModelProviderInfo::default()
+    };
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
-        ModelProviderInfo {
-            aws: Some(ModelProviderAwsAuthInfo {
-                profile: Some("codex-bedrock".to_string()),
-                region: Some("us-west-2".to_string()),
-            }),
-            ..ModelProviderInfo::default()
-        },
+        configured_bedrock.clone(),
     )]);
 
     let mut expected = built_in_model_providers(/*openai_base_url*/ None);
-    expected
-        .get_mut(AMAZON_BEDROCK_PROVIDER_ID)
-        .expect("Amazon Bedrock provider should be built in")
-        .aws = Some(ModelProviderAwsAuthInfo {
-        profile: Some("codex-bedrock".to_string()),
-        region: Some("us-west-2".to_string()),
-    });
+    expected.insert(AMAZON_BEDROCK_PROVIDER_ID.to_string(), configured_bedrock);
 
     assert_eq!(
         merge_configured_model_providers(
@@ -411,8 +409,25 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override
     );
 }
 
+/// Helper: assemble a `built_in` map that includes a real Amazon Bedrock
+/// entry, so the protected Bedrock override path can be exercised even when
+/// `built_in_model_providers` disables built-in Bedrock for the internal
+/// deployment.
+fn built_in_model_providers_with_amazon_bedrock()
+-> std::collections::HashMap<String, ModelProviderInfo> {
+    let mut providers = built_in_model_providers(/*openai_base_url*/ None);
+    providers.insert(
+        AMAZON_BEDROCK_PROVIDER_ID.to_string(),
+        ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+    );
+    providers
+}
+
 #[test]
 fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fields() {
+    // When a built-in Amazon Bedrock provider is present, only `aws.profile`
+    // and `aws.region` may be overridden via config; any other non-default
+    // field must be rejected.
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
         ModelProviderInfo {
@@ -427,7 +442,7 @@ fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fiel
 
     assert_eq!(
         merge_configured_model_providers(
-            built_in_model_providers(/*openai_base_url*/ None),
+            built_in_model_providers_with_amazon_bedrock(),
             configured_model_providers,
         ),
         Err(
@@ -451,12 +466,21 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
         },
     )]);
 
+    let mut expected = built_in_model_providers_with_amazon_bedrock();
+    expected
+        .get_mut(AMAZON_BEDROCK_PROVIDER_ID)
+        .expect("Amazon Bedrock provider should be built in")
+        .aws = Some(ModelProviderAwsAuthInfo {
+        profile: None,
+        region: None,
+    });
+
     assert_eq!(
         merge_configured_model_providers(
-            built_in_model_providers(/*openai_base_url*/ None),
+            built_in_model_providers_with_amazon_bedrock(),
             configured_model_providers,
         ),
-        Ok(built_in_model_providers(/*openai_base_url*/ None))
+        Ok(expected)
     );
 }
 
