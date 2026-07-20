@@ -136,7 +136,10 @@ fn test_personal_access_token_requires_explicit_base_url() {
     // back to the implicit ChatGPT Codex base URL; it must error out.
     let result = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
         .to_api_provider(Some(AuthMode::PersonalAccessToken));
-    assert!(result.is_err(), "personal-access-token provider must require an explicit base_url (external defaults disabled)");
+    assert!(
+        result.is_err(),
+        "personal-access-token provider must require an explicit base_url (external defaults disabled)"
+    );
 
     // When an explicit base_url is configured, it is preserved verbatim and
     // must NOT be silently rewritten to the upstream ChatGPT Codex URL.
@@ -155,7 +158,10 @@ fn test_header_auth_requires_explicit_base_url() {
     // instead of falling back to the implicit ChatGPT Codex base URL.
     let result = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
         .to_api_provider(Some(AuthMode::Headers));
-    assert!(result.is_err(), "header-auth provider must require an explicit base_url (external defaults disabled)");
+    assert!(
+        result.is_err(),
+        "header-auth provider must require an explicit base_url (external defaults disabled)"
+    );
 
     let api_provider = ModelProviderInfo::create_openai_provider(Some(
         "https://configured.example.com/codex".to_string(),
