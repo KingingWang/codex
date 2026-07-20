@@ -232,6 +232,8 @@ async fn convert_response_to_events(
         // single AgentReasoning is rendered once). `content` is left None so
         // no second complete-reasoning event (AgentReasoningRawContent, which
         // some codex-acp versions do not dedup) is emitted.
+        // Assistant text below is the opposite case: codex-acp renders it only
+        // from deltas, so a delta IS emitted there (see the text branch).
         if let Some(reasoning) = &message.reasoning {
             let reasoning_text = extract_reasoning_text(reasoning);
             if !reasoning_text.is_empty() {
@@ -319,13 +321,45 @@ async fn convert_response_to_events(
         {
             output_emitted = true;
 
-            // Non-streaming chat completions already provide the full text in
-            // the completed item. Do not synthesize a text delta too; clients
-            // that render both deltas and completed items would display the
-            // same assistant text twice.
+            // Mirror the streaming path: OutputItemAdded -> OutputTextDelta ->
+            // OutputItemDone. The Added event is required so the turn processor
+            // has an active item to attach the delta to.
+            //
+            // Unlike the reasoning branch above, the delta here is also needed
+            // for rendering: codex-acp (Zed's ACP adapter) draws agentMessage
+            // text ONLY from item/agentMessage/delta and ignores item/started
+            // and item/completed, so without a delta Zed shows no answer text.
+            let assistant_added = ResponseItem::Message {
+                id: Some("msg_assistant".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: String::new(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            };
+            if tx
+                .send(Ok(ResponseEvent::OutputItemAdded(assistant_added)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            // Full content delivered as a single delta; the turn processor
+            // forwards it as AgentMessageContentDelta.
+            if tx
+                .send(Ok(ResponseEvent::OutputTextDelta(content.clone())))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            // Emit OutputItemDone with the full text to finalize the item.
             let assistant_done = ResponseItem::Message {
                 id: Some("msg_assistant".to_string()),
-                role: message.role.clone(),
+                role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: content.clone(),
                 }],
@@ -586,23 +620,33 @@ mod tests {
     #[tokio::test]
     async fn normal_content_succeeds() {
         let events = collect_events(normal_content_response()).await;
-        assert!(
-            events.len() >= 3,
-            "expected at least 3 events, got {events:?}"
-        );
+        // Non-streaming mirrors the streaming sequence (see the text branch in
+        // convert_response_to_events for why the delta is required):
+        //   [0] Created
+        //   [1] OutputItemAdded(Message)    <- establishes the active item
+        //   [2] OutputTextDelta("Hello from test!")  <- full text in one delta
+        //   [3] OutputItemDone(Message)     <- finalizes the item
+        //   [4] Completed
+        assert_eq!(events.len(), 5, "expected exactly 5 events, got {events:?}");
         assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
-        assert!(matches!(&events[1], Ok(ResponseEvent::OutputItemDone(_))));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ok(ResponseEvent::OutputTextDelta(_)))),
-            "non-streaming chat completions should not emit text deltas: {events:?}"
-        );
-        let last = events.last().unwrap();
-        assert!(
-            matches!(last, Ok(ResponseEvent::Completed { .. })),
-            "last event should be Completed, got {last:?}"
-        );
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputTextDelta(s)) if s == "Hello from test!"
+        ));
+        assert!(matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. }))
+            if role == "assistant"
+                && content.iter().any(
+                    |c| matches!(c, ContentItem::OutputText { text } if text == "Hello from test!")
+                )
+        ));
+        assert!(matches!(&events[4], Ok(ResponseEvent::Completed { .. })));
     }
 
     #[tokio::test]
