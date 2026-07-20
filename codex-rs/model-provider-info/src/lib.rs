@@ -569,6 +569,16 @@ other non-default provider fields are not supported"
                         .get_or_insert_default()
                         .extend(http_headers_override);
                 }
+            } else {
+                // Built-in Amazon Bedrock provider is not present (e.g. internal
+                // deployment with built-in defaults disabled): treat a configured
+                // Bedrock entry as a custom provider so it is not dropped.
+                let mut custom = ModelProviderInfo::default();
+                custom.base_url = base_url_override;
+                custom.auth = auth_override;
+                custom.aws = aws_override;
+                custom.http_headers = http_headers_override;
+                model_providers.insert(key, custom);
             }
         } else {
             model_providers.entry(key).or_insert(provider);
