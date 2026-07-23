@@ -9,7 +9,6 @@ use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::CollaborationMode;
@@ -285,8 +284,7 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
 }
 
 fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.name = "OpenAI (test)".into();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -294,8 +292,7 @@ fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
 }
 
 fn openai_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider
@@ -396,7 +393,7 @@ fn remote_v2_compaction_response() -> String {
 }
 
 fn local_compaction_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
-    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.name = "OpenAI-compatible test provider".to_string();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
