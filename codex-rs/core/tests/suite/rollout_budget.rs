@@ -1,7 +1,7 @@
 use anyhow::Result;
 use codex_core::config::RolloutBudgetConfig;
 use codex_features::Feature;
-use codex_model_provider_info::built_in_model_providers;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -361,7 +361,7 @@ async fn restates_the_current_remainder_after_compaction() -> Result<()> {
         ],
     )
     .await;
-    let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    let mut model_provider = ModelProviderInfo::create_openai_provider(None);
     model_provider.name = "OpenAI-compatible test provider".to_string();
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;

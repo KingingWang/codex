@@ -346,7 +346,11 @@ fn provider_auth_for_test() -> ModelProviderAuthInfo {
 
 #[test]
 fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
-    let api_provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None)
+    let mut bedrock = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    // The internal-deployment fork deliberately rejects providers without an explicit
+    // base_url, so set a placeholder endpoint before converting to an ApiProvider.
+    bedrock.base_url = Some("https://example.amazonaws.com/v1".to_string());
+    let api_provider = bedrock
         .to_api_provider(/*auth_mode*/ None)
         .expect("Amazon Bedrock provider should build API provider");
 
@@ -366,7 +370,7 @@ fn test_built_in_model_providers_exclude_amazon_bedrock() {
     let providers = built_in_model_providers(/*openai_base_url*/ None);
 
     assert!(
-        providers.get(AMAZON_BEDROCK_PROVIDER_ID).is_none(),
+        !providers.contains_key(AMAZON_BEDROCK_PROVIDER_ID),
         "Amazon Bedrock must not be a built-in provider in internal deployment"
     );
 }
@@ -455,7 +459,9 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
         },
     )]);
 
-    let mut expected = built_in_model_providers(/*openai_base_url*/ None);
+    // The internal-deployment fork disables built-in Amazon Bedrock, so build the
+    // expected catalog from a map that seeds a Bedrock entry.
+    let mut expected = built_in_model_providers_with_amazon_bedrock();
     let expected_provider = expected
         .get_mut(AMAZON_BEDROCK_PROVIDER_ID)
         .expect("Amazon Bedrock provider should be built in");
@@ -472,7 +478,7 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
 
     assert_eq!(
         merge_configured_model_providers(
-            built_in_model_providers(/*openai_base_url*/ None),
+            built_in_model_providers_with_amazon_bedrock(),
             configured_model_providers,
         ),
         Ok(expected)

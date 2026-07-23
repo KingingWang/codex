@@ -1991,7 +1991,9 @@ impl ModelClientSession {
         let max_delay = Duration::from_secs(600); // 10 minutes
         loop {
             let client_setup = self.client.current_client_setup().await?;
-            let transport = ReqwestTransport::new(build_reqwest_client());
+            let transport = self
+                .client
+                .build_api_transport(&client_setup.api_provider, "/chat/completions")?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2152,7 +2154,9 @@ impl ModelClientSession {
         let max_delay = Duration::from_secs(600);
         loop {
             let client_setup = self.client.current_client_setup().await?;
-            let transport = ReqwestTransport::new(build_reqwest_client());
+            let transport = self
+                .client
+                .build_api_transport(&client_setup.api_provider, "/v1/messages")?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2676,7 +2680,7 @@ impl ModelClientSession {
         }
 
         // Determine reasoning_effort for models that support reasoning
-        let reasoning_effort = if model_info.supports_reasoning_summaries {
+        let reasoning_effort = if model_info.supports_reasoning_summary_parameter {
             effort.or_else(|| model_info.default_reasoning_level.clone())
         } else {
             None
@@ -2923,6 +2927,11 @@ fn content_items_to_chat_content(
                     "image_url": image_url_obj,
                 }));
             }
+            codex_protocol::models::ContentItem::InputAudio { .. } => {
+                // Chat Completions API does not currently support audio inputs in this
+                // fork path; drop audio items rather than erroring.
+                continue;
+            }
         }
     }
 
@@ -3041,6 +3050,11 @@ fn split_tool_output_into_tool_and_user_content(
                             "image_url": image_url_obj,
                         }));
                     }
+                    FunctionCallOutputContentItem::InputAudio { .. } => {
+                        // Audio tool outputs are not supported in Chat Completions
+                        // messages; drop audio items rather than erroring.
+                        continue;
+                    }
                     FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
                         text_parts.push(encrypted_content.clone());
                     }
@@ -3098,6 +3112,7 @@ mod chat_completions_request_tests {
     use codex_api::ChatCompletionsRequest;
     use codex_model_provider_info::WireApi;
     use codex_model_provider_info::create_oss_provider_with_base_url;
+    use codex_protocol::ResponseItemId;
     use codex_protocol::ThreadId;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::models::ContentItem;
@@ -3153,7 +3168,7 @@ mod chat_completions_request_tests {
             "upgrade": null,
             "base_instructions": "base instructions",
             "model_messages": null,
-            "supports_reasoning_summaries": false,
+            "supports_reasoning_summary_parameter": false,
             "support_verbosity": false,
             "default_verbosity": null,
             "apply_patch_tool_type": null,
@@ -3219,7 +3234,7 @@ mod chat_completions_request_tests {
 
     fn reasoning_item(text: &str) -> ResponseItem {
         ResponseItem::Reasoning {
-            id: Some("reasoning-id".to_string()),
+            id: Some(ResponseItemId::from_server("reasoning-id".to_string())),
             summary: vec![ReasoningItemReasoningSummary::SummaryText {
                 text: text.to_string(),
             }],

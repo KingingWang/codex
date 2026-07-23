@@ -505,7 +505,9 @@ fn extract_call_id_from_item(item: &ResponseItem) -> Option<String> {
     match item {
         ResponseItem::FunctionCall { call_id, .. } => Some(call_id.clone()),
         ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.clone()),
-        ResponseItem::LocalShellCall { call_id, id, .. } => call_id.clone().or(id.clone()),
+        ResponseItem::LocalShellCall { call_id, id, .. } => call_id
+            .clone()
+            .or_else(|| id.as_ref().map(|id| id.as_str().to_string())),
         ResponseItem::ToolSearchCall { call_id, .. } => call_id.clone(),
         _ => None,
     }

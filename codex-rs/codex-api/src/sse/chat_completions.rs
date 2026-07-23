@@ -9,6 +9,7 @@ use crate::error::ApiError;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
@@ -142,7 +143,7 @@ pub async fn process_chat_completions_sse(
             // active, preventing duplicate rendering of the text content.
             if text_item_added && !text_item_done {
                 let done_item = ResponseItem::Message {
-                    id: Some("msg_assistant".to_string()),
+                    id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: accumulated_text.clone(),
@@ -161,7 +162,7 @@ pub async fn process_chat_completions_sse(
             // already finalized it via the finish_reason handler.
             if reasoning_item_added && !reasoning_item_done {
                 let reasoning_done = ResponseItem::Reasoning {
-                    id: Some(String::new()),
+                    id: Some(ResponseItemId::from_server(String::new())),
                     summary: vec![
                         codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
                             text: accumulated_reasoning.clone(),
@@ -284,6 +285,7 @@ pub async fn process_chat_completions_sse(
             final_usage = Some(TokenUsage {
                 input_tokens: usage.prompt_tokens,
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: usage.completion_tokens,
                 reasoning_output_tokens: 0,
                 total_tokens: usage.total_tokens,
@@ -354,7 +356,7 @@ async fn process_chat_choice(
         // processor has an active_item to attach deltas to.
         if !*text_item_added {
             let added_item = ResponseItem::Message {
-                id: Some("msg_assistant".to_string()),
+                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: String::new(),
@@ -383,7 +385,7 @@ async fn process_chat_choice(
         if !reasoning_text.is_empty() {
             if !*reasoning_item_added {
                 let reasoning_added = ResponseItem::Reasoning {
-                    id: Some(String::new()),
+                    id: Some(ResponseItemId::from_server(String::new())),
                     summary: Vec::new(),
                     content: Some(vec![
                         codex_protocol::models::ReasoningItemContent::ReasoningText {
@@ -459,7 +461,7 @@ async fn process_chat_choice(
         // stream_controller while it is still active, preventing duplicate rendering.
         if *text_item_added && !*text_item_done {
             let done_item = ResponseItem::Message {
-                id: Some("msg_assistant".to_string()),
+                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: accumulated_text.clone(),
@@ -477,7 +479,7 @@ async fn process_chat_choice(
         // already finalized it (e.g. via a previous finish_reason chunk).
         if *reasoning_item_added && !*reasoning_item_done {
             let reasoning_done = ResponseItem::Reasoning {
-                id: Some(String::new()),
+                id: Some(ResponseItemId::from_server(String::new())),
                 summary: vec![
                     codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
                         text: accumulated_reasoning.clone(),

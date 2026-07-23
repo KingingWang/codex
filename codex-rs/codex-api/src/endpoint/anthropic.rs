@@ -28,6 +28,7 @@ use crate::error::ApiError;
 use crate::sse::anthropic::spawn_anthropic_stream;
 use codex_client::HttpTransport;
 use codex_client::Request;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -275,6 +276,7 @@ async fn convert_response_to_events(
         TokenUsage {
             input_tokens,
             cached_input_tokens: cache_read,
+            cache_write_input_tokens: cache_creation,
             output_tokens,
             reasoning_output_tokens: 0,
             total_tokens: input_tokens + output_tokens,
@@ -292,7 +294,7 @@ async fn convert_response_to_events(
                     continue;
                 }
                 let added = ResponseItem::Reasoning {
-                    id: Some(format!("reasoning_{idx}")),
+                    id: Some(ResponseItemId::from_server(format!("reasoning_{idx}"))),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: String::new(),
@@ -319,7 +321,7 @@ async fn convert_response_to_events(
                     return;
                 }
                 let done = ResponseItem::Reasoning {
-                    id: Some(format!("reasoning_{idx}")),
+                    id: Some(ResponseItemId::from_server(format!("reasoning_{idx}"))),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: thinking.clone(),
@@ -345,7 +347,7 @@ async fn convert_response_to_events(
                     continue;
                 }
                 let added = ResponseItem::Message {
-                    id: Some(format!("msg_{idx}")),
+                    id: Some(ResponseItemId::from_server(format!("msg_{idx}"))),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: String::new(),
@@ -369,7 +371,7 @@ async fn convert_response_to_events(
                     return;
                 }
                 let done = ResponseItem::Message {
-                    id: Some(format!("msg_{idx}")),
+                    id: Some(ResponseItemId::from_server(format!("msg_{idx}"))),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText { text: text.clone() }],
                     phase: None,

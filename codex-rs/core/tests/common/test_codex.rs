@@ -34,7 +34,6 @@ use codex_features::Feature;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
@@ -735,17 +734,34 @@ impl TestCodexBuilder {
         home: &TempDir,
         cwd_override: AbsolutePathBuf,
     ) -> anyhow::Result<(Config, Arc<TempDir>)> {
-        let model_provider = ModelProviderInfo {
-            base_url: Some(base_url),
-            // Most core tests use SSE-only mock servers, so keep websocket transport off unless
-            // a test explicitly opts into websocket coverage.
-            supports_websockets: false,
-            ..built_in_model_providers(/*openai_base_url*/ None)["openai"].clone()
+        // The internal-deployment fork disables openai as a built-in provider; synthesize an
+        // OpenAI-like provider pointing at the test mock server instead of indexing the
+        // (now-absent) built-in catalog entry.
+        let model_provider = {
+            let mut provider = ModelProviderInfo::create_openai_provider(Some(base_url));
+            // Most core tests use SSE-only mock servers, so keep websocket transport off
+            // unless a test explicitly opts into websocket coverage.
+            provider.supports_websockets = false;
+            provider
         };
         let cwd = Arc::new(TempDir::new()?);
         for hook in self.pre_build_hooks.drain(..) {
             hook(home.path());
         }
+        // The internal-deployment fork disables openai from the built-in provider
+        // catalog, so the default provider id "openai" no longer resolves during config
+        // build. Seed the codex_home config.toml with a non-reserved provider id
+        // ("openai-test") plus a matching model_providers entry and a top-level
+        // model_provider selector so the loader resolves a provider. The mutator path
+        // below then overrides config.model_provider with a fully-synthesized
+        // OpenAI-like provider whose base_url points at the test mock server, so the
+        // placeholder base_url here only needs to satisfy loader provider resolution
+        // before that override is applied. "openai" itself is reserved as a built-in id
+        // (see RESERVED_MODEL_PROVIDER_IDS) and would fail validate_reserved_model_provider_ids.
+        let _ = std::fs::write(
+            home.path().join(codex_config::CONFIG_TOML_FILE),
+            "model_provider = \"openai-test\"\n[model_providers.openai-test]\nname = \"OpenAI\"\nbase_url = \"https://example.com/v1\"\n",
+        );
         let mut config = if let Some(cloud_config_bundle) = self.cloud_config_bundle.take() {
             load_default_config_for_test_with_cloud_config_bundle(home, cloud_config_bundle).await
         } else {
