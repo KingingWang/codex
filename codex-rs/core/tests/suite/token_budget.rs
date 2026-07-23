@@ -3,7 +3,7 @@ use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::config::TokenBudgetConfig;
 use codex_features::Feature;
-use codex_model_provider_info::built_in_model_providers;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::CONTEXT_WINDOW_CLOSE_TAG;
@@ -667,7 +667,7 @@ async fn token_budget_context_uses_new_window_after_compaction() -> Result<()> {
     .await;
     let compact = mount_compact_json_once(&server, json!({ "output": [] })).await;
 
-    let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    let mut model_provider = ModelProviderInfo::create_openai_provider(None);
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;
 
@@ -802,7 +802,7 @@ async fn token_budget_mid_turn_auto_compaction_resets_before_active_follow_up() 
         ],
     )
     .await;
-    let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    let mut model_provider = ModelProviderInfo::create_openai_provider(None);
     model_provider.name = "OpenAI (test)".into();
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;
