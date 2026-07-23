@@ -98,6 +98,7 @@ impl TrackEventRequest {
         matches!(self, Self::AcceptedLineFingerprints(_))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn can_send_with_api_key_auth(&self) -> bool {
         match self {
             Self::PluginUsed(event) => event.event_params.plugin.plugin_id.is_some(),
