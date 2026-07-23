@@ -13,6 +13,7 @@ use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::sse::chat_completions::spawn_chat_completions_stream;
 use codex_client::HttpTransport;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
@@ -213,6 +214,7 @@ async fn convert_response_to_events(
     let token_usage = response.usage.map(|u| TokenUsage {
         input_tokens: u.prompt_tokens,
         cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
         output_tokens: u.completion_tokens,
         reasoning_output_tokens: 0,
         total_tokens: u.total_tokens,
@@ -238,7 +240,10 @@ async fn convert_response_to_events(
             let reasoning_text = extract_reasoning_text(reasoning);
             if !reasoning_text.is_empty() {
                 let reasoning_done = ResponseItem::Reasoning {
-                    id: Some(format!("reasoning_{}", choice.index)),
+                    id: Some(ResponseItemId::from_server(format!(
+                        "reasoning_{}",
+                        choice.index
+                    ))),
                     summary: vec![
                         codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
                             text: reasoning_text,
@@ -330,7 +335,7 @@ async fn convert_response_to_events(
             // text ONLY from item/agentMessage/delta and ignores item/started
             // and item/completed, so without a delta Zed shows no answer text.
             let assistant_added = ResponseItem::Message {
-                id: Some("msg_assistant".to_string()),
+                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: String::new(),
@@ -358,7 +363,7 @@ async fn convert_response_to_events(
 
             // Emit OutputItemDone with the full text to finalize the item.
             let assistant_done = ResponseItem::Message {
-                id: Some("msg_assistant".to_string()),
+                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: content.clone(),
