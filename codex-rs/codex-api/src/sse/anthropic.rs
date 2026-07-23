@@ -34,6 +34,7 @@ use crate::error::ApiError;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -62,7 +63,7 @@ struct ToolBlockState {
 enum BlockKind {
     Text {
         accumulated: String,
-        block_id: String,
+        block_id: ResponseItemId,
     },
     Tool(ToolBlockState),
     Thinking {
@@ -201,7 +202,7 @@ pub async fn process_anthropic_sse(
             } => {
                 let kind = match &content_block {
                     AnthropicContentBlock::Text { .. } => {
-                        let block_id = format!("msg_{index}");
+                        let block_id = ResponseItemId::from_server(format!("msg_{index}"));
                         let item = ResponseItem::Message {
                             id: Some(block_id.clone()),
                             role: "assistant".to_string(),
@@ -253,7 +254,7 @@ pub async fn process_anthropic_sse(
                         ..
                     } => {
                         let item = ResponseItem::Reasoning {
-                            id: Some(format!("reasoning_{index}")),
+                            id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
                             summary: Vec::new(),
                             content: Some(vec![ReasoningItemContent::ReasoningText {
                                 text: String::new(),
@@ -373,7 +374,7 @@ pub async fn process_anthropic_sse(
                         accumulated,
                         signature,
                     } => Some(ResponseItem::Reasoning {
-                        id: Some(format!("reasoning_{index}")),
+                        id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
                         summary: Vec::new(),
                         content: Some(vec![ReasoningItemContent::ReasoningText {
                             text: accumulated,
@@ -433,7 +434,7 @@ pub async fn process_anthropic_sse(
                                 accumulated,
                                 signature,
                             } => Some(ResponseItem::Reasoning {
-                                id: Some(format!("reasoning_{index}")),
+                                id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
                                 summary: Vec::new(),
                                 content: Some(vec![ReasoningItemContent::ReasoningText {
                                     text: accumulated,
@@ -463,6 +464,7 @@ pub async fn process_anthropic_sse(
                 let token_usage = Some(TokenUsage {
                     input_tokens,
                     cached_input_tokens,
+                    cache_write_input_tokens: 0,
                     output_tokens,
                     reasoning_output_tokens: 0,
                     total_tokens: total,

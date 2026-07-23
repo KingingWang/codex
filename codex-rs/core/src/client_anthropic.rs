@@ -152,6 +152,7 @@ fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<Respo
             let text_ref = match c {
                 ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
                 ContentItem::InputImage { .. } => None,
+                ContentItem::InputAudio { .. } => None,
             };
             if let Some(text) = text_ref {
                 let trimmed_start = text.trim_start();
@@ -452,6 +453,9 @@ fn content_items_to_blocks(items: &[ContentItem]) -> Vec<AnthropicContentBlock> 
                 }
             }
             ContentItem::InputImage { image_url, .. } => Some(image_to_block(image_url)),
+            // TypeWise: this fork does not surface audio inputs in Anthropic
+            // requests; drop audio items rather than erroring.
+            ContentItem::InputAudio { .. } => None,
         })
         .collect()
 }
@@ -495,21 +499,26 @@ fn function_output_to_tool_result_blocks(
         FunctionCallOutputBody::ContentItems(items) => {
             let blocks = items
                 .iter()
-                .map(|item| match item {
+                .filter_map(|item| match item {
                     FunctionCallOutputContentItem::InputText { text } => {
-                        AnthropicContentBlock::Text {
+                        Some(AnthropicContentBlock::Text {
                             text: text.clone(),
                             cache_control: None,
-                        }
+                        })
                     }
                     FunctionCallOutputContentItem::InputImage { image_url, .. } => {
-                        image_to_block(image_url)
+                        Some(image_to_block(image_url))
+                    }
+                    FunctionCallOutputContentItem::InputAudio { .. } => {
+                        // Audio tool outputs are not supported in Anthropic tool
+                        // result blocks; drop audio items rather than erroring.
+                        None
                     }
                     FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
-                        AnthropicContentBlock::Text {
+                        Some(AnthropicContentBlock::Text {
                             text: encrypted_content.clone(),
                             cache_control: None,
-                        }
+                        })
                     }
                 })
                 .collect::<Vec<_>>();
