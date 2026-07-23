@@ -479,9 +479,7 @@ provider fields are not supported"
                 ));
             }
 
-            if let Some(built_in_provider) =
-                model_providers.get_mut(AMAZON_BEDROCK_PROVIDER_ID)
-            {
+            if let Some(built_in_provider) = model_providers.get_mut(AMAZON_BEDROCK_PROVIDER_ID) {
                 built_in_provider.base_url = base_url_override;
                 built_in_provider.auth = auth_override;
                 if let Some(aws_override) = aws_override {
@@ -497,11 +495,13 @@ provider fields are not supported"
                 // Built-in Amazon Bedrock provider is not present (e.g. internal
                 // deployment with built-in defaults disabled): treat a configured
                 // Bedrock entry as a custom provider so it is not dropped.
-                let mut custom = ModelProviderInfo::default();
-                custom.base_url = base_url_override;
-                custom.auth = auth_override;
-                custom.aws = aws_override;
-                custom.http_headers = http_headers_override;
+                let custom = ModelProviderInfo {
+                    base_url: base_url_override,
+                    auth: auth_override,
+                    aws: aws_override,
+                    http_headers: http_headers_override,
+                    ..ModelProviderInfo::default()
+                };
                 model_providers.insert(key, custom);
             }
         } else {
