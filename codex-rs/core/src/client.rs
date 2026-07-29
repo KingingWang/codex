@@ -2795,8 +2795,9 @@ impl ModelClientSession {
 /// repeats without any other tool calls or user messages in between.
 ///
 /// For each streak of 2+ identical calls:
-/// - Keeps the first assistant message (with its content but NOT its tool_call)
-/// - Keeps only the last tool result (with a warning prepended)
+/// - Keeps the first assistant message (with its content and tool_call)
+/// - Keeps only the last tool result (with a warning prepended), rewriting
+///   its `tool_call_id` to match the first assistant's tool_call id
 /// - Removes all intermediate assistant messages and tool results
 fn deduplicate_consecutive_tool_calls(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     // First pass: find consecutive streaks
@@ -2879,11 +2880,12 @@ fn deduplicate_consecutive_tool_calls(messages: Vec<ChatMessage>) -> Vec<ChatMes
 
     // Second pass: build result, applying deduplication
     let mut skip_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut result_modifications: HashMap<usize, (String, usize)> = HashMap::new();
+    let mut result_modifications: HashMap<usize, (String, usize, String)> = HashMap::new();
 
     for streak in &streaks {
         // streak format: [asst1, res1, asst2, res2, ...]
-        // Keep: first assistant (but remove its tool_call), last result (with warning)
+        // Keep: first assistant (with its tool_call), last result (with warning
+        // and tool_call_id rewritten to match the first assistant's tool_call id)
         // Skip: everything else in the streak
 
         let call_count = streak.len() / 2; // number of assistant calls
@@ -2900,15 +2902,19 @@ fn deduplicate_consecutive_tool_calls(messages: Vec<ChatMessage>) -> Vec<ChatMes
             skip_indices.insert(streak[j]);
         }
 
-        // Get the function name for the warning
-        let fn_name = if let Some(tcs) = messages[first_asst_idx].tool_calls.as_ref() {
-            tcs[0].function.name.clone()
-        } else {
-            "unknown".to_string()
-        };
+        // Get the function name and tool_call id from the first assistant.
+        // The first assistant is kept as-is (including its tool_call id), so
+        // the surviving tool result must be rewritten to reference that id.
+        // Otherwise the API rejects the request with a tool_call_id mismatch.
+        let (fn_name, first_call_id) =
+            if let Some(tcs) = messages[first_asst_idx].tool_calls.as_ref() {
+                (tcs[0].function.name.clone(), tcs[0].id.clone())
+            } else {
+                ("unknown".to_string(), String::new())
+            };
 
         // Mark the last result for modification
-        result_modifications.insert(last_result_idx, (fn_name, call_count));
+        result_modifications.insert(last_result_idx, (fn_name, call_count, first_call_id));
 
         tracing::info!(
             "Deduplicating {} consecutive identical tool calls: {} (msg[{}..{}])",
@@ -2931,10 +2937,14 @@ fn deduplicate_consecutive_tool_calls(messages: Vec<ChatMessage>) -> Vec<ChatMes
             continue;
         }
 
-        // Modify the last tool result with warning
-        if let Some((fn_name, count)) = result_modifications.get(&i)
+        // Modify the last tool result: prepend warning and rewrite
+        // tool_call_id to match the first assistant's tool_call id so the
+        // kept assistant message and tool result stay consistent.
+        if let Some((fn_name, count, first_call_id)) = result_modifications.get(&i)
             && let Some(content) = msg.content.as_mut()
         {
+            // Rewrite tool_call_id to match the surviving (first) assistant.
+            msg.tool_call_id = Some(first_call_id.clone());
             let original = match content {
                 serde_json::Value::String(s) => s.clone(),
                 ref other => other.to_string(),
@@ -4124,6 +4134,53 @@ mod chat_completions_request_tests {
         assert_eq!(arr[0]["type"], "image_url");
         assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,abc123");
         assert_eq!(arr[0]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn chat_completions_request_deduplication_keeps_tool_call_id_consistent() {
+        // Regression: when consecutive identical tool calls are deduplicated,
+        // the surviving assistant message (the first one) keeps its original
+        // tool_call id, and the surviving tool result (the last one) must have
+        // its tool_call_id rewritten to match. Otherwise the API rejects the
+        // request with a 400 "tool_call_id mismatch" error.
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            function_call_output("call-1", "result-1"),
+            function_call("call-2", r#"{"cmd":"pwd"}"#),
+            function_call_output("call-2", "result-2"),
+            function_call("call-3", r#"{"cmd":"pwd"}"#),
+            function_call_output("call-3", "result-3"),
+        ]);
+
+        let messages = &request.messages;
+
+        // After deduplication we expect:
+        //   [0] assistant with tool_calls[0].id = "call-1" (the first call)
+        //   [1] tool result with tool_call_id = "call-1" (rewritten to match)
+        assert_eq!(
+            messages.len(),
+            2,
+            "expected 2 messages after dedup, got {messages:?}"
+        );
+
+        // The assistant message keeps the first call's id.
+        let asst = &messages[0];
+        assert_eq!(asst.role, "assistant");
+        let tool_calls = asst
+            .tool_calls
+            .as_ref()
+            .expect("assistant should have tool_calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call-1");
+
+        // The tool result's tool_call_id must match the assistant's tool_call id.
+        let tool_msg = &messages[1];
+        assert_eq!(tool_msg.role, "tool");
+        assert_eq!(
+            tool_msg.tool_call_id.as_deref(),
+            Some("call-1"),
+            "tool_call_id must be rewritten to match the surviving assistant's tool_call id"
+        );
     }
 }
 
