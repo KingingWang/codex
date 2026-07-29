@@ -3249,7 +3249,6 @@ mod chat_completions_request_tests {
             /*enable_request_compression*/ false,
             /*include_timing_metrics*/ false,
             /*beta_features_header*/ None,
-            /*item_ids_enabled*/ false,
             /*concurrent_reasoning_summaries_enabled*/ false,
             /*attestation_provider*/ None,
             /*http_client_factory*/
