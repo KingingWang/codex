@@ -109,7 +109,11 @@ jobs:
           # 16 codegen-units 降低单次内存峰值。
           CARGO_PROFILE_RELEASE_LTO: "thin"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-        run: cargo build --release --target ${{ matrix.target }} -j 1
+        # 与 macOS/release 对齐：只发布 `codex` CLI 二进制，
+        # 避免构建示例 crate（如 codex-thread-manager-sample），后者的
+        # tracing::instrument 异步块会触发 rustc 深度查询溢出
+        # ("queries overflow the depth limit")。
+        run: cargo build --release --target ${{ matrix.target }} --bin codex -j 1 --timings
 
       # 将二进制重命名为带 OS 标识的名字
       - name: Prepare release artifact
