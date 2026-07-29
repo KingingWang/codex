@@ -11,7 +11,6 @@ use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 pub use codex_http_client::RequestBuilder as CodexRequestBuilder;
-use codex_terminal_detection::user_agent;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::header::USER_AGENT;
