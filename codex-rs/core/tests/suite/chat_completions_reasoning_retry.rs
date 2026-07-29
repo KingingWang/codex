@@ -119,6 +119,7 @@ async fn reasoning_only_chat_completions_response_is_retried_until_success() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_standalone_web_search: false,
     };
 
     let TestCodex { codex, .. } = test_codex()

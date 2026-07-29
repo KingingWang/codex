@@ -7,8 +7,9 @@ mod ui;
 pub(crate) mod util;
 pub use cli::Cli;
 
-// DISABLED: Internal deployment - no external cloud tasks endpoint
-const DEFAULT_CLOUD_TASKS_BASE_URL: &str = "";
+// Internal deployment: external cloud-tasks endpoint is disabled. `init_backend`
+// reads CODEX_CLOUD_TASKS_BASE_URL from the environment and bails if it is empty, so
+// no outbound cloud-tasks URL is ever constructed without an explicit opt-in.
 
 use anyhow::anyhow;
 use chrono::Utc;
