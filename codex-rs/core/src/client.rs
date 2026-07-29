@@ -3110,6 +3110,19 @@ fn deduplicate_consecutive_tool_calls(messages: Vec<ChatMessage>) -> Vec<ChatMes
     result
 }
 
+/// Maps an image detail to the wire values accepted by the Chat Completions
+/// API. The Chat Completions endpoint only accepts `auto`, `low`, and `high`;
+/// `original` is a Responses API-only value, so it is downgraded to `high`,
+/// matching the behavior of `sanitize_original_image_detail`.
+fn chat_completions_image_detail(detail: codex_protocol::models::ImageDetail) -> &'static str {
+    match detail {
+        codex_protocol::models::ImageDetail::Auto => "auto",
+        codex_protocol::models::ImageDetail::Low => "low",
+        codex_protocol::models::ImageDetail::High => "high",
+        codex_protocol::models::ImageDetail::Original => "high",
+    }
+}
+
 fn content_items_to_chat_content(
     content: &[codex_protocol::models::ContentItem],
     is_assistant: bool,
@@ -3137,14 +3150,10 @@ fn content_items_to_chat_content(
                 }
                 has_image = true;
                 let mut image_url_obj = serde_json::json!({"url": image_url});
-                if let Some(d) = detail {
-                    let detail_str = match d {
-                        codex_protocol::models::ImageDetail::Auto => "auto",
-                        codex_protocol::models::ImageDetail::Low => "low",
-                        codex_protocol::models::ImageDetail::High => "high",
-                        codex_protocol::models::ImageDetail::Original => "original",
-                    };
-                    image_url_obj["detail"] = serde_json::Value::String(detail_str.to_string());
+                if let Some(detail) = detail {
+                    image_url_obj["detail"] = serde_json::Value::String(
+                        chat_completions_image_detail(*detail).to_string(),
+                    );
                 }
                 multipart_parts.push(serde_json::json!({
                     "type": "image_url",
@@ -3234,7 +3243,6 @@ fn split_tool_output_into_tool_and_user_content(
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     use codex_protocol::models::FunctionCallOutputBody;
     use codex_protocol::models::FunctionCallOutputContentItem;
-    use codex_protocol::models::ImageDetail;
 
     match body {
         FunctionCallOutputBody::Text(text) => {
@@ -3259,15 +3267,10 @@ fn split_tool_output_into_tool_and_user_content(
                     }
                     FunctionCallOutputContentItem::InputImage { image_url, detail } => {
                         let mut image_url_obj = serde_json::json!({"url": image_url});
-                        if let Some(d) = detail {
-                            let detail_str = match d {
-                                ImageDetail::Auto => "auto",
-                                ImageDetail::Low => "low",
-                                ImageDetail::High => "high",
-                                ImageDetail::Original => "original",
-                            };
-                            image_url_obj["detail"] =
-                                serde_json::Value::String(detail_str.to_string());
+                        if let Some(detail) = detail {
+                            image_url_obj["detail"] = serde_json::Value::String(
+                                chat_completions_image_detail(*detail).to_string(),
+                            );
                         }
                         image_parts.push(serde_json::json!({
                             "type": "image_url",
@@ -3534,7 +3537,7 @@ mod chat_completions_request_tests {
                 },
                 FunctionCallOutputContentItem::InputImage {
                     image_url: image_url.to_string(),
-                    detail: Some(ImageDetail::High),
+                    detail: Some(ImageDetail::Original),
                 },
             ]),
             internal_chat_message_metadata_passthrough: None,
@@ -4163,7 +4166,7 @@ mod chat_completions_request_tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["type"], "image_url");
         assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,xyz");
-        assert_eq!(arr[0]["image_url"]["detail"], "auto");
+        assert_eq!(arr[0]["image_url"]["detail"], "high");
     }
 
     #[test]
@@ -4230,7 +4233,8 @@ mod chat_completions_request_tests {
         // Second image
         assert_eq!(arr[2]["type"], "image_url");
         assert_eq!(arr[2]["image_url"]["url"], "data:image/jpeg;base64,bbb");
-        assert_eq!(arr[2]["image_url"]["detail"], "low");
+        // `original` is not valid on the Chat Completions wire and is downgraded to `high`.
+        assert_eq!(arr[2]["image_url"]["detail"], "high");
     }
 
     #[test]
