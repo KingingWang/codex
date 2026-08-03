@@ -183,8 +183,18 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    // If the model catalog entry specifies a different provider, create a new
+    // ModelClient with that provider for this turn's API calls. The prewarmed
+    // session (if any) was created with the session-level provider and must not
+    // be reused when the provider has been overridden.
+    let mut client_session = if turn_context.model_info.provider.is_some() {
+        sess.services
+            .model_client
+            .with_provider(turn_context.provider.clone())
+            .new_session()
+    } else {
+        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session())
+    };
     client_session.set_stream_error_notifier(Some(Arc::new(TurnStreamErrorNotifier {
         sess: Arc::clone(&sess),
         turn_context: Arc::clone(&turn_context),
