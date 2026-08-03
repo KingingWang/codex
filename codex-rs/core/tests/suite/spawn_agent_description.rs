@@ -99,6 +99,7 @@ fn test_model_info(
         tool_mode: None,
         multi_agent_version: None,
         multi_agent_reasoning_effort: None,
+        provider: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers,

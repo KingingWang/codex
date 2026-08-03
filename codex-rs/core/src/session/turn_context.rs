@@ -465,6 +465,22 @@ impl TurnContext {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
+        // If the new model specifies a provider, create a new provider for it.
+        let provider = if let Some(provider_id) =
+            model_info.provider.as_deref().filter(|s| !s.is_empty())
+        {
+            if let Some(provider_info) = config.model_providers.get(provider_id) {
+                create_model_provider(provider_info.clone(), self.auth_manager.clone())
+            } else {
+                tracing::warn!(
+                    provider_id,
+                    "Model specifies a provider not found in model_providers, falling back to default"
+                );
+                self.provider.clone()
+            }
+        } else {
+            self.provider.clone()
+        };
         let supported_reasoning_levels = model_info
             .supported_reasoning_levels
             .iter()
@@ -520,7 +536,7 @@ impl TurnContext {
             initial_settings: Arc::clone(&step_settings),
             current_settings: ArcSwap::from(step_settings),
             session_telemetry,
-            provider: self.provider.clone(),
+            provider,
             session_source: self.session_source.clone(),
             history_mode: self.history_mode,
             parent_thread_id: self.parent_thread_id,
@@ -986,6 +1002,26 @@ impl Session {
                 .snapshot_for_config(&skills_input, fs)
                 .await
         };
+        // If the model catalog entry specifies a provider, use it instead of the
+        // session-level provider. This lets users switch providers per-model.
+        let provider = if let Some(provider_id) =
+            model_info.provider.as_deref().filter(|s| !s.is_empty())
+        {
+            if let Some(provider_info) = per_turn_config.model_providers.get(provider_id) {
+                create_model_provider(
+                    provider_info.clone(),
+                    Some(self.services.auth_manager.clone()),
+                )
+            } else {
+                tracing::warn!(
+                    provider_id,
+                    "Model specifies a provider not found in model_providers, falling back to default"
+                );
+                session_configuration.provider.clone()
+            }
+        } else {
+            session_configuration.provider.clone()
+        };
         let step_settings = Arc::new(ResolvedStepSettings::new(
             Arc::clone(&session_configuration.step_settings),
             Arc::new(model_info),
@@ -996,7 +1032,7 @@ impl Session {
             self.session_id(),
             Some(Arc::clone(&self.services.auth_manager)),
             &self.services.session_telemetry,
-            session_configuration.provider.clone(),
+            provider,
             &session_configuration,
             multi_agent_version,
             self.services.user_shell.as_ref(),
