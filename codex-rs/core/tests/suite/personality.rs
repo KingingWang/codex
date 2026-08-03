@@ -667,6 +667,7 @@ async fn remote_model_friendly_personality_instructions_with_feature() -> anyhow
         auto_review_model_override: None,
         tool_mode: None,
         multi_agent_version: None,
+        provider: None,
     };
 
     let _models_mock = mount_models_once(
@@ -786,6 +787,7 @@ async fn user_turn_personality_remote_model_template_includes_update_message() -
         auto_review_model_override: None,
         tool_mode: None,
         multi_agent_version: None,
+        provider: None,
     };
 
     let _models_mock = mount_models_once(

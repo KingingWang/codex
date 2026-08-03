@@ -73,6 +73,7 @@ fn test_model_info(
         auto_review_model_override: None,
         tool_mode: None,
         multi_agent_version: None,
+        provider: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers,

@@ -1365,6 +1365,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         auto_review_model_override: None,
         tool_mode: None,
         multi_agent_version: None,
+        provider: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
