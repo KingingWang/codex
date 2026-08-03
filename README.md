@@ -379,6 +379,71 @@ curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlo
 
 ---
 
+## 按模型切换提供商（model_catalog_json 中的 provider 字段）
+
+`model_catalog_json` 指定的 JSON 模型目录中，每个模型条目现在支持一个可选的 `provider` 字段。设置该字段后，用户在会话中切换到该模型时会自动切换到对应的提供商；不设置则保持使用 `model_provider` 指定的默认提供商，完全兼容之前的配置。
+
+### 使用方式
+
+1. 在 `~/.codex/config.toml` 中配置多个 `model_providers`：
+
+```toml
+# 默认提供商
+model_provider = "openai-compatible"
+
+[model_providers.openai-compatible]
+name = "OpenAI Compatible"
+base_url = "https://your-llm.example.com/v1"
+env_key = "MY_API_KEY"
+wire_api = "chat"
+chat_stream = true
+
+[model_providers.anthropic-provider]
+name = "Anthropic Gateway"
+base_url = "https://your-anthropic-gateway.example.com"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "anthropic"
+chat_stream = true
+```
+
+2. 在 `model_catalog_json` 指定的 JSON 文件中，为需要使用不同提供商的模型添加 `provider` 字段：
+
+```json
+{
+  "models": [
+    {
+      "slug": "gpt-4o",
+      "display_name": "GPT-4o",
+      "provider": "openai-compatible",
+      ...
+    },
+    {
+      "slug": "claude-sonnet-4-5",
+      "display_name": "Claude Sonnet 4.5",
+      "provider": "anthropic-provider",
+      ...
+    },
+    {
+      "slug": "local-model",
+      "display_name": "Local Model",
+      ...
+    }
+  ]
+}
+```
+
+上例中：
+- 切换到 `gpt-4o` 时使用 `openai-compatible` 提供商
+- 切换到 `claude-sonnet-4-5` 时自动切换到 `anthropic-provider` 提供商
+- 切换到 `local-model` 时（未设置 `provider` 字段）使用默认的 `model_provider`
+
+### 兼容性
+
+- `provider` 字段完全可选，不设置时行为与之前完全一致
+- 该字段对应 `model_providers` 中的 key，如果指定的 provider 不存在则回退到默认提供商
+
+---
+
 ## 变更记录
 
 基于官方仓库的修改提交（作者：kingingwang）：
@@ -389,6 +454,7 @@ curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlo
 - 工具输出拆分与图片内容传递支持
 - /model 命令及 end_turn 字段
 - User-Agent 伪装及外部 URL 清除
+- model_catalog_json 支持按模型指定 provider 字段
 
 ---
 
