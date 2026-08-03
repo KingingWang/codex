@@ -566,6 +566,45 @@ impl ModelClient {
         }
     }
 
+    /// Creates a new `ModelClient` with the given provider replacing the
+    /// session-level provider. Derived fields (auth env telemetry, attestation
+    /// support, etc.) are recomputed from the new provider.
+    pub fn with_provider(&self, provider: SharedModelProvider) -> Self {
+        let codex_api_key_env_enabled = provider
+            .auth_manager()
+            .as_ref()
+            .is_some_and(|manager| manager.codex_api_key_env_enabled());
+        let auth_env_telemetry =
+            collect_auth_env_telemetry(provider.info(), codex_api_key_env_enabled);
+        let include_attestation = provider.supports_attestation();
+        Self {
+            state: Arc::new(ModelClientState {
+                thread_id: self.state.thread_id.clone(),
+                provider,
+                auth_env_telemetry,
+                session_source: self.state.session_source.clone(),
+                originator: self.state.originator.clone(),
+                model_verbosity: self.state.model_verbosity.clone(),
+                enable_request_compression: self.state.enable_request_compression,
+                include_timing_metrics: self.state.include_timing_metrics,
+                beta_features_header: self.state.beta_features_header.clone(),
+                concurrent_reasoning_summaries_enabled: self
+                    .state
+                    .concurrent_reasoning_summaries_enabled,
+                include_attestation,
+                attestation_provider: self.state.attestation_provider.clone(),
+                disable_websockets: AtomicBool::new(
+                    self.state.disable_websockets.load(Ordering::Relaxed),
+                ),
+                agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
+                cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+            }),
+            agent_identity_policy: self.agent_identity_policy.clone(),
+            prompt_cache_key_override: self.prompt_cache_key_override.clone(),
+            http_client_factory: self.http_client_factory.clone(),
+        }
+    }
+
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.provider.auth_manager()
     }
