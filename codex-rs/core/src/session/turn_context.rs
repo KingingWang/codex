@@ -323,6 +323,22 @@ impl TurnContext {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
+        // If the new model specifies a provider, create a new provider for it.
+        let provider = if let Some(provider_id) =
+            model_info.provider.as_deref().filter(|s| !s.is_empty())
+        {
+            if let Some(provider_info) = config.model_providers.get(provider_id) {
+                create_model_provider(provider_info.clone(), self.auth_manager.clone())
+            } else {
+                tracing::warn!(
+                    provider_id,
+                    "Model specifies a provider not found in model_providers, falling back to default"
+                );
+                self.provider.clone()
+            }
+        } else {
+            self.provider.clone()
+        };
         let supported_reasoning_levels = model_info
             .supported_reasoning_levels
             .iter()
@@ -365,7 +381,7 @@ impl TurnContext {
                 .session_telemetry
                 .clone()
                 .with_model(model.as_str(), model_info.slug.as_str()),
-            provider: self.provider.clone(),
+            provider,
             reasoning_effort,
             reasoning_summary: self.reasoning_summary,
             session_source: self.session_source.clone(),
@@ -863,12 +879,20 @@ impl Session {
             .skills_service
             .snapshot_for_config(&skills_input, fs)
             .await;
+        // If the model catalog entry specifies a provider, use it instead of the
+        // session-level provider. This lets users switch providers per-model.
+        let provider = model_info
+            .provider
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|provider_id| per_turn_config.model_providers.get(provider_id).cloned())
+            .unwrap_or_else(|| session_configuration.provider.clone());
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
             Some(Arc::clone(&self.services.auth_manager)),
             &self.services.session_telemetry,
-            session_configuration.provider.clone(),
+            provider,
             &session_configuration,
             multi_agent_version,
             self.services.user_shell.as_ref(),
