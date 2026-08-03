@@ -69,6 +69,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        provider: None,
     }
 }
 

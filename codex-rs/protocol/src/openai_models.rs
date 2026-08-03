@@ -456,6 +456,11 @@ pub struct ModelInfo {
         deserialize_with = "deserialize_optional_model_selector"
     )]
     pub multi_agent_version: Option<MultiAgentVersion>,
+    /// Optional model provider ID. When set, switching to this model will also
+    /// switch the active provider to the one identified by this key in
+    /// `model_providers`. When absent, the current provider is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl ModelInfo {
@@ -857,6 +862,7 @@ mod tests {
             model_specialty: None,
             tool_mode: None,
             multi_agent_version: None,
+            provider: None,
         }
     }
 
