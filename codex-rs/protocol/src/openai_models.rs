@@ -482,6 +482,11 @@ pub struct ModelInfo {
     /// Reasoning effort used for multi-agent work when the user selects Ultra.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_reasoning_effort: Option<ReasoningEffort>,
+    /// Optional model provider ID. When set, switching to this model will also
+    /// switch the active provider to the one identified by this key in
+    /// `model_providers`. When absent, the current provider is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl ModelInfo {
@@ -1006,6 +1011,7 @@ mod tests {
             tool_mode: None,
             multi_agent_version: None,
             multi_agent_reasoning_effort: None,
+            provider: None,
         }
     }
 
