@@ -109,6 +109,7 @@ async fn models_client_hits_models_endpoint() {
             tool_mode: None,
             multi_agent_version: None,
             multi_agent_reasoning_effort: None,
+            provider: None,
         }],
     };
 
