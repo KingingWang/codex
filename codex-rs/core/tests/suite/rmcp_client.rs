@@ -2763,6 +2763,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 tool_mode: None,
                 multi_agent_version: None,
                 multi_agent_reasoning_effort: None,
+                provider: None,
             }],
         },
     )
