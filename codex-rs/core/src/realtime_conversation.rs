@@ -1162,6 +1162,7 @@ struct PreparedRealtimeConversationStart {
     version: RealtimeWsVersion,
     session_config: RealtimeSessionConfig,
     transport: ConversationStartTransport,
+    model_client: ModelClient,
 }
 
 #[derive(Clone, Copy)]
@@ -1174,10 +1175,12 @@ async fn prepare_realtime_start(
     sess: &Arc<Session>,
     params: ConversationStartParams,
 ) -> CodexResult<PreparedRealtimeConversationStart> {
-    let provider = sess.provider().await;
-    let auth_manager = sess
-        .services
-        .model_client
+    // Resolve the per-model provider (if any) so realtime requests target the
+    // same provider as regular text turns.
+    let turn_context = sess.new_default_turn().await;
+    let provider = turn_context.provider.info().clone();
+    let model_client = sess.model_client_for_turn(&turn_context);
+    let auth_manager = model_client
         .auth_manager()
         .unwrap_or_else(|| Arc::clone(&sess.services.auth_manager));
     let auth = auth_manager.auth().await;
@@ -1286,6 +1289,7 @@ async fn prepare_realtime_start(
         version,
         session_config,
         transport,
+        model_client,
     })
 }
 
@@ -1508,6 +1512,7 @@ async fn handle_start_inner(
         version,
         session_config,
         transport,
+        model_client,
     } = prepared_start;
     info!("starting realtime conversation");
     let (sdp, existing_call_id) = match transport {
@@ -1531,7 +1536,7 @@ async fn handle_start_inner(
         codex_response_handoff_channel_prefixes,
         realtime_call_api_provider,
         session_config,
-        model_client: sess.services.model_client.clone(),
+        model_client,
         sdp,
         existing_call_id,
     };
