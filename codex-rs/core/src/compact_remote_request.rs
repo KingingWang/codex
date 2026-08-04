@@ -69,6 +69,8 @@ pub(super) async fn run_remote_compact_attempt(
         output_schema_strict: true,
         cyber_access_program: turn_context.cyber_access_program,
     };
+    // Honor per-model provider overrides from the model catalog instead of
+    // always using the session-level provider.
     let responses_metadata = sess
         .responses_metadata(
             turn_context.as_ref(),
@@ -76,8 +78,7 @@ pub(super) async fn run_remote_compact_attempt(
         )
         .await;
     let new_history = sess
-        .services
-        .model_client
+        .model_client_for_turn(turn_context)
         .compact_conversation_history(
             &prompt,
             turn_context.model_info(),
