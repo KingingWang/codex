@@ -189,12 +189,13 @@ pub(crate) async fn run_turn(
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
-    // If the model catalog entry specifies a different provider, create a new
-    // ModelClient with that provider for this turn's API calls. The prewarmed
-    // session (if any) was created with the session-level provider and must not
-    // be reused when the provider has been overridden.
+    // Reuse the prewarmed session when its provider matches the turn's
+    // provider (covers both session-level and per-model provider overrides).
+    // Otherwise, create a new session with the correct provider.
     let mut client_session = match prewarmed_client_session {
-        Some(prewarmed_client_session) if !turn_context.has_provider_override() => {
+        Some(prewarmed_client_session)
+            if prewarmed_client_session.has_same_provider(&turn_context.provider) =>
+        {
             prewarmed_client_session
         }
         _ => sess.model_client_for_turn(&turn_context).new_session(),
