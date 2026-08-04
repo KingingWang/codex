@@ -321,6 +321,17 @@ impl TurnContext {
             && self.config.orchestrator_mcp_enabled
     }
 
+    /// Whether the model catalog entry overrides the session-level provider.
+    ///
+    /// Mirrors the resolution in `new_turn_from_configuration` / `with_model`:
+    /// an absent or empty `provider` field keeps the session-level provider.
+    pub(crate) fn has_provider_override(&self) -> bool {
+        self.model_info
+            .provider
+            .as_deref()
+            .is_some_and(|provider_id| !provider_id.is_empty())
+    }
+
     pub(crate) async fn with_model(
         &self,
         model: String,
@@ -978,6 +989,21 @@ impl Session {
         {
             self.send_event(tc, EventMsg::Warning(WarningEvent { message }))
                 .await;
+        }
+    }
+
+    /// Returns the model client that should serve this turn's requests.
+    ///
+    /// When the model catalog entry specifies a per-model provider, the
+    /// session-level client is swapped to that provider; otherwise the
+    /// session-level client is used unchanged.
+    pub(crate) fn model_client_for_turn(&self, turn_context: &TurnContext) -> ModelClient {
+        if turn_context.has_provider_override() {
+            self.services
+                .model_client
+                .with_provider(turn_context.provider.clone())
+        } else {
+            self.services.model_client.clone()
         }
     }
 
