@@ -74,9 +74,10 @@ pub(super) async fn run_remote_compact_attempt(
         window_id,
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
+    // Honor per-model provider overrides from the model catalog instead of
+    // always using the session-level provider.
     let new_history = sess
-        .services
-        .model_client
+        .model_client_for_turn(turn_context)
         .compact_conversation_history(
             &prompt,
             &turn_context.model_info,
