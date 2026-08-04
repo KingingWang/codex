@@ -14,15 +14,22 @@
 #     //   o=null,s=useHiddenModels&&authMethod!==`amazonBedrock`;
 #     //   if (s) { availableModels.has(n.model) } else { !n.hidden }
 #     //
-#     // 新版本（v0.60+）：
+#     // 中间版本（v0.60+）：
 #     //   c=null,l=useHiddenModels&&authMethod!==`amazonBedrock`,u=...
 #     //   if (l) { t.has(n.model) } else { !n.hidden }
+#     //
+#     // 最新版本（~v0.70+）：过滤条件不再赋给中间变量，直接内联到三元里
+#     //   ...useHiddenModels:i}){return e?.has(r.model)===!0||
+#     //     (i&&t!==`amazonBedrock`?n.has(r.model):!r.hidden)}
+#     //   （以及 host 侧 listModels 的等价过滤：
+#     //     i.useHiddenModels&&r!==`amazonBedrock`?i.availableModels.has(...):!e.hidden）
 #     //
 #     // 当 Statsig 动态配置命中（生产环境会命中），返回的
 #     // {use_hidden_models:true, available_models:[gpt-*...]} 让过滤
 #     // 走白名单分支，所有非 gpt 模型都被前端挡掉。
 #
-# 这个脚本把那个过滤标志变量强制设成 `false`，过滤就永远走 `!n.hidden` 分支，
+# 这个脚本把那个过滤条件强制设成 `false`（旧版赋值形式 → 变量=false；
+# 新版内联三元形式 → 直接换成 !1），过滤就永远走 `!n.hidden` 分支，
 # 让所有 `visibility:"list"` 的 catalog 模型都显示。
 #
 # 用法
@@ -55,18 +62,23 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # 内容签名（用特征定位文件，不写死 hash 文件名）
 #
-#   核心模式（新旧版本通用）：
-#     <assign_var> = <useHiddenModels_var> && <authMethod_var> !== `amazonBedrock`
+#   核心模式（全部版本通用）：
+#     <useHiddenModels> && <authMethod> !== `amazonBedrock` <terminator>
 #
-#   旧版本（~v0.5x）：  o=null,s=X&&Y!==`amazonBedrock`;    （结尾是 ;）
-#   新版本（v0.60+）：  c=null,l=X&&Y!==`amazonBedrock`,    （结尾是 ,）
+#   旧版本（~v0.5x）：  ...s=X&&Y!==`amazonBedrock`;    （赋值，结尾 ;）
+#   中间版本（v0.60+）：...l=X&&Y!==`amazonBedrock`,    （赋值，结尾 ,）
+#   最新版本（~v0.70+）：...i&&t!==`amazonBedrock`?     （内联三元，结尾 ?）
+#                       ...i.useHiddenModels&&r!==`amazonBedrock`?  （同上，属性访问）
 #
-#   patched：<assign_var>=false<terminator>
+#   patched（赋值形式）：<var>=false<terminator>
+#   patched（三元形式）：!1?<true-branch>:!...hidden
 #
-# 正则用 [;,] 匹配两种结尾，保持向前兼容。
+# UNPATCHED_RE 不要求 `=`，这样赋值形式和内联三元形式都能命中；
+# 结尾字符集 [;,?] 覆盖三种已知 terminator。
+# useHiddenModels 侧允许带 `.`（如 i.useHiddenModels）。
 # ---------------------------------------------------------------------------
-UNPATCHED_RE='[A-Za-z_$][A-Za-z_$0-9]*=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`[;,]'
-PATCHED_RE='[A-Za-z_$][A-Za-z_$0-9]*=false[;,]'
+UNPATCHED_RE='[A-Za-z_$][A-Za-z_$0-9.]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`[;,?]'
+PATCHED_RE='([A-Za-z_$][A-Za-z_$0-9]*=false[;,]|!1\?[A-Za-z_$][A-Za-z_$0-9.]*\.has\([A-Za-z_$][A-Za-z_$0-9.]*\.model\):![A-Za-z_$][A-Za-z_$0-9.]*\.hidden)'
 
 # ---------------------------------------------------------------------------
 # 模式解析
@@ -252,17 +264,17 @@ if [ -z "$TARGET" ]; then
   # 真没找到 → fallback
   echo "error: unpatched signature not found in extracted bundle." >&2
   echo "       tried regex: $UNPATCHED_RE" >&2
-  echo "       fallback: searching for any 'amazonBedrock' reference..." >&2
+  echo "       fallback: searching for 'useHiddenModels' (picker-specific identifier)..." >&2
   FALLBACK=$(
     grep -Flr --exclude='*.map' --exclude-dir=node_modules \
-      -e 'amazonBedrock' "$EXTRACTED" 2>/dev/null | head -n 5 || true
+      -e 'useHiddenModels' "$EXTRACTED" 2>/dev/null | head -n 5 || true
   )
   if [ -z "$FALLBACK" ]; then
-    echo "       no 'amazonBedrock' references either. Bundle layout likely changed." >&2
+    echo "       no 'useHiddenModels' references either. Bundle layout likely changed." >&2
     echo "       inspect $EXTRACTED manually." >&2
     exit 1
   fi
-  echo "       'amazonBedrock' appears in:" >&2
+  echo "       'useHiddenModels' appears in:" >&2
   echo "$FALLBACK" | sed 's|^|         - |' >&2
   echo "       open those files and look for the picker filter logic." >&2
   exit 1
@@ -272,9 +284,14 @@ echo "==> Target: ${TARGET#$EXTRACTED/}"
 
 # 3. patch ------------------------------------------------------------------
 echo "==> Applying patch in extracted bundle..."
-# perl 替换：把 <var>=<var>&&<var>!==`amazonBedrock`[;,] 替换成 <var>=false[;,]
-# 捕获赋值目标变量名，保留结尾分隔符（; 或 ,）
-perl -i -pe 's/([A-Za-z_$][A-Za-z_$0-9]*)=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`([;,])/$1=false$2/g' "$TARGET"
+# perl 替换（赋值形式，旧版/中间版）：
+#   把 <var>=<var>&&<var>!==`amazonBedrock`[;,] 替换成 <var>=false[;,]
+#   捕获赋值目标变量名，保留结尾分隔符（; 或 ,）
+perl -i -pe 's/([A-Za-z_$][A-Za-z_$0-9]*)=[A-Za-z_$][A-Za-z_$0-9.]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`([;,])/$1=false$2/g' "$TARGET"
+# perl 替换（内联三元形式，~v0.70+）：
+#   把 <var>&&<var>!==`amazonBedrock`? 替换成 !1?
+#   三元条件恒为 false → 永远走 `!n.hidden` 分支
+perl -i -pe 's/[A-Za-z_$][A-Za-z_$0-9.]*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`\?/!1?/g' "$TARGET"
 
 # 4. verify in extracted ----------------------------------------------------
 # 确认 patch 生效：UNPATCHED 模式已消失。
