@@ -565,12 +565,12 @@ impl ModelClient {
         let include_attestation = provider.supports_attestation();
         Self {
             state: Arc::new(ModelClientState {
-                thread_id: self.state.thread_id.clone(),
+                thread_id: self.state.thread_id,
                 provider,
                 auth_env_telemetry,
                 session_source: self.state.session_source.clone(),
                 originator: self.state.originator.clone(),
-                model_verbosity: self.state.model_verbosity.clone(),
+                model_verbosity: self.state.model_verbosity,
                 enable_request_compression: self.state.enable_request_compression,
                 include_timing_metrics: self.state.include_timing_metrics,
                 beta_features_header: self.state.beta_features_header.clone(),
@@ -585,7 +585,7 @@ impl ModelClient {
                 agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
             }),
-            agent_identity_policy: self.agent_identity_policy.clone(),
+            agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
             http_client_factory: self.http_client_factory.clone(),
         }
@@ -1227,6 +1227,12 @@ impl Drop for ModelClientSession {
 impl ModelClientSession {
     pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
         Arc::clone(&self.turn_state)
+    }
+
+    /// Whether this session's client uses the same provider configuration as
+    /// `provider`.
+    pub(crate) fn has_same_provider(&self, provider: &SharedModelProvider) -> bool {
+        self.client.state.provider.info() == provider.info()
     }
 
     /// Installs a notifier that is fired when Chat Completions or Anthropic
