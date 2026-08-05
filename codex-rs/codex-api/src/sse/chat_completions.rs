@@ -93,6 +93,16 @@ pub async fn process_chat_completions_sse(
     // finish_reason handler and the [DONE] handler from each emitting a
     // duplicate reasoning done event for the same item.
     let mut reasoning_item_done = false;
+    // Stable id shared by the reasoning OutputItemAdded, the live
+    // ReasoningContentDelta events (via the active item), and the
+    // OutputItemDone completion. A fixed id is required because the turn
+    // processor only inherits the active item's id when the done event
+    // arrives while that item is still active; an intervening assistant
+    // message consumes the active item first, so an empty id here would be
+    // replaced with a freshly generated one. Clients such as codex-acp dedup
+    // reasoning by item id (seenReasoningDeltaItemIds), and a mismatched
+    // completed-item id would render the same thinking a second time.
+    let mut reasoning_item_id: Option<ResponseItemId> = None;
     // The last finish_reason seen across all choices, used to infer
     // end_turn for the Completed event.
     let mut last_finish_reason: Option<String> = None;
@@ -162,7 +172,7 @@ pub async fn process_chat_completions_sse(
             // already finalized it via the finish_reason handler.
             if reasoning_item_added && !reasoning_item_done {
                 let reasoning_done = ResponseItem::Reasoning {
-                    id: Some(ResponseItemId::from_server(String::new())),
+                    id: reasoning_item_id.clone(),
                     summary: vec![
                         codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
                             text: accumulated_reasoning.clone(),
@@ -309,6 +319,7 @@ pub async fn process_chat_completions_sse(
                 &tx_event,
                 &mut accumulated_tool_calls,
                 &mut accumulated_reasoning,
+                &mut reasoning_item_id,
                 &mut reasoning_item_added,
                 &mut reasoning_item_done,
                 &mut text_item_added,
@@ -333,6 +344,7 @@ async fn process_chat_choice(
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     accumulated_tool_calls: &mut HashMap<i64, ToolCallAccumulator>,
     accumulated_reasoning: &mut String,
+    reasoning_item_id: &mut Option<ResponseItemId>,
     reasoning_item_added: &mut bool,
     reasoning_item_done: &mut bool,
     text_item_added: &mut bool,
@@ -384,8 +396,10 @@ async fn process_chat_choice(
         };
         if !reasoning_text.is_empty() {
             if !*reasoning_item_added {
+                let item_id = ResponseItemId::from_server(format!("reasoning_{}", choice.index));
+                *reasoning_item_id = Some(item_id.clone());
                 let reasoning_added = ResponseItem::Reasoning {
-                    id: Some(ResponseItemId::from_server(String::new())),
+                    id: Some(item_id),
                     summary: Vec::new(),
                     content: Some(vec![
                         codex_protocol::models::ReasoningItemContent::ReasoningText {
@@ -479,7 +493,7 @@ async fn process_chat_choice(
         // already finalized it (e.g. via a previous finish_reason chunk).
         if *reasoning_item_added && !*reasoning_item_done {
             let reasoning_done = ResponseItem::Reasoning {
-                id: Some(ResponseItemId::from_server(String::new())),
+                id: reasoning_item_id.clone(),
                 summary: vec![
                     codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
                         text: accumulated_reasoning.clone(),
@@ -1052,6 +1066,84 @@ mod tests {
                     | Ok(ResponseEvent::Completed { .. })
             )),
             "reasoning-only stream must not emit assistant text or Completed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_id_stable_across_added_and_done_when_text_intervenes() {
+        // Regression: a reasoning -> assistant text -> tool call stream must
+        // carry the SAME non-empty reasoning item id on OutputItemAdded and
+        // OutputItemDone. With an empty id on the done event, the turn
+        // processor can no longer inherit the active item's id (the assistant
+        // text completion consumed it first) and generates a fresh id, so
+        // codex-acp's per-item reasoning dedup (seenReasoningDeltaItemIds)
+        // misses and Zed renders the thinking a second time after the answer.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hmm\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk5 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk6 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5, chunk6]).await;
+
+        let added_id = events
+            .iter()
+            .find_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning { id, .. })) => {
+                    id.clone()
+                }
+                _ => None,
+            })
+            .expect("reasoning OutputItemAdded should be emitted");
+        assert!(
+            !added_id.is_empty(),
+            "reasoning item id must not be empty: {events:?}"
+        );
+
+        let done_id = events
+            .iter()
+            .find_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { id, .. })) => id.clone(),
+                _ => None,
+            })
+            .expect("reasoning OutputItemDone should be emitted");
+        assert_eq!(
+            done_id, added_id,
+            "reasoning OutputItemDone must reuse the OutputItemAdded id so codex-acp can dedup by item id: {events:?}"
+        );
+
+        // Mirror the real ordering that broke the active-item inheritance:
+        // the reasoning done event arrives after the assistant text done and
+        // before the tool call done.
+        let positions: Vec<(String, usize)> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ev)| match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
+                    if role == "assistant" =>
+                {
+                    Some(("text".to_string(), i))
+                }
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. })) => {
+                    Some(("reasoning".to_string(), i))
+                }
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { .. })) => {
+                    Some(("tool".to_string(), i))
+                }
+                _ => None,
+            })
+            .collect();
+        let kind_at = |kind: &str| {
+            positions
+                .iter()
+                .find(|(k, _)| k == kind)
+                .map(|(_, i)| *i)
+                .unwrap_or(usize::MAX)
+        };
+        assert!(
+            kind_at("text") < kind_at("reasoning") && kind_at("reasoning") < kind_at("tool"),
+            "expected text -> reasoning -> tool done ordering, got {positions:?}"
         );
     }
 }
