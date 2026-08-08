@@ -185,6 +185,9 @@ pub fn create_tools_json_for_chat_completions(
                                 "function": func,
                             }));
                         }
+                        // Custom (freeform) tools are not supported in the
+                        // Chat Completions API — skip them.
+                        ResponsesApiNamespaceTool::Custom(_) => {}
                     }
                 }
             }
