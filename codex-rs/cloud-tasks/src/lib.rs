@@ -877,7 +877,8 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
         let base_url = base_url.clone();
         let environment_http = environment_http.clone();
         tokio::spawn(async move {
-            let base_url = util::normalize_base_url(&base_url);            // Build headers: UA + ChatGPT auth if available
+            let base_url = util::normalize_base_url(&base_url);
+            // Build headers: UA + ChatGPT auth if available.
             let headers = util::build_chatgpt_headers().await;
 
             // Run autodetect. If it fails, we keep using "All".

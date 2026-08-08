@@ -258,7 +258,9 @@ fn build_tool_namespace_map(tools: &[codex_tools::ToolSpec]) -> HashMap<String, 
     for tool in tools {
         if let ToolSpec::Namespace(ns) = tool {
             for entry in &ns.tools {
-                let ResponsesApiNamespaceTool::Function(func) = entry;
+                let ResponsesApiNamespaceTool::Function(func) = entry else {
+                    continue;
+                };
                 map.insert(func.name.clone(), ns.name.clone());
             }
         }

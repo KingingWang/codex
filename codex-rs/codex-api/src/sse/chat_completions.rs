@@ -200,6 +200,7 @@ pub async fn process_chat_completions_sse(
                         namespace: namespace_map.get(&name).cloned(),
                         name: name.clone(),
                         arguments: args.clone(),
+                        encrypted_function_args: None,
                         call_id: id.clone(),
                         internal_chat_message_metadata_passthrough: None,
                     };
@@ -299,6 +300,7 @@ pub async fn process_chat_completions_sse(
                 output_tokens: usage.completion_tokens,
                 reasoning_output_tokens: 0,
                 total_tokens: usage.total_tokens,
+                codex_rollout_budget_units: None,
             });
         }
 
@@ -520,6 +522,7 @@ async fn process_chat_choice(
                     namespace: namespace_map.get(&name).cloned(),
                     name: name.clone(),
                     arguments: args.clone(),
+                    encrypted_function_args: None,
                     call_id: id.clone(),
                     internal_chat_message_metadata_passthrough: None,
                 };

@@ -231,6 +231,7 @@ pub async fn process_anthropic_sse(
                             namespace: namespace_map.get(name).cloned(),
                             name: name.clone(),
                             arguments: String::new(),
+                            encrypted_function_args: None,
                             call_id: id.clone(),
                             internal_chat_message_metadata_passthrough: None,
                         };
@@ -367,6 +368,7 @@ pub async fn process_anthropic_sse(
                         namespace: namespace_map.get(&state.name).cloned(),
                         name: state.name,
                         arguments: state.arguments,
+                        encrypted_function_args: None,
                         call_id: state.id,
                         internal_chat_message_metadata_passthrough: None,
                     }),
@@ -427,6 +429,7 @@ pub async fn process_anthropic_sse(
                                 namespace: namespace_map.get(&state.name).cloned(),
                                 name: state.name,
                                 arguments: state.arguments,
+                                encrypted_function_args: None,
                                 call_id: state.id,
                                 internal_chat_message_metadata_passthrough: None,
                             }),
@@ -468,6 +471,7 @@ pub async fn process_anthropic_sse(
                     output_tokens,
                     reasoning_output_tokens: 0,
                     total_tokens: total,
+                    codex_rollout_budget_units: None,
                 });
                 let end_turn = stop_reason_to_end_turn(stop_reason.as_deref());
                 let _ = tx_event
