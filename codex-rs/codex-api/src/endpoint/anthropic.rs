@@ -280,6 +280,7 @@ async fn convert_response_to_events(
             output_tokens,
             reasoning_output_tokens: 0,
             total_tokens: input_tokens + output_tokens,
+            codex_rollout_budget_units: None,
         }
     });
 
@@ -398,6 +399,7 @@ async fn convert_response_to_events(
                     namespace: namespace_map.get(name).cloned(),
                     name: name.clone(),
                     arguments: String::new(),
+                    encrypted_function_args: None,
                     call_id: id.clone(),
                     internal_chat_message_metadata_passthrough: None,
                 };
@@ -425,6 +427,7 @@ async fn convert_response_to_events(
                     namespace: namespace_map.get(name).cloned(),
                     name: name.clone(),
                     arguments,
+                    encrypted_function_args: None,
                     call_id: id.clone(),
                     internal_chat_message_metadata_passthrough: None,
                 };
