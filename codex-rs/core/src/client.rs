@@ -3244,7 +3244,9 @@ fn build_tool_namespace_map(tools: &[ToolSpec]) -> std::collections::HashMap<Str
     for tool in tools {
         if let ToolSpec::Namespace(ns) = tool {
             for ns_tool in &ns.tools {
-                let ResponsesApiNamespaceTool::Function(func) = ns_tool;
+                let ResponsesApiNamespaceTool::Function(func) = ns_tool else {
+                    continue;
+                };
                 map.insert(func.name.clone(), ns.name.clone());
             }
         }
@@ -3401,6 +3403,7 @@ mod chat_completions_request_tests {
             name: "exec_command".to_string(),
             namespace: None,
             arguments: arguments.to_string(),
+            encrypted_function_args: None,
             call_id: call_id.to_string(),
             internal_chat_message_metadata_passthrough: None,
         }
@@ -3412,6 +3415,7 @@ mod chat_completions_request_tests {
             name: name.to_string(),
             namespace: None,
             arguments: arguments.to_string(),
+            encrypted_function_args: None,
             call_id: call_id.to_string(),
             internal_chat_message_metadata_passthrough: None,
         }
