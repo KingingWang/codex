@@ -127,13 +127,6 @@ supports_websockets = true
 }
 
 #[test]
-fn test_supports_remote_compaction_for_openai() {
-    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-
-    assert!(provider.supports_remote_compaction());
-}
-
-#[test]
 fn test_personal_access_token_requires_explicit_base_url() {
     // DISABLED: Internal deployment - removed external OpenAI/ChatGPT defaults.
     // Without an explicit `base_url`, a chatgpt/pat provider must NOT fall
@@ -173,60 +166,6 @@ fn test_header_auth_requires_explicit_base_url() {
     .to_api_provider(Some(AuthMode::Headers))
     .expect("OpenAI provider with explicit base_url should build API provider");
     assert_ne!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
-}
-
-#[test]
-fn test_supports_remote_compaction_for_azure_name() {
-    let provider = ModelProviderInfo {
-        name: "Azure".into(),
-        base_url: Some("https://example.com/openai".into()),
-        env_key: Some("AZURE_OPENAI_API_KEY".into()),
-        env_key_instructions: None,
-        experimental_bearer_token: None,
-        auth: None,
-        aws: None,
-        wire_api: WireApi::Responses,
-        chat_stream: false,
-        query_params: None,
-        http_headers: None,
-        env_http_headers: None,
-        request_max_retries: None,
-        stream_max_retries: None,
-        stream_idle_timeout_ms: None,
-        websocket_connect_timeout_ms: None,
-        requires_openai_auth: false,
-        supports_websockets: false,
-        supports_standalone_web_search: false,
-    };
-
-    assert!(provider.supports_remote_compaction());
-}
-
-#[test]
-fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
-    let provider = ModelProviderInfo {
-        name: "Example".into(),
-        base_url: Some("https://example.com/v1".into()),
-        env_key: Some("API_KEY".into()),
-        env_key_instructions: None,
-        experimental_bearer_token: None,
-        auth: None,
-        aws: None,
-        wire_api: WireApi::Responses,
-        chat_stream: false,
-        query_params: None,
-        http_headers: None,
-        env_http_headers: None,
-        request_max_retries: None,
-        stream_max_retries: None,
-        stream_idle_timeout_ms: None,
-        websocket_connect_timeout_ms: None,
-        requires_openai_auth: false,
-        supports_websockets: false,
-        supports_standalone_web_search: false,
-    };
-
-    assert!(!provider.supports_remote_compaction());
 }
 
 #[test]
