@@ -387,8 +387,10 @@ impl TurnContext {
                     provider_id,
                     "Model specifies a provider not found in model_providers, falling back to default"
                 );
-                self.provider.clone()
+                create_model_provider(config.model_provider.clone(), self.auth_manager.clone())
             }
+        } else if self.has_provider_override() {
+            create_model_provider(config.model_provider.clone(), self.auth_manager.clone())
         } else {
             self.provider.clone()
         };
@@ -948,12 +950,24 @@ impl Session {
             .await;
         // If the model catalog entry specifies a provider, use it instead of the
         // session-level provider. This lets users switch providers per-model.
-        let provider = model_info
-            .provider
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|provider_id| per_turn_config.model_providers.get(provider_id).cloned())
-            .unwrap_or_else(|| session_configuration.provider.clone());
+        let provider = if let Some(provider_id) =
+            model_info.provider.as_deref().filter(|s| !s.is_empty())
+        {
+            if let Some(provider_info) = per_turn_config.model_providers.get(provider_id) {
+                create_model_provider(
+                    provider_info.clone(),
+                    Some(self.services.auth_manager.clone()),
+                )
+            } else {
+                tracing::warn!(
+                    provider_id,
+                    "Model specifies a provider not found in model_providers, falling back to default"
+                );
+                session_configuration.provider.clone()
+            }
+        } else {
+            session_configuration.provider.clone()
+        };
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
