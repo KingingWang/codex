@@ -218,6 +218,7 @@ async fn convert_response_to_events(
         output_tokens: u.completion_tokens,
         reasoning_output_tokens: 0,
         total_tokens: u.total_tokens,
+        codex_rollout_budget_units: None,
     });
 
     for choice in &response.choices {
@@ -276,6 +277,7 @@ async fn convert_response_to_events(
                     namespace: namespace_map.get(&tc.function.name).cloned(),
                     name: tc.function.name.clone(),
                     arguments: String::new(),
+                    encrypted_function_args: None,
                     call_id: tc.id.clone(),
                     internal_chat_message_metadata_passthrough: None,
                 };
@@ -307,6 +309,7 @@ async fn convert_response_to_events(
                     namespace: namespace_map.get(&tc.function.name).cloned(),
                     name: tc.function.name.clone(),
                     arguments,
+                    encrypted_function_args: None,
                     call_id: tc.id.clone(),
                     internal_chat_message_metadata_passthrough: None,
                 };

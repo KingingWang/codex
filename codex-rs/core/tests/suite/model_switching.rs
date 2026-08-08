@@ -2,6 +2,7 @@ use anyhow::Result;
 use codex_config::types::Personality;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
@@ -208,6 +209,77 @@ async fn model_change_appends_model_instructions_developer_message() -> Result<(
             next_model.to_string()
         ]
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_change_routes_requests_to_catalog_provider_and_back_to_default() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let default_server = start_mock_server().await;
+    let alternate_server = start_mock_server().await;
+    let default_model_slug = "test-default-provider-model";
+    let alternate_model_slug = "test-alternate-provider-model";
+    let default_model = test_model_info(
+        default_model_slug,
+        "Default Provider Model",
+        "uses the session provider",
+        default_input_modalities(),
+    );
+    let mut alternate_model = test_model_info(
+        alternate_model_slug,
+        "Alternate Provider Model",
+        "uses a catalog provider override",
+        default_input_modalities(),
+    );
+    alternate_model.provider = Some("alternate".to_string());
+
+    let default_responses = mount_sse_sequence(
+        &default_server,
+        vec![sse_completed("resp-1"), sse_completed("resp-3")],
+    )
+    .await;
+    let alternate_response = mount_sse_once(&alternate_server, sse_completed("resp-2")).await;
+    let alternate_base_url = format!("{}/v1", alternate_server.uri());
+    let mut builder = test_codex()
+        .with_model(default_model_slug)
+        .with_config(move |config| {
+            let mut alternate_provider =
+                ModelProviderInfo::create_openai_provider(Some(alternate_base_url));
+            alternate_provider.supports_websockets = false;
+            config
+                .model_providers
+                .insert("alternate".to_string(), alternate_provider);
+            config.model_catalog = Some(ModelsResponse {
+                models: vec![default_model, alternate_model],
+            });
+        });
+    let test = builder.build(&default_server).await?;
+
+    for (prompt, model) in [
+        ("default provider turn", default_model_slug),
+        ("alternate provider turn", alternate_model_slug),
+        ("default provider again", default_model_slug),
+    ] {
+        test.codex
+            .submit(read_only_user_turn(
+                &test,
+                vec![UserInput::Text {
+                    text: prompt.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                model.to_string(),
+            ))
+            .await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+
+    assert_eq!(default_responses.requests().len(), 2);
+    alternate_response.single_request();
 
     Ok(())
 }
