@@ -460,7 +460,7 @@ impl TurnContext {
     /// Mirrors the resolution in `new_turn_from_configuration` / `with_model`:
     /// an absent or empty `provider` field keeps the session-level provider.
     pub(crate) fn has_provider_override(&self) -> bool {
-        self.model_info
+        self.model_info()
             .provider
             .as_deref()
             .is_some_and(|provider_id| !provider_id.is_empty())
@@ -487,8 +487,10 @@ impl TurnContext {
                     provider_id,
                     "Model specifies a provider not found in model_providers, falling back to default"
                 );
-                self.provider.clone()
+                create_model_provider(config.model_provider.clone(), self.auth_manager.clone())
             }
+        } else if self.has_provider_override() {
+            create_model_provider(config.model_provider.clone(), self.auth_manager.clone())
         } else {
             self.provider.clone()
         };
