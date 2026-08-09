@@ -384,9 +384,10 @@ impl CodexErr {
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::UsageLimitReached(_)
-            | CodexErrorDetails::ServerOverloaded
+<<<<<<< HEAD
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => false,
+            | CodexErrorDetails::CyberPolicy { .. } => false,
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
