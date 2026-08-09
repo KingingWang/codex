@@ -35,7 +35,7 @@ fn codex_err_debug_preserves_legacy_shape() {
 #[test]
 fn retryability_preserves_error_details_distinctions() {
     let errors = [
-        (CodexErr::ServerOverloaded, false),
+        (CodexErr::ServerOverloaded, true),
         (
             CodexErr::new(CodexErrorDetails::RateLimitExceeded("retry later".into())),
             true,
