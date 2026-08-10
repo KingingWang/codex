@@ -26,7 +26,7 @@
 # changes every release. The script locates it by *content signature*, not by
 # filename, so it survives extension upgrades without code changes here.
 #
-# Two upstream layouts are known:
+# Three upstream layouts are known:
 #
 #   Layout A (older, ~pre-26.707):
 #     Chunk:   webview/assets/models-and-reasoning-efforts-*.js
@@ -37,6 +37,17 @@
 #     Chunk:   webview/assets/model-list-filter-*.js
 #     Pattern: ...useHiddenModels:s}){let c=[],l=null,u=<s>&&<t>!==`amazonBedrock`,...
 #     Patch:   <u>=false   (just the assignment, not the surrounding decl)
+#
+#   Layout C (newer, ~26.803+):
+#     Chunk:   webview/assets/app-initial-*.js  (filter logic moved into app bundle)
+#     Pattern: <cond>&&<var>!==`amazonBedrock`?<trueBranch>:<falseBranch>
+#     Patch:   false?<trueBranch>:<falseBranch>
+#
+#     The ternary condition is replaced with `false`, forcing the `!hidden` branch.
+#     Two variants exist:
+#       - inline:  i&&t!==`amazonBedrock`?n.has(r.model):!r.hidden
+#       - member:  i.useHiddenModels&&r!==`amazonBedrock`?i.availableModels.has(e.model):!e.hidden
+#     Both are matched by allowing an optional `.member` suffix on the first operand.
 #
 # We scan ALL *.js files under webview/assets/, matching either layout's
 # content signature.
@@ -111,6 +122,17 @@ UNPATCHED_RE_B='([A-Za-z_$][A-Za-z_$0-9]*)=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][
 # ABSENCE of the unpatched pattern and PRESENCE of our .bak. For re-run
 # friendliness, we also check for a companion marker file (see below).
 
+# Layout C (~26.803+) — ternary expression form.
+#   Original:  <cond>&&<var>!==`amazonBedrock`?<trueBranch>:<falseBranch>
+#   Patched:   false?<trueBranch>:<falseBranch>
+#
+# The first operand may be a bare identifier (i, t) or a member access
+# (i.useHiddenModels, i.availableModels). We allow an optional `.member` suffix.
+# We match up to the `?` that starts the ternary, and replace just the condition.
+UNPATCHED_RE_C='[A-Za-z_$][A-Za-z_$0-9]*(?:\.[A-Za-z_$][A-Za-z_$0-9]*)*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`\?'
+# Layout C patched marker: "false?" immediately before the ternary branches.
+PATCHED_MARKER_C='false?'
+
 mode="patch"
 case "${1:-}" in
   --revert) mode="revert" ;;
@@ -169,7 +191,7 @@ for g in "${CANDIDATE_GLOBS[@]}"; do
       # Collect files matching either layout's unpatched signature.
       while IFS= read -r f; do
         targets+=("$f")
-      done < <(grep -El -e "$UNPATCHED_RE_A" -e "$UNPATCHED_RE_B" -- "$assets"/*.js 2>/dev/null || true)
+      done < <(grep -El -e "$UNPATCHED_RE_A" -e "$UNPATCHED_RE_B" -e "$UNPATCHED_RE_C" -- "$assets"/*.js 2>/dev/null || true)
       # Also collect files we already patched (have a .bak), so re-runs
       # hit the [skip] branch instead of "no picker found".
       for f in "$assets"/*.js; do
@@ -221,6 +243,8 @@ for f in "${targets[@]}"; do
         layout="A"
       elif grep -qE -- "$UNPATCHED_RE_B" "$f" 2>/dev/null; then
         layout="B"
+      elif grep -qE -- "$UNPATCHED_RE_C" "$f" 2>/dev/null; then
+        layout="C"
       else
         # Neither unpatched pattern matches — could be already patched.
         echo "[skip] already patched or unrecognized layout: $f"
@@ -271,6 +295,29 @@ for f in "${targets[@]}"; do
             fi
           else
             echo "[fail] perl command failed (layout B): $f" >&2
+            [ -f "$f.bak" ] && cp -p "$f.bak" "$f"
+            failed=$((failed + 1))
+          fi
+          ;;
+        C)
+          # Layout C: ternary expression form.
+          # Match:  <cond>&&<var>!==`amazonBedrock`?
+          # Replace: false?
+          #
+          # The `?` is consumed and re-added in the replacement so the ternary
+          # branches are preserved.
+          if perl -i -pe 's/[A-Za-z_$][A-Za-z_$0-9]*(?:\.[A-Za-z_$][A-Za-z_$0-9]*)*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`\?/false?/g' "$f"; then
+            # Verify: the unpatched pattern must be gone.
+            if ! grep -qE -- "$UNPATCHED_RE_C" "$f" 2>/dev/null; then
+              echo "[ok]   patched (layout C): $f"
+              ok=$((ok + 1))
+            else
+              echo "[fail] perl substitution did not take effect (layout C): $f" >&2
+              [ -f "$f.bak" ] && cp -p "$f.bak" "$f"
+              failed=$((failed + 1))
+            fi
+          else
+            echo "[fail] perl command failed (layout C): $f" >&2
             [ -f "$f.bak" ] && cp -p "$f.bak" "$f"
             failed=$((failed + 1))
           fi
