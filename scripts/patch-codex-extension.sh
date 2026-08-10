@@ -129,7 +129,7 @@ UNPATCHED_RE_B='([A-Za-z_$][A-Za-z_$0-9]*)=[A-Za-z_$][A-Za-z_$0-9]*&&[A-Za-z_$][
 # The first operand may be a bare identifier (i, t) or a member access
 # (i.useHiddenModels, i.availableModels). We allow an optional `.member` suffix.
 # We match up to the `?` that starts the ternary, and replace just the condition.
-UNPATCHED_RE_C='[A-Za-z_$][A-Za-z_$0-9]*(?:\.[A-Za-z_$][A-Za-z_$0-9]*)*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`\?'
+UNPATCHED_RE_C='[A-Za-z_$][A-Za-z_$0-9]*(\.[A-Za-z_$][A-Za-z_$0-9]*)*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`\?'
 # Layout C patched marker: "false?" immediately before the ternary branches.
 PATCHED_MARKER_C='false?'
 
@@ -306,7 +306,7 @@ for f in "${targets[@]}"; do
           #
           # The `?` is consumed and re-added in the replacement so the ternary
           # branches are preserved.
-          if perl -i -pe 's/[A-Za-z_$][A-Za-z_$0-9]*(?:\.[A-Za-z_$][A-Za-z_$0-9]*)*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`\?/false?/g' "$f"; then
+          if perl -i -pe 's/[A-Za-z_$][A-Za-z_$0-9]*(\.[A-Za-z_$][A-Za-z_$0-9]*)*&&[A-Za-z_$][A-Za-z_$0-9]*!==`amazonBedrock`\?/false?/g' "$f"; then
             # Verify: the unpatched pattern must be gone.
             if ! grep -qE -- "$UNPATCHED_RE_C" "$f" 2>/dev/null; then
               echo "[ok]   patched (layout C): $f"
