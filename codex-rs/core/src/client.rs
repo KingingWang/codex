@@ -1018,7 +1018,19 @@ impl ModelClient {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
+        let store = provider.is_azure_responses_endpoint();
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
+        if !store {
+            input.retain(|item| {
+                !matches!(
+                    item,
+                    ResponseItem::Reasoning {
+                        encrypted_content: None,
+                        ..
+                    }
+                )
+            });
+        }
         let is_openai = self.state.provider.info().is_openai();
         let (instructions, tools) = if model_info.use_responses_lite {
             // These prompt-only items are rebuilt on every request. Hash their visible payloads
@@ -1103,9 +1115,7 @@ impl ModelClient {
             tools,
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
-            reasoning: Some(reasoning),
-            store: false,
-            stream: true,
+            store,
             stream_options,
             include,
             service_tier,
@@ -4094,6 +4104,34 @@ mod chat_completions_request_tests {
             ])
         );
     }
+
+    #[test]
+    fn chat_completions_request_lowers_responses_reasoning_summary() {
+        let request = build_request(vec![
+            ResponseItem::Reasoning {
+                id: Some(ResponseItemId::from_server("rs_server".to_string())),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "Responses reasoning summary".to_string(),
+                }],
+                content: None,
+                encrypted_content: Some("encrypted-responses-reasoning".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            assistant_message("Responses answer"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Responses answer",
+                    "reasoning_content": "Responses reasoning summary"
+                }
+            ])
+        );
+    }
+
     #[test]
     fn chat_completions_request_user_message_with_image_uses_multipart_content() {
         let request = build_request(vec![ResponseItem::Message {
