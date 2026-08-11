@@ -39,12 +39,15 @@ use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
@@ -279,6 +282,68 @@ fn test_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
+}
+
+#[tokio::test]
+async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let provider = client.state.provider.api_provider().await?;
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let encrypted_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("rs_server".to_string())),
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "responses reasoning".to_string(),
+        }],
+        content: None,
+        encrypted_content: Some("encrypted-responses-reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let assistant_message = ResponseItem::Message {
+        id: Some(ResponseItemId::from_server("msg_server".to_string())),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "answer".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::Reasoning {
+                id: Some(ResponseItemId::new("rs")),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "chat completions reasoning".to_string(),
+                }],
+                content: None,
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            encrypted_reasoning.clone(),
+            assistant_message.clone(),
+        ],
+        ..Default::default()
+    };
+
+    let request = client.build_responses_request(
+        &provider,
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        ReasoningSummary::Auto,
+        /*service_tier*/ None,
+        &responses_metadata,
+    )?;
+
+    assert!(!request.store);
+    assert_eq!(request.input, vec![encrypted_reasoning, assistant_message]);
+
+    Ok(())
 }
 
 fn test_session_telemetry() -> SessionTelemetry {
