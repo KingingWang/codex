@@ -168,6 +168,7 @@ pub const X_OPENAI_MEMGEN_REQUEST_HEADER: &str = "x-openai-memgen-request";
 pub const X_OPENAI_SUBAGENT_HEADER: &str = "x-openai-subagent";
 pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
+const X_CODEX_SESSION_ID_HEADER: &str = "x-codex-session-id";
 const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
     "x-codex-ws-stream-request-start-ms";
 const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
@@ -2203,7 +2204,7 @@ impl ModelClientSession {
                     effort,
                     summary,
                     service_tier,
-                    None,
+                    responses_metadata,
                     inference_trace,
                 )
                 .await
@@ -2255,7 +2256,7 @@ impl ModelClientSession {
         effort: Option<ReasoningEffortConfig>,
         _summary: ReasoningSummaryConfig,
         _service_tier: Option<String>,
-        _turn_metadata_header: Option<&str>,
+        responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
@@ -2297,7 +2298,13 @@ impl ModelClientSession {
                 client_setup.api_auth,
                 chat_stream,
             );
-            let stream_result = client.request(request, ApiHeaderMap::new()).await;
+            let mut extra_headers = ApiHeaderMap::new();
+            let header_value =
+                HeaderValue::from_str(&responses_metadata.session_id).map_err(|err| {
+                    CodexErr::InvalidRequest(format!("invalid Codex session ID header: {err}"))
+                })?;
+            extra_headers.insert(X_CODEX_SESSION_ID_HEADER, header_value);
+            let stream_result = client.request(request, extra_headers).await;
 
             match stream_result {
                 Ok(stream) => {
