@@ -46,6 +46,7 @@ mod audio_truncation;
 mod auto_review;
 mod catalog_permission_messages;
 mod chat_completions_reasoning_retry;
+mod chat_completions_session_header;
 mod cli_stream;
 mod client;
 mod client_websockets;
