@@ -3,7 +3,6 @@ use codex_config::types::Personality;
 use codex_core::CodexThread;
 use codex_core::ForkSnapshot;
 use codex_core::TurnInputRequest;
-use codex_core::config::Constrained;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
@@ -12,7 +11,6 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
-use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
@@ -35,15 +33,11 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
-use codex_protocol::request_user_input::RequestUserInputAnswer;
-use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
-use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
-use core_test_support::responses::ev_function_call;
-use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_image_generation_call;
+use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_once;
@@ -57,13 +51,11 @@ use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
-use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
-use std::collections::HashMap;
 use test_case::test_case;
-use wiremock::MockServer;
 use wiremock::Mock;
+use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 use wiremock::matchers::method;
@@ -523,7 +515,7 @@ async fn model_change_routes_requests_to_catalog_provider_and_back_to_default() 
         ("default provider again", default_model_slug),
     ] {
         test.codex
-            .submit(read_only_user_turn(
+            .start_or_steer_turn(read_only_user_turn(
                 &test,
                 vec![UserInput::Text {
                     text: prompt.to_string(),
@@ -540,169 +532,6 @@ async fn model_change_routes_requests_to_catalog_provider_and_back_to_default() 
 
     assert_eq!(default_responses.requests().len(), 2);
     alternate_response.single_request();
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_change_preserves_history_across_chat_and_responses_protocols() -> Result<()> {
-    let chat_server = start_mock_server().await;
-    let responses_server = start_mock_server().await;
-    let chat_model_slug = "test-chat-provider-model";
-    let responses_model_slug = "test-responses-provider-model";
-    let chat_model = test_model_info(
-        chat_model_slug,
-        "Chat Provider Model",
-        "uses Chat Completions",
-        default_input_modalities(),
-    );
-    let mut responses_model = test_model_info(
-        responses_model_slug,
-        "Responses Provider Model",
-        "uses Responses",
-        default_input_modalities(),
-    );
-    responses_model.provider = Some("responses".to_string());
-
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .and(body_string_contains("chat protocol turn"))
-        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
-            "id": "chatcmpl-1",
-            "object": "chat.completion",
-            "model": chat_model_slug,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "chat answer",
-                    "reasoning_content": "chat reasoning"
-                },
-                "finish_reason": "stop"
-            }]
-        })))
-        .expect(1)
-        .mount(&chat_server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .and(body_string_contains("back to chat"))
-        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
-            "id": "chatcmpl-3",
-            "object": "chat.completion",
-            "model": chat_model_slug,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "chat again"
-                },
-                "finish_reason": "stop"
-            }]
-        })))
-        .with_priority(/*p*/ 1)
-        .expect(1)
-        .mount(&chat_server)
-        .await;
-
-    let responses_mock = mount_sse_once(
-        &responses_server,
-        sse(vec![
-            ev_response_created("resp-2"),
-            ev_reasoning_item("rs_server", &["responses reasoning summary"], &[]),
-            ev_assistant_message("msg_server", "responses answer"),
-            ev_completed("resp-2"),
-        ]),
-    )
-    .await;
-
-    let chat_base_url = format!("{}/v1", chat_server.uri());
-    let responses_base_url = format!("{}/v1", responses_server.uri());
-    let mut chat_provider = ModelProviderInfo::create_openai_provider(Some(chat_base_url));
-    chat_provider.name = "chat".to_string();
-    chat_provider.wire_api = WireApi::Chat;
-    chat_provider.chat_stream = false;
-    chat_provider.supports_websockets = false;
-    let mut responses_provider = ModelProviderInfo::create_openai_provider(Some(responses_base_url));
-    responses_provider.name = "responses".to_string();
-    responses_provider.supports_websockets = false;
-
-    let test = test_codex()
-        .with_model(chat_model_slug)
-        .with_config(move |config| {
-            config.model_provider = chat_provider;
-            config
-                .model_providers
-                .insert("responses".to_string(), responses_provider);
-            config.model_catalog = Some(ModelsResponse {
-                models: vec![chat_model, responses_model],
-            });
-        })
-        .build(&chat_server)
-        .await?;
-
-    for (prompt, model) in [
-        ("chat protocol turn", chat_model_slug),
-        ("switch to responses", responses_model_slug),
-        ("back to chat", chat_model_slug),
-    ] {
-        test.codex
-            .submit(read_only_user_turn(
-                &test,
-                vec![UserInput::Text {
-                    text: prompt.to_string(),
-                    text_elements: Vec::new(),
-                }],
-                model.to_string(),
-            ))
-            .await?;
-        wait_for_event(&test.codex, |event| {
-            matches!(event, EventMsg::TurnComplete(_))
-        })
-        .await;
-    }
-
-    let responses_request = responses_mock.single_request();
-    let responses_input = responses_request.input();
-    assert!(
-        responses_input.iter().all(|item| {
-            item.get("type").and_then(serde_json::Value::as_str) != Some("reasoning")
-                || item
-                    .get("encrypted_content")
-                    .is_some_and(serde_json::Value::is_string)
-        }),
-        "stateless Responses input must omit Chat reasoning items without encrypted content: {responses_input:?}"
-    );
-    assert!(
-        responses_request.body_contains_text("chat answer"),
-        "Responses request should retain the prior Chat assistant answer"
-    );
-
-    let chat_requests = chat_server
-        .received_requests()
-        .await
-        .expect("chat server should record requests");
-    let back_to_chat_request = chat_requests
-        .iter()
-        .find(|request| {
-            request.url.path() == "/v1/chat/completions"
-                && std::str::from_utf8(&request.body)
-                    .is_ok_and(|body| body.contains("back to chat"))
-        })
-        .expect("back-to-chat request");
-    let back_to_chat_body: serde_json::Value = serde_json::from_slice(&back_to_chat_request.body)?;
-    let responses_answer = back_to_chat_body["messages"]
-        .as_array()
-        .and_then(|messages| {
-            messages.iter().find(|message| {
-                message["role"] == "assistant" && message["content"] == "responses answer"
-            })
-        })
-        .expect("Responses assistant answer should be lowered into Chat history");
-    assert_eq!(
-        responses_answer["reasoning_content"],
-        "responses reasoning summary"
-    );
 
     Ok(())
 }
@@ -777,150 +606,6 @@ async fn model_and_personality_change_only_appends_model_instructions() -> Resul
             .iter()
             .any(|text| text.contains("<personality_spec>")),
         "did not expect personality update message when model changed in same turn"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn settings_update_during_active_turn_applies_to_next_turn_only() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-    let response_mock = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_function_call(
-                    "pause-turn",
-                    "request_user_input",
-                    &json!({
-                        "questions": [{
-                            "id": "continue",
-                            "header": "Continue",
-                            "question": "Continue after settings update?",
-                            "options": [{
-                                "label": "Yes (Recommended)",
-                                "description": "Continue the current turn."
-                            }, {
-                                "label": "No",
-                                "description": "Stop the current turn."
-                            }]
-                        }]
-                    })
-                    .to_string(),
-                ),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-2", "first turn done"),
-                ev_completed("resp-2"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-3"),
-                ev_assistant_message("msg-3", "second turn done"),
-                ev_completed("resp-3"),
-            ]),
-        ],
-    )
-    .await;
-    let mut builder = test_codex().with_model("gpt-5.2").with_config(|config| {
-        config
-            .features
-            .enable(Feature::DefaultModeRequestUserInput)
-            .expect("test config should allow feature update");
-        config.model_reasoning_effort = Some(ReasoningEffort::Low);
-        config.model_reasoning_summary = Some(ReasoningSummary::Concise);
-        config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
-        config.approvals_reviewer = ApprovalsReviewer::User;
-    });
-    let test = builder.build_with_auto_env(&server).await?;
-
-    test.codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "pause before continuing".into(),
-            text_elements: Vec::new(),
-        }]))
-        .await?;
-    let request = wait_for_event_match(&test.codex, |event| match event {
-        EventMsg::RequestUserInput(request) => Some(request.clone()),
-        _ => None,
-    })
-    .await;
-
-    core_test_support::submit_thread_settings(
-        &test.codex,
-        ThreadSettingsOverrides {
-            model: Some("gpt-5.4".to_string()),
-            effort: Some(Some(ReasoningEffort::High)),
-            summary: Some(ReasoningSummary::Detailed),
-            service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
-            approval_policy: Some(AskForApproval::Never),
-            approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    test.codex
-        .submit(Op::UserInputAnswer {
-            id: request.turn_id,
-            response: RequestUserInputResponse {
-                answers: HashMap::from([(
-                    "continue".to_string(),
-                    RequestUserInputAnswer {
-                        answers: vec!["Yes (Recommended)".to_string()],
-                    },
-                )]),
-            },
-        })
-        .await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    test.submit_text_turn("start the next turn").await?;
-
-    let requests = response_mock.requests();
-    let request_settings = requests
-        .iter()
-        .map(|request| {
-            let body = request.body_json();
-            json!({
-                "model": body["model"],
-                "reasoning": body["reasoning"],
-                "service_tier": body.get("service_tier"),
-                "approval_policy_never": request
-                    .message_input_texts("developer")
-                    .iter()
-                    .any(|text| text.contains("Approval policy is currently never")),
-            })
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        request_settings,
-        vec![
-            json!({
-                "model": "gpt-5.2",
-                "reasoning": { "effort": "low", "summary": "concise" },
-                "service_tier": null,
-                "approval_policy_never": false,
-            }),
-            json!({
-                "model": "gpt-5.2",
-                "reasoning": { "effort": "low", "summary": "concise" },
-                "service_tier": null,
-                "approval_policy_never": false,
-            }),
-            json!({
-                "model": "gpt-5.4",
-                "reasoning": { "effort": "high", "summary": "detailed" },
-                "service_tier": "priority",
-                "approval_policy_never": true,
-            }),
-        ]
     );
 
     Ok(())
@@ -1785,6 +1470,170 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
     assert_eq!(smaller_window, Some(smaller_effective_window));
     assert_ne!(smaller_window, Some(large_effective_window));
     wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_change_preserves_history_across_chat_and_responses_protocols() -> Result<()> {
+    let chat_server = start_mock_server().await;
+    let responses_server = start_mock_server().await;
+    let chat_model_slug = "test-chat-provider-model";
+    let responses_model_slug = "test-responses-provider-model";
+    let chat_model = test_model_info(
+        chat_model_slug,
+        "Chat Provider Model",
+        "uses Chat Completions",
+        default_input_modalities(),
+    );
+    let mut responses_model = test_model_info(
+        responses_model_slug,
+        "Responses Provider Model",
+        "uses Responses",
+        default_input_modalities(),
+    );
+    responses_model.provider = Some("responses".to_string());
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("chat protocol turn"))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "model": chat_model_slug,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "chat answer",
+                    "reasoning_content": "chat reasoning"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&chat_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("back to chat"))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+            "id": "chatcmpl-3",
+            "object": "chat.completion",
+            "model": chat_model_slug,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "chat again"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .with_priority(/*p*/ 1)
+        .expect(1)
+        .mount(&chat_server)
+        .await;
+
+    let responses_mock = mount_sse_once(
+        &responses_server,
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_reasoning_item("rs_server", &["responses reasoning summary"], &[]),
+            ev_assistant_message("msg_server", "responses answer"),
+            core_test_support::responses::ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    let chat_base_url = format!("{}/v1", chat_server.uri());
+    let responses_base_url = format!("{}/v1", responses_server.uri());
+    let mut chat_provider = ModelProviderInfo::create_openai_provider(Some(chat_base_url));
+    chat_provider.name = "chat".to_string();
+    chat_provider.wire_api = WireApi::Chat;
+    chat_provider.chat_stream = false;
+    chat_provider.supports_websockets = false;
+    let mut responses_provider =
+        ModelProviderInfo::create_openai_provider(Some(responses_base_url));
+    responses_provider.name = "responses".to_string();
+    responses_provider.supports_websockets = false;
+
+    let test = test_codex()
+        .with_model(chat_model_slug)
+        .with_config(move |config| {
+            config.model_provider = chat_provider;
+            config
+                .model_providers
+                .insert("responses".to_string(), responses_provider);
+            config.model_catalog = Some(ModelsResponse {
+                models: vec![chat_model, responses_model],
+            });
+        })
+        .build(&chat_server)
+        .await?;
+
+    for (prompt, model) in [
+        ("chat protocol turn", chat_model_slug),
+        ("switch to responses", responses_model_slug),
+        ("back to chat", chat_model_slug),
+    ] {
+        test.codex
+            .start_or_steer_turn(read_only_user_turn(
+                &test,
+                vec![UserInput::Text {
+                    text: prompt.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                model.to_string(),
+            ))
+            .await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+
+    let responses_request = responses_mock.single_request();
+    let responses_input = responses_request.input();
+    assert!(
+        responses_input.iter().all(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) != Some("reasoning")
+                || item
+                    .get("encrypted_content")
+                    .is_some_and(serde_json::Value::is_string)
+        }),
+        "stateless Responses input must omit Chat reasoning items without encrypted content: {responses_input:?}"
+    );
+    assert!(
+        responses_request.body_contains_text("chat answer"),
+        "Responses request should retain the prior Chat assistant answer"
+    );
+
+    let chat_requests = chat_server
+        .received_requests()
+        .await
+        .expect("chat server should record requests");
+    let back_to_chat_request = chat_requests
+        .iter()
+        .find(|request| {
+            request.url.path() == "/v1/chat/completions"
+                && std::str::from_utf8(&request.body)
+                    .is_ok_and(|body| body.contains("back to chat"))
+        })
+        .expect("back-to-chat request");
+    let back_to_chat_body: serde_json::Value = serde_json::from_slice(&back_to_chat_request.body)?;
+    let responses_answer = back_to_chat_body["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages.iter().find(|message| {
+                message["role"] == "assistant" && message["content"] == "responses answer"
+            })
+        })
+        .expect("Responses assistant answer should be lowered into Chat history");
+    assert_eq!(
+        responses_answer["reasoning_content"],
+        "responses reasoning summary"
+    );
 
     Ok(())
 }

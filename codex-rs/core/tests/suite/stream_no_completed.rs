@@ -103,7 +103,8 @@ async fn retries_on_early_close() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() -> anyhow::Result<()> {
+async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() -> anyhow::Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let bootstrap_server = responses::start_mock_server().await;
@@ -133,7 +134,10 @@ async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() ->
     else {
         unreachable!("predicate guarantees a stream error event");
     };
-    assert_eq!(connection_error.message, "Reconnecting... waiting for network");
+    assert_eq!(
+        connection_error.message,
+        "Reconnecting... waiting for network"
+    );
 
     let recovered_server = MockServer::builder()
         .listener(TcpListener::bind(unavailable_address)?)
@@ -176,9 +180,18 @@ async fn retries_server_overloaded_responses_until_success() {
     let completed_sse = responses::sse_completed("resp_ok");
 
     let (server, _) = start_streaming_sse_server(vec![
-        vec![StreamingSseChunk { gate: None, body: overloaded_sse.clone() }],
-        vec![StreamingSseChunk { gate: None, body: overloaded_sse }],
-        vec![StreamingSseChunk { gate: None, body: completed_sse }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: overloaded_sse.clone(),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: overloaded_sse,
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: completed_sse,
+        }],
     ])
     .await;
 
@@ -202,7 +215,11 @@ async fn retries_server_overloaded_responses_until_success() {
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 3, "expected two retries after server overload responses");
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected two retries after server overload responses"
+    );
 
     server.shutdown().await;
 }

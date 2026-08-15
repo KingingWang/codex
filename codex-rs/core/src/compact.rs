@@ -294,7 +294,7 @@ async fn run_compact_task_inner_impl(
         let prompt = Prompt {
             input: turn_input,
             tools: step_context.tool_router.model_visible_specs(),
-            parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
+            parallel_tool_calls: true,
             base_instructions: sess.get_base_instructions().await,
             ..Default::default()
         };

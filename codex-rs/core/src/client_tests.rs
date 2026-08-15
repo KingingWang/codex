@@ -289,7 +289,6 @@ fn test_model_info() -> ModelInfo {
 #[tokio::test]
 async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyhow::Result<()> {
     let client = test_model_client(SessionSource::Cli);
-    let provider = client.state.provider.api_provider().await?;
     let responses_metadata = test_responses_metadata_for_client(
         &client,
         /*turn_id*/ None,
@@ -333,7 +332,6 @@ async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyh
     };
 
     let request = client.build_responses_request(
-        &provider,
         &prompt,
         &test_model_info(),
         /*effort*/ None,
