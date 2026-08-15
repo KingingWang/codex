@@ -175,7 +175,7 @@ fn system_block_is_cached() {
 #[test]
 fn no_tool_carries_cache_marker() {
     let mut prompt = Prompt::default();
-    prompt.tools = vec![shell_tool(), read_tool()];
+    prompt.tools = vec![shell_tool(), read_tool()].into();
     let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
     assert_eq!(req.tools.len(), 2);
     assert_eq!(req.tools[0].name, "read_file");
@@ -433,7 +433,7 @@ fn consecutive_turns_share_byte_identical_prefix() {
         text: base.clone(),
         ..Default::default()
     };
-    prompt_n.tools = tools.clone();
+    prompt_n.tools = tools.clone().into();
     prompt_n.input = vec![
         user_message("list files"),
         function_call("shell", "toolu_1", r#"{"cmd":"ls"}"#),
@@ -447,7 +447,7 @@ fn consecutive_turns_share_byte_identical_prefix() {
         text: base,
         ..Default::default()
     };
-    prompt_next.tools = tools;
+    prompt_next.tools = tools.into();
     prompt_next.input = vec![
         user_message("list files"),
         function_call("shell", "toolu_1", r#"{"cmd":"ls"}"#),
@@ -534,7 +534,7 @@ fn cache_markers_stay_under_breakpoint_limit() {
         text: "You are helpful.".to_string(),
         ..Default::default()
     };
-    prompt.tools = vec![shell_tool(), read_tool()];
+    prompt.tools = vec![shell_tool(), read_tool()].into();
     prompt.input = vec![
         user_message("hello"),
         assistant_message("hi"),
