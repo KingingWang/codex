@@ -341,6 +341,7 @@ fn api_error_code(err: &ApiError) -> String {
             format!("HTTP {status}")
         }
         ApiError::Transport(TransportError::Timeout) => "connection timeout".to_string(),
+        ApiError::Transport(TransportError::Connection(_)) => "connection failed".to_string(),
         ApiError::Transport(TransportError::Network(_)) => "network error".to_string(),
         ApiError::Transport(TransportError::Build(_)) => "request build error".to_string(),
         ApiError::Transport(TransportError::RetryLimit) => "retry limit".to_string(),
@@ -353,6 +354,7 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::RateLimit(_) => "HTTP 429 rate limit".to_string(),
         ApiError::InvalidRequest { .. } => "invalid request".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
+        ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
         ApiError::ServerOverloaded => "HTTP 529 server overloaded".to_string(),
     }
 }
@@ -1019,7 +1021,11 @@ impl ModelClient {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
-        let store = provider.is_azure_responses_endpoint();
+        let provider_info = self.state.provider.info();
+        let store = codex_api::is_azure_responses_provider(
+            &provider_info.name,
+            provider_info.base_url.as_deref(),
+        );
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
         if !store {
             input.retain(|item| {
@@ -1115,8 +1121,10 @@ impl ModelClient {
             input,
             tools,
             tool_choice: "auto".to_string(),
-            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
+            reasoning: Some(reasoning),
             store,
+            stream: true,
+            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
             stream_options,
             include,
             service_tier,
@@ -3476,10 +3484,12 @@ mod chat_completions_request_tests {
             tools: vec![create_exec_command_tool(CommandToolOptions {
                 allow_login_shell: false,
                 exec_permission_approvals_enabled: false,
-            })],
+            })]
+            .into(),
             parallel_tool_calls: false,
             base_instructions: BaseInstructions {
                 text: String::new(),
+                provenance: None,
             },
             output_schema: None,
             output_schema_strict: true,
