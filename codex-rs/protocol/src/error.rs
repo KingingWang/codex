@@ -393,7 +393,8 @@ impl CodexErr {
             | CodexErrorDetails::UsageLimitReached(_)
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => false,
-            CodexErrorDetails::Stream(..)
+            CodexErrorDetails::ServerOverloaded
+            | CodexErrorDetails::Stream(..)
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
