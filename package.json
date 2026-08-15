@@ -3,8 +3,11 @@
   "private": true,
   "description": "Tools for repo-wide maintenance.",
   "scripts": {
+    "format:npm-dist": "prettier --check npm-dist/**/*.mjs npm-dist/**/*.md .github/workflows/publish-npm-dist.yml",
+    "format:npm-dist:fix": "prettier --write npm-dist/**/*.mjs npm-dist/**/*.md .github/workflows/publish-npm-dist.yml",
     "format": "prettier --check *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
     "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
+    "test:npm-dist": "node --test npm-dist/tests",
     "write-hooks-schema": "cargo run --manifest-path ./codex-rs/Cargo.toml -p codex-hooks --bin write_hooks_schema_fixtures"
   },
   "devDependencies": {
