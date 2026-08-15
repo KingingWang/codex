@@ -5552,16 +5552,10 @@ async fn compact_uses_per_model_provider() {
     let codex = test.codex.clone();
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello world".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello world".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -5645,31 +5639,19 @@ async fn auto_compact_uses_per_model_provider() {
     let codex = test.codex.clone();
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: FIRST_AUTO_MSG.into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: FIRST_AUTO_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: SECOND_AUTO_MSG.into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: SECOND_AUTO_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -5677,16 +5659,10 @@ async fn auto_compact_uses_per_model_provider() {
     // This turn exceeds the auto-compact token limit, so pre-sampling
     // auto-compaction runs before the follow-up request.
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: POST_AUTO_USER_MSG.into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: POST_AUTO_USER_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
