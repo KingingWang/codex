@@ -16,10 +16,10 @@
 //! is present (CI). The assertion logic itself is exercised end-to-end once
 //! the fork restores the `openai` provider or switches the builder default.
 
+use codex_core::TurnInputRequest;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
@@ -132,16 +132,10 @@ async fn reasoning_only_chat_completions_response_is_retried_until_success() {
         .unwrap();
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "please reply".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "please reply".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .unwrap();
 
