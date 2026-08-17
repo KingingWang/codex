@@ -2700,7 +2700,7 @@ impl ModelClientSession {
                         split_tool_output_into_tool_and_user_content(&output.body);
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: tool_content,
+                        content: Some(tool_content),
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
                         reasoning_content: None,
@@ -2736,7 +2736,7 @@ impl ModelClientSession {
                         split_tool_output_into_tool_and_user_content(&output.body);
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: tool_content,
+                        content: Some(tool_content),
                         tool_calls: None,
                         tool_call_id: Some(call_id.clone()),
                         reasoning_content: None,
@@ -3149,27 +3149,25 @@ fn wrap_non_object_tool_arguments(name: &str, value: serde_json::Value) -> Strin
 }
 
 /// Returns `(tool_content, optional_user_content)`:
-/// - `tool_content`: `Some(Value::String(..))` with the text portion for the tool message,
-///   or `None` when the body is empty.
+/// - `tool_content`: `Value::String(..)` with the text portion for the tool message,
+///   possibly empty. The Chat Completions API requires `content` on `role: "tool"`
+///   messages (strict providers reject missing/null content with errors such as
+///   "`content` must be provided for role `tool`" or "The content field is a
+///   required field"), so empty tool results keep an empty string instead of
+///   omitting the field.
 /// - `optional_user_content`: `Some(Value::Array(..))` with multipart content including
 ///   images when the body contains `InputImage` items, otherwise `None`.
 fn split_tool_output_into_tool_and_user_content(
     body: &codex_protocol::models::FunctionCallOutputBody,
-) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+) -> (serde_json::Value, Option<serde_json::Value>) {
     use codex_protocol::models::FunctionCallOutputBody;
     use codex_protocol::models::FunctionCallOutputContentItem;
 
     match body {
-        FunctionCallOutputBody::Text(text) => {
-            if text.is_empty() {
-                (None, None)
-            } else {
-                (Some(serde_json::Value::String(text.clone())), None)
-            }
-        }
+        FunctionCallOutputBody::Text(text) => (serde_json::Value::String(text.clone()), None),
         FunctionCallOutputBody::ContentItems(items) => {
             if items.is_empty() {
-                return (None, None);
+                return (serde_json::Value::String(String::new()), None);
             }
 
             let mut text_parts: Vec<String> = Vec::new();
@@ -3204,11 +3202,11 @@ fn split_tool_output_into_tool_and_user_content(
             }
 
             let tool_content = if text_parts.is_empty() {
-                // If there are only images, the tool message needs at least an empty
-                // string so it is not null (some providers reject null tool content).
-                Some(serde_json::Value::String("[image result]".to_string()))
+                // If there are only images, the tool message still needs some
+                // content (some providers reject null tool content).
+                serde_json::Value::String("[image result]".to_string())
             } else {
-                Some(serde_json::Value::String(text_parts.join("\n")))
+                serde_json::Value::String(text_parts.join("\n"))
             };
 
             let user_content = if image_parts.is_empty() {
@@ -4227,6 +4225,81 @@ mod chat_completions_request_tests {
         assert_eq!(arr[0]["type"], "image_url");
         assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,abc123");
         assert_eq!(arr[0]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn chat_completions_request_empty_text_tool_output_keeps_content_field() {
+        // Regression: strict Chat Completions providers reject `role: "tool"`
+        // messages without `content` (e.g. "`content` must be provided for role
+        // `tool`" or "The content field is a required field"), so empty tool
+        // results must serialize with an empty-string content.
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"true"}"#),
+            function_call_output("call-1", ""),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"true\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "",
+                    "tool_call_id": "call-1"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_empty_content_items_tool_output_keeps_content_field() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"true"}"#),
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "call-1".to_string(),
+                output: FunctionCallOutputPayload::from_content_items(Vec::new()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"true\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "",
+                    "tool_call_id": "call-1"
+                }
+            ])
+        );
     }
 
     #[test]
