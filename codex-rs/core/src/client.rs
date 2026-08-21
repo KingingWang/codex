@@ -2271,6 +2271,7 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
+        let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         let mut retry_count: u32 = 0;
         let mut auth_retry_count: u32 = 0;
@@ -2335,6 +2336,7 @@ impl ModelClientSession {
                     match handle_unauthorized(
                         unauthorized_transport,
                         &mut auth_recovery,
+                        &mut provider_auth_recovery_attempted,
                         session_telemetry,
                         &self.client.state.provider,
                     )
@@ -2440,6 +2442,7 @@ impl ModelClientSession {
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
+        let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         let mut retry_count: u32 = 0;
         let mut auth_retry_count: u32 = 0;
@@ -2497,6 +2500,7 @@ impl ModelClientSession {
                     match handle_unauthorized(
                         unauthorized_transport,
                         &mut auth_recovery,
+                        &mut provider_auth_recovery_attempted,
                         session_telemetry,
                         &self.client.state.provider,
                     )
