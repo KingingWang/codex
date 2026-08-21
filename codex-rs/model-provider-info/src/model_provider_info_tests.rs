@@ -578,6 +578,7 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
         .aws = Some(ModelProviderAwsAuthInfo {
         profile: None,
         region: None,
+        auth_refresh: None,
     });
 
     assert_eq!(
