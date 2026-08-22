@@ -547,10 +547,18 @@ pub struct ChatFunctionCallDelta {
 }
 
 /// Usage statistics for chat completions.
+///
+/// Some Chat Completions-compatible providers (for example MiniMax) send
+/// `usage` objects that omit `prompt_tokens`/`completion_tokens` in streaming
+/// chunks, so missing counts default to 0 instead of failing deserialization
+/// of the whole chunk (which would silently drop content deltas).
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionUsage {
+    #[serde(default)]
     pub prompt_tokens: i64,
+    #[serde(default)]
     pub completion_tokens: i64,
+    #[serde(default)]
     pub total_tokens: i64,
 }
 
@@ -667,6 +675,7 @@ pub(crate) fn normalize_chat_completion_tool_arguments(arguments: &str) -> Strin
 #[cfg(test)]
 mod chat_message_tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn normalizes_concatenated_tool_arguments_to_last_object() {
@@ -723,5 +732,20 @@ mod chat_message_tests {
             !json.contains("reasoning_content"),
             "should not contain reasoning_content when None"
         );
+    }
+
+    #[test]
+    fn parses_stream_event_when_usage_omits_token_counts() {
+        // MiniMax M3 streams `usage` objects without `prompt_tokens` or
+        // `completion_tokens`; the chunk must still parse so its content
+        // deltas are not dropped by the SSE processor.
+        let data = r#"{"id":"06d8bae5","choices":[{"finish_reason":"stop","index":0,"delta":{"content":"Hi there!","role":"assistant","name":"MiniMax AI","audio_content":"","reasoning_content":""}}],"created":1787398117,"model":"MiniMax-M3","object":"chat.completion.chunk","usage":{"total_tokens":10,"total_characters":9},"service_tier":"standard"}"#;
+        let event: ChatCompletionsStreamEvent = serde_json::from_str(data).unwrap();
+        assert_eq!(event.choices.len(), 1);
+        assert_eq!(event.choices[0].delta.content.as_deref(), Some("Hi there!"));
+        let usage = event.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 10);
     }
 }
