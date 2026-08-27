@@ -381,7 +381,10 @@ fn build_messages(items: &[ResponseItem]) -> CodexResult<Vec<AnthropicMessage>> 
             } => {
                 flush_assistant(&mut messages, &mut pending_assistant_blocks);
                 pending_thinking.clear();
-                let blocks = function_output_to_tool_result_blocks(call_id, &output.body);
+                let blocks = function_output_to_tool_result_blocks(
+                    call_id.as_deref().unwrap_or_default(),
+                    &output.body,
+                );
                 pending_user_blocks.extend(blocks);
             }
             ResponseItem::CustomToolCallOutput {
