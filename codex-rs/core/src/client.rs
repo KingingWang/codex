@@ -601,6 +601,7 @@ impl ModelClient {
                 ),
                 agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+                content_item_kinds_enabled: self.state.content_item_kinds_enabled,
             }),
             agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
@@ -2739,7 +2740,7 @@ impl ModelClientSession {
                         role: "tool".to_string(),
                         content: Some(tool_content),
                         tool_calls: None,
-                        tool_call_id: Some(call_id.clone()),
+                        tool_call_id: call_id.clone(),
                         reasoning_content: None,
                     });
                     if let Some(image_content) = user_image_content {
