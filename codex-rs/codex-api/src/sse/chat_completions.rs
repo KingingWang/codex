@@ -273,6 +273,7 @@ pub async fn process_chat_completions_sse(
                     response_id: String::new(),
                     token_usage: final_usage,
                     end_turn,
+                    usage_metadata: None,
                 }))
                 .await;
             return;

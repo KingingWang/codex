@@ -127,7 +127,7 @@ async fn start_review_conversation(
     sub_agent_config.model = Some(model);
 
     // If the review model specifies a provider, use it for the sub-agent session.
-    if let Some(provider_id) = ctx.model_info.provider.as_deref()
+    if let Some(provider_id) = ctx.model_info().provider.as_deref()
         && let Some(provider_info) = sub_agent_config.model_providers.get(provider_id)
     {
         sub_agent_config.model_provider_id = provider_id.to_string();
