@@ -479,6 +479,7 @@ pub async fn process_anthropic_sse(
                         response_id,
                         token_usage,
                         end_turn,
+                        usage_metadata: None,
                     }))
                     .await;
                 return;
@@ -600,6 +601,7 @@ mod tests {
                 response_id,
                 token_usage,
                 end_turn,
+                usage_metadata: _,
             }) => {
                 assert_eq!(response_id, "msg_1");
                 let usage = token_usage.as_ref().expect("usage");

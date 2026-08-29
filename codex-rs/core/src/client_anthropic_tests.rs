@@ -103,7 +103,9 @@ fn developer_message(text: &str) -> ResponseItem {
 fn function_output(call_id: &str, body: &str) -> ResponseItem {
     ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: call_id.to_string(),
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload {
             body: FunctionCallOutputBody::Text(body.to_string()),
             success: None,
