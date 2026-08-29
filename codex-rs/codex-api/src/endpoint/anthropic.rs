@@ -461,6 +461,7 @@ async fn convert_response_to_events(
             response_id,
             token_usage,
             end_turn,
+            usage_metadata: None,
         }))
         .await;
 }
