@@ -356,6 +356,7 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
         ApiError::ServerOverloaded => "HTTP 529 server overloaded".to_string(),
+        ApiError::RateLimitExceeded { .. } => "HTTP 429 rate limit exceeded".to_string(),
     }
 }
 
@@ -648,6 +649,7 @@ impl ModelClient {
             }),
             agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
+            free_guardian_enabled: self.free_guardian_enabled,
             http_client_factory: self.http_client_factory.clone(),
         }
     }
@@ -3441,6 +3443,7 @@ mod chat_completions_request_tests {
             SessionSource::Cli,
             /*originator*/ "test_originator".to_string(),
             /*model_verbosity*/ None,
+            /*content_item_kinds_enabled*/ false,
             /*enable_request_compression*/ false,
             /*include_timing_metrics*/ false,
             /*beta_features_header*/ None,
@@ -3484,6 +3487,7 @@ mod chat_completions_request_tests {
     fn test_prompt(input: Vec<ResponseItem>) -> Prompt {
         Prompt {
             input,
+            cyber_access_program: None,
             tools: vec![create_exec_command_tool(CommandToolOptions {
                 allow_login_shell: false,
                 exec_permission_approvals_enabled: false,
@@ -3574,7 +3578,9 @@ mod chat_completions_request_tests {
     fn function_call_output(call_id: &str, output: &str) -> ResponseItem {
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: call_id.to_string(),
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text(output.to_string()),
             internal_chat_message_metadata_passthrough: None,
         }
@@ -3606,7 +3612,9 @@ mod chat_completions_request_tests {
         use codex_protocol::models::FunctionCallOutputContentItem;
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: call_id.to_string(),
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::InputText {
                     text: text.to_string(),
@@ -4428,7 +4436,9 @@ mod chat_completions_request_tests {
             function_call("call-1", r#"{"cmd":"true"}"#),
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "call-1".to_string(),
+                call_id: Some("call-1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_content_items(Vec::new()),
                 internal_chat_message_metadata_passthrough: None,
             },

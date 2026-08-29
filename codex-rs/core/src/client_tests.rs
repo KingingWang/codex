@@ -350,6 +350,9 @@ fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
     )?;
     assert_ne!(independent.input[0].id(), changed_tools.input[0].id());
     assert_ne!(independent.input[1].id(), changed_tools.input[1].id());
+    Ok(())
+}
+
 #[tokio::test]
 async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyhow::Result<()> {
     let client = test_model_client(SessionSource::Cli);
