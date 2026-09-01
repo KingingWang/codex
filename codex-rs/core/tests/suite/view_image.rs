@@ -1595,7 +1595,7 @@ async fn view_image_tool_errors_when_file_missing() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> anyhow::Result<()> {
+async fn view_image_tool_is_hidden_for_text_only_model() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     // Use MockServer directly (not start_mock_server) so the first /models request returns our
@@ -1610,7 +1610,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
     let text_only_model = ModelInfo {
         slug: model_slug.to_string(),
         display_name: "Text-only view_image test model".to_string(),
-        description: Some("Remote model for view_image unsupported-path coverage".to_string()),
+        description: Some("Remote model for view_image gating coverage".to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),
         supported_reasoning_levels: vec![ReasoningEffortPreset {
             effort: ReasoningEffort::Medium,
@@ -1672,30 +1672,11 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
     let test = builder.build_with_auto_env(&server).await?;
     let TestCodex { codex, .. } = &test;
 
-    let rel_path = "assets/example.png";
-    write_workspace_png(
-        &test,
-        rel_path,
-        /*width*/ 20,
-        /*height*/ 20,
-        [255u8, 0, 0, 255],
-    )
-    .await?;
-
-    let call_id = "view-image-unsupported-model";
-    let arguments = serde_json::json!({ "path": rel_path }).to_string();
-    let first_response = sse(vec![
-        ev_response_created("resp-1"),
-        ev_function_call(call_id, "view_image", &arguments),
+    let response = sse(vec![
+        ev_assistant_message("msg-1", "done"),
         ev_completed("resp-1"),
     ]);
-    responses::mount_sse_once(&server, first_response).await;
-
-    let second_response = sse(vec![
-        ev_assistant_message("msg-1", "done"),
-        ev_completed("resp-2"),
-    ]);
-    let mock = responses::mount_sse_once(&server, second_response).await;
+    let mock = responses::mount_sse_once(&server, response).await;
 
     codex
         .start_or_steer_turn(disabled_user_turn(
@@ -1715,14 +1696,13 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
     )
     .await;
 
-    let output_text = mock
-        .single_request()
-        .function_call_output_content_and_success(call_id)
-        .and_then(|(content, _)| content)
-        .expect("output text present");
-    assert_eq!(
-        output_text,
-        "view_image is not allowed because you do not support image inputs"
+    let request = mock.single_request();
+    let view_image_present = request.body_json()["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "view_image"));
+    assert!(
+        !view_image_present,
+        "view_image should not be offered to text-only models"
     );
 
     Ok(())
