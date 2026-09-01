@@ -269,6 +269,7 @@ mod tests {
     use crate::environment_selection::TurnEnvironmentState;
     use crate::session::step_context::StepContext;
     use crate::session::tests::make_session_and_context;
+    use crate::session::tests::update_turn_settings_for_test;
     use crate::session::turn_context::TurnEnvironment;
     use crate::tools::context::ToolCallSource;
     use crate::tools::context::ToolInvocation;
@@ -424,6 +425,36 @@ mod tests {
             message,
             "view_image.detail only supports `high` or `original`; omit `detail` for default high resized behavior, got `low`"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_text_only_models() {
+        let (session, mut turn) = make_session_and_context().await;
+        update_turn_settings_for_test(&mut turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).input_modalities = vec![InputModality::Text];
+        });
+        let turn = Arc::new(turn);
+
+        let result = ViewImageHandler::default()
+            .handle(ToolInvocation {
+                session: Arc::new(session),
+                step_context: StepContext::for_test(Arc::clone(&turn)),
+                turn,
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+                tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
+                call_id: "call-view-image".to_string(),
+                tool_name: codex_tools::ToolName::plain("view_image"),
+                source: ToolCallSource::Direct,
+                payload: ToolPayload::Function {
+                    arguments: json!({ "path": "image.png" }).to_string(),
+                },
+            })
+            .await;
+
+        let Err(FunctionCallError::RespondToModel(message)) = result else {
+            panic!("expected unsupported modality error");
+        };
+        assert_eq!(message, VIEW_IMAGE_UNSUPPORTED_MESSAGE);
     }
 
     #[tokio::test(flavor = "multi_thread")]
