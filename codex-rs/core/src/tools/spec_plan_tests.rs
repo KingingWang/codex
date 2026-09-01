@@ -700,6 +700,27 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
 }
 
 #[tokio::test]
+async fn view_image_follows_model_image_input_support() {
+    // Baseline: image-capable models keep `view_image` when the feature is enabled.
+    let image_capable = probe(|turn| {
+        set_feature(turn, Feature::ViewImage, /*enabled*/ true);
+    })
+    .await;
+    image_capable.assert_visible_contains(&["view_image"]);
+
+    // Text-only models never see the tool, even with the feature enabled.
+    let text_only = probe(|turn| {
+        set_feature(turn, Feature::ViewImage, /*enabled*/ true);
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).input_modalities = vec![InputModality::Text];
+        });
+    })
+    .await;
+    text_only.assert_registered_lacks(&["view_image"]);
+    text_only.assert_visible_lacks(&["view_image"]);
+}
+
+#[tokio::test]
 async fn wait_for_environment_requires_feature_and_uses_host_config_when_present() {
     const TOOL_DESCRIPTION: &str = "Host-provided wait tool description";
     const ENVIRONMENT_ID_DESCRIPTION: &str = "Host-provided environment ID description";
