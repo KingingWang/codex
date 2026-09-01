@@ -622,6 +622,7 @@ impl ModelClient {
             agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
             free_guardian_enabled: self.free_guardian_enabled,
+            event_sender: self.event_sender.clone(),
             http_client_factory: self.http_client_factory.clone(),
         }
     }
@@ -2353,6 +2354,8 @@ impl ModelClientSession {
                         &mut provider_auth_recovery_attempted,
                         session_telemetry,
                         &self.client.state.provider,
+                        self.client.event_sender.as_ref(),
+                        responses_metadata.turn_id.as_deref(),
                     )
                     .await
                     {
@@ -2517,6 +2520,8 @@ impl ModelClientSession {
                         &mut provider_auth_recovery_attempted,
                         session_telemetry,
                         &self.client.state.provider,
+                        self.client.event_sender.as_ref(),
+                        /*turn_id*/ None,
                     )
                     .await
                     {
