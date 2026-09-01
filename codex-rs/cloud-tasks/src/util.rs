@@ -50,6 +50,7 @@ pub fn normalize_base_url(input: &str) -> String {
 
 /// Validate the destination before loading saved ChatGPT credentials, including in mock mode:
 /// environment discovery still makes authenticated HTTP requests when the task backend is mocked.
+#[allow(dead_code)]
 pub(crate) fn validate_chatgpt_base_url(input: &str) -> anyhow::Result<String> {
     let invalid_url = || {
         anyhow::anyhow!(
