@@ -733,6 +733,17 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
                 .is_some_and(AuthManager::current_auth_uses_codex_backend))
 }
 
+/// `view_image` is only useful when the model can consume images, so hide it
+/// from models whose catalog entry lacks the image input modality.
+fn view_image_available(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+    turn_context
+        .config
+        .features
+        .get()
+        .enabled(Feature::ViewImage)
+        && model_info.input_modalities.contains(&InputModality::Image)
+}
+
 fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOptions {
     if multi_agent_v2_enabled(turn_context) {
         return WaitAgentTimeoutOptions {
@@ -1008,7 +1019,7 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                 }));
                 registry.add(WriteStdinHandler);
             }
-            if turn_context.config.features.enabled(Feature::ViewImage) {
+            if view_image_available(turn_context, context.model_info) {
                 registry.add(ViewImageHandler::new(ViewImageToolOptions {
                     can_request_original_image_detail: can_request_original_image_detail(
                         context.model_info,
@@ -1250,7 +1261,8 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(TestSyncHandler);
     }
 
-    if environment_mode.has_environment() && features.enabled(Feature::ViewImage) {
+    if environment_mode.has_environment() && view_image_available(turn_context, context.model_info)
+    {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         registry.add(ViewImageHandler::new(ViewImageToolOptions {
             can_request_original_image_detail: can_request_original_image_detail(
