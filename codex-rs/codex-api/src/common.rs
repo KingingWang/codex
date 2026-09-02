@@ -432,6 +432,11 @@ pub struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
     pub stream: bool,
+    /// Cache-routing key sent on the wire as camelCase `promptCacheKey`,
+    /// matching the OpenCode-compatible Chat Completions contract. Always
+    /// serialized; omission is unrepresentable.
+    #[serde(rename = "promptCacheKey")]
+    pub prompt_cache_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -676,6 +681,45 @@ pub(crate) fn normalize_chat_completion_tool_arguments(arguments: &str) -> Strin
 mod chat_message_tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn chat_completions_request_serializes_prompt_cache_key_as_camel_case() {
+        let req = ChatCompletionsRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: Some(serde_json::Value::String("Hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            stream: false,
+            prompt_cache_key: "session-abc".to_string(),
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            reasoning_effort: None,
+            parallel_tool_calls: None,
+            service_tier: None,
+            tool_namespace_map: std::collections::HashMap::new(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": false,
+                "promptCacheKey": "session-abc",
+            })
+        );
+        assert!(
+            json.get("prompt_cache_key").is_none(),
+            "snake_case prompt_cache_key must not appear on the wire"
+        );
+    }
 
     #[test]
     fn normalizes_concatenated_tool_arguments_to_last_object() {
