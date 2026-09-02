@@ -168,7 +168,7 @@ pub const X_OPENAI_MEMGEN_REQUEST_HEADER: &str = "x-openai-memgen-request";
 pub const X_OPENAI_SUBAGENT_HEADER: &str = "x-openai-subagent";
 pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
-const X_CODEX_SESSION_ID_HEADER: &str = "x-codex-session-id";
+const X_SESSION_ID_HEADER: &str = "X-Session-Id";
 const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
     "x-codex-ws-stream-request-start-ms";
 const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
@@ -2300,8 +2300,12 @@ impl ModelClientSession {
                 self.client.state.auth_env_telemetry.clone(),
             );
 
-            let request =
-                self.build_chat_completions_request(prompt, model_info, effort.clone())?;
+            let request = self.build_chat_completions_request(
+                prompt,
+                model_info,
+                effort.clone(),
+                &responses_metadata.session_id,
+            )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.record_started(&request);
             let chat_stream = self.client.state.provider.info().chat_stream;
@@ -2316,7 +2320,7 @@ impl ModelClientSession {
                 HeaderValue::from_str(&responses_metadata.session_id).map_err(|err| {
                     CodexErr::InvalidRequest(format!("invalid Codex session ID header: {err}"))
                 })?;
-            extra_headers.insert(X_CODEX_SESSION_ID_HEADER, header_value);
+            extra_headers.insert(X_SESSION_ID_HEADER, header_value);
             let stream_result = client.request(request, extra_headers).await;
 
             match stream_result {
@@ -2593,6 +2597,7 @@ impl ModelClientSession {
         prompt: &Prompt,
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
+        session_id: &str,
     ) -> Result<ChatCompletionsRequest> {
         let instructions = &prompt.base_instructions.text;
         let input = prompt.get_formatted_input_for_request(false);
@@ -3004,6 +3009,7 @@ impl ModelClientSession {
             reasoning_effort,
             parallel_tool_calls: Some(prompt.parallel_tool_calls),
             service_tier: None, // TODO: wire through from config or turn settings
+            prompt_cache_key: session_id.to_owned(),
             tool_namespace_map,
         };
         Ok(request)
@@ -3522,7 +3528,12 @@ mod chat_completions_request_tests {
 
     fn build_request(input: Vec<ResponseItem>) -> ChatCompletionsRequest {
         test_model_session()
-            .build_chat_completions_request(&test_prompt(input), &test_model_info(), None)
+            .build_chat_completions_request(
+                &test_prompt(input),
+                &test_model_info(),
+                None,
+                "test-session",
+            )
             .expect("build chat completions request")
     }
 
