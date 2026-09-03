@@ -1,12 +1,12 @@
 //! Integration test: the Chat Completions outbound wire contract for prompt
 //! cache routing.
 //!
-//! Every `WireApi::Chat` request must carry the raw Codex session ID twice:
-//! as the camelCase body field `promptCacheKey` and as the `X-Session-Id`
-//! header, with equal values. The value must stay stable across turns of one
-//! session and differ across sessions. The legacy `x-codex-session-id`
-//! header and any `x-session-affinity` header must not be sent, and the body
-//! must not contain `prompt_cache_key` or other session-metadata keys.
+//! Mirroring OpenCode, every `WireApi::Chat` request must carry the raw Codex
+//! session ID in both `x-session-affinity` and `X-Session-Id` headers, and a
+//! matching camelCase body field `promptCacheKey`. The value must stay stable
+//! across turns of one session and differ across sessions. The legacy
+//! `x-codex-session-id` header must not be sent, and the body must not contain
+//! `prompt_cache_key` or other session-metadata keys.
 //!
 //! The contract is exercised at the outbound HTTP boundary for both response
 //! modes: non-streaming JSON (`chat_stream = false`) and streaming SSE
@@ -26,6 +26,7 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
+const X_SESSION_AFFINITY_HEADER: &str = "x-session-affinity";
 const X_SESSION_ID_HEADER: &str = "x-session-id";
 
 async fn build_chat_session(server: &MockServer, chat_stream: bool) -> Result<TestCodex> {
@@ -132,8 +133,38 @@ async fn assert_prompt_cache_wire_contract(chat_stream: bool) -> Result<()> {
         "`X-Session-Id` must be stable within a session and unique across sessions"
     );
 
-    for (request, header_session_id) in requests.iter().zip(session_ids.iter()) {
-        for forbidden_header in ["x-codex-session-id", "x-session-affinity"] {
+    let affinity_session_ids = requests
+        .iter()
+        .map(|request| {
+            request
+                .headers
+                .get(X_SESSION_AFFINITY_HEADER)
+                .expect("chat completions request should include an `x-session-affinity` header")
+                .to_str()
+                .expect("`x-session-affinity` should be a valid header value")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        affinity_session_ids,
+        vec![
+            first_session_id.as_str(),
+            first_session_id.as_str(),
+            second_session_id.as_str(),
+        ],
+        "`x-session-affinity` must be stable within a session and unique across sessions"
+    );
+
+    for (request, (header_session_id, affinity_session_id)) in requests
+        .iter()
+        .zip(session_ids.iter().zip(affinity_session_ids.iter()))
+    {
+        assert_eq!(
+            header_session_id, affinity_session_id,
+            "`X-Session-Id` and `x-session-affinity` must have the same session ID"
+        );
+
+        {
+            let forbidden_header = "x-codex-session-id";
             assert!(
                 !request.headers.contains_key(forbidden_header),
                 "chat completions request should not include a `{forbidden_header}` header"
