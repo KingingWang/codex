@@ -168,7 +168,9 @@ pub const X_OPENAI_MEMGEN_REQUEST_HEADER: &str = "x-openai-memgen-request";
 pub const X_OPENAI_SUBAGENT_HEADER: &str = "x-openai-subagent";
 pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
+const X_SESSION_AFFINITY_HEADER: &str = "x-session-affinity";
 const X_SESSION_ID_HEADER: &str = "X-Session-Id";
+const X_PARENT_SESSION_ID_HEADER: &str = "x-parent-session-id";
 const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
     "x-codex-ws-stream-request-start-ms";
 const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
@@ -2316,11 +2318,21 @@ impl ModelClientSession {
                 chat_stream,
             );
             let mut extra_headers = ApiHeaderMap::new();
-            let header_value =
-                HeaderValue::from_str(&responses_metadata.session_id).map_err(|err| {
+            let session_header_value = HeaderValue::from_str(&responses_metadata.session_id)
+                .map_err(|err| {
                     CodexErr::InvalidRequest(format!("invalid Codex session ID header: {err}"))
                 })?;
-            extra_headers.insert(X_SESSION_ID_HEADER, header_value);
+            extra_headers.insert(X_SESSION_AFFINITY_HEADER, session_header_value.clone());
+            extra_headers.insert(X_SESSION_ID_HEADER, session_header_value);
+            if let Some(parent_thread_id) = responses_metadata.parent_thread_id {
+                let parent_header_value = HeaderValue::from_str(&parent_thread_id.to_string())
+                    .map_err(|err| {
+                        CodexErr::InvalidRequest(format!(
+                            "invalid Codex parent session ID header: {err}"
+                        ))
+                    })?;
+                extra_headers.insert(X_PARENT_SESSION_ID_HEADER, parent_header_value);
+            }
             let stream_result = client.request(request, extra_headers).await;
 
             match stream_result {
@@ -3009,7 +3021,7 @@ impl ModelClientSession {
             reasoning_effort,
             parallel_tool_calls: Some(prompt.parallel_tool_calls),
             service_tier: None, // TODO: wire through from config or turn settings
-            prompt_cache_key: session_id.to_owned(),
+            prompt_cache_key: chat_completions_prompt_cache_key(session_id),
             tool_namespace_map,
         };
         Ok(request)
@@ -3427,10 +3439,33 @@ fn build_tool_namespace_map(tools: &[ToolSpec]) -> std::collections::HashMap<Str
     map
 }
 
+/// Mirrors OpenCode's Chat Completions prompt cache key normalization.
+///
+/// OpenCode session IDs are `ses_` followed by 64 lowercase hex characters.
+/// OpenAI's `prompt_cache_key` is limited to 64 characters, so OpenCode strips
+/// the `ses_` prefix for those IDs and otherwise keeps the session ID unchanged.
+/// Codex session IDs are UUIDs, so this is a no-op today, but the same contract
+/// keeps Codex aligned with OpenCode-flavoured gateways.
+fn chat_completions_prompt_cache_key(session_id: &str) -> String {
+    let Some(hex) = session_id.strip_prefix("ses_") else {
+        return session_id.to_owned();
+    };
+    let is_opencode_session_id = hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if is_opencode_session_id {
+        hex.to_owned()
+    } else {
+        session_id.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod chat_completions_request_tests {
     use super::ModelClient;
     use super::ModelClientSession;
+    use super::chat_completions_prompt_cache_key;
     use crate::client_common::Prompt;
     use crate::tools::handlers::shell_spec::CommandToolOptions;
     use crate::tools::handlers::shell_spec::create_exec_command_tool;
@@ -3535,6 +3570,41 @@ mod chat_completions_request_tests {
                 "test-session",
             )
             .expect("build chat completions request")
+    }
+
+    #[test]
+    fn chat_completions_prompt_cache_key_matches_opencode_normalization() {
+        let opencode_session = format!("ses_{}", "a".repeat(64));
+        assert_eq!(
+            chat_completions_prompt_cache_key(&opencode_session),
+            "a".repeat(64)
+        );
+
+        let already_bounded_session =
+            "ses_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            chat_completions_prompt_cache_key(already_bounded_session),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+
+        // Uppercase hex does not match OpenCode's `[0-9a-f]{64}` shape.
+        let uppercase_session = format!("ses_{}", "A".repeat(64));
+        assert_eq!(
+            chat_completions_prompt_cache_key(&uppercase_session),
+            uppercase_session
+        );
+
+        let too_short_session = format!("ses_{}", "a".repeat(63));
+        assert_eq!(
+            chat_completions_prompt_cache_key(&too_short_session),
+            too_short_session
+        );
+
+        let uuid_session = "019cf82b-6a62-7700-bbbd-46909794ef89";
+        assert_eq!(
+            chat_completions_prompt_cache_key(uuid_session),
+            uuid_session.to_owned()
+        );
     }
 
     fn test_model_session() -> ModelClientSession {
