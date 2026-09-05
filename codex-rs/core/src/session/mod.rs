@@ -110,6 +110,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
@@ -3676,6 +3677,37 @@ impl Session {
         ])
         .await;
         self.send_raw_response_items(turn_context, items).await;
+        // Surface the incoming inter-agent message in thread views. Raw
+        // response items are not part of transcript projections, so also emit
+        // a user-message turn item: in this thread the sending agent acts as
+        // the user that triggered or extended the turn. The displayed text is
+        // the same flattened envelope plus payload the model receives.
+        if let ResponseItem::AgentMessage { id, content, .. } = &items[0] {
+            let text: String = content
+                .iter()
+                .map(|part| match part {
+                    AgentMessageInputContent::InputText { text } => text.as_str(),
+                    AgentMessageInputContent::EncryptedContent { encrypted_content } => {
+                        encrypted_content.as_str()
+                    }
+                })
+                .collect();
+            if !text.trim().is_empty() {
+                let item = TurnItem::UserMessage(UserMessageItem {
+                    id: id
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    client_id: None,
+                    content: vec![UserInput::Text {
+                        text,
+                        text_elements: Vec::new(),
+                    }],
+                });
+                self.emit_turn_item_started(turn_context, &item).await;
+                self.emit_turn_item_completed(turn_context, item).await;
+            }
+        }
     }
 
     async fn maybe_warn_on_server_model_mismatch(

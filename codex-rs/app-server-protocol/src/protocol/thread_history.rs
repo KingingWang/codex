@@ -441,6 +441,40 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_response_item(&mut self, item: &codex_protocol::models::ResponseItem) {
+        if let codex_protocol::models::ResponseItem::AgentMessage { id, content, .. } = item {
+            // Incoming inter-agent messages are persisted as `agent_message`
+            // response items. Mirror the live turn-item emission so replays
+            // show the same user-message item the receiving thread rendered
+            // when the message was delivered.
+            let text = content
+                .iter()
+                .map(|part| match part {
+                    codex_protocol::models::AgentMessageInputContent::InputText { text } => {
+                        text.as_str()
+                    }
+                    codex_protocol::models::AgentMessageInputContent::EncryptedContent {
+                        encrypted_content,
+                    } => encrypted_content.as_str(),
+                })
+                .collect::<String>();
+            if text.trim().is_empty() {
+                return;
+            }
+            let id = id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| self.next_item_id());
+            self.push_item_in_current_turn(ThreadItem::UserMessage {
+                id,
+                client_id: None,
+                content: vec![UserInput::Text {
+                    text,
+                    text_elements: Vec::new(),
+                }],
+            });
+            return;
+        }
+
         let codex_protocol::models::ResponseItem::Message {
             role, content, id, ..
         } = item
@@ -4708,6 +4742,59 @@ mod tests {
         let turns = build_turns_from_rollout_items(&items);
         assert_eq!(turns.len(), 1);
         assert!(turns[0].items.is_empty());
+    }
+
+    #[test]
+    fn projects_agent_message_response_items_in_rollout_replay() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::ResponseItem(
+                codex_protocol::models::ResponseItem::AgentMessage {
+                    id: Some(codex_protocol::ResponseItemId::with_suffix("amsg", "1")),
+                    author: "/root".into(),
+                    recipient: "/root/probe".into(),
+                    content: vec![
+                        codex_protocol::models::AgentMessageInputContent::InputText {
+                            text: "Message Type: NEW_TASK\nTask name: /root/probe\nSender: /root\nPayload:\n".into(),
+                        },
+                        codex_protocol::models::AgentMessageInputContent::EncryptedContent {
+                            encrypted_content: "ZEBRA task text".into(),
+                        },
+                    ],
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            ),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                started_at: None,
+                last_agent_message: None,
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::UserMessage {
+                id: "amsg_1".into(),
+                client_id: None,
+                content: vec![UserInput::Text {
+                    text: "Message Type: NEW_TASK\nTask name: /root/probe\nSender: /root\nPayload:\nZEBRA task text".into(),
+                    text_elements: Vec::new(),
+                }],
+            }]
+        );
     }
 
     #[test]
