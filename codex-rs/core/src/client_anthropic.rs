@@ -53,6 +53,7 @@ use codex_api::AnthropicTool;
 use codex_api::AnthropicToolResultContent;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -70,16 +71,25 @@ const DEFAULT_MAX_TOKENS: u32 = 64000;
 
 /// Convert a `Prompt` into an `AnthropicRequest`. Honors the same cache-hit
 /// invariants documented at the module level.
+#[cfg(test)]
 pub(crate) fn build_anthropic_request(
     prompt: &Prompt,
     model_info: &ModelInfo,
+) -> CodexResult<AnthropicRequest> {
+    build_anthropic_request_with_agent_path(prompt, model_info, "/root")
+}
+
+pub(crate) fn build_anthropic_request_with_agent_path(
+    prompt: &Prompt,
+    model_info: &ModelInfo,
+    own_agent_path: &str,
 ) -> CodexResult<AnthropicRequest> {
     let formatted_input = prompt.get_formatted_input_for_request(false);
     let (lifted_system_blocks, remaining_input) = lift_agents_md_into_system(&formatted_input);
 
     let system = build_system(&prompt.base_instructions.text, &lifted_system_blocks);
 
-    let messages = build_messages(&remaining_input)?;
+    let messages = build_messages(&remaining_input, own_agent_path)?;
 
     let (tools, tool_namespace_map) = build_tools(&prompt.tools)?;
 
@@ -271,7 +281,10 @@ fn build_tool_namespace_map(tools: &[codex_tools::ToolSpec]) -> HashMap<String, 
 /// Convert codex `ResponseItem`s into Anthropic-shape messages while merging
 /// consecutive items that belong to the same logical turn. Anthropic strictly
 /// alternates user/assistant; we coalesce as needed.
-fn build_messages(items: &[ResponseItem]) -> CodexResult<Vec<AnthropicMessage>> {
+fn build_messages(
+    items: &[ResponseItem],
+    own_agent_path: &str,
+) -> CodexResult<Vec<AnthropicMessage>> {
     let mut messages: Vec<AnthropicMessage> = Vec::new();
     let mut pending_assistant_blocks: Vec<AnthropicContentBlock> = Vec::new();
     let mut pending_user_blocks: Vec<AnthropicContentBlock> = Vec::new();
@@ -338,6 +351,39 @@ fn build_messages(items: &[ResponseItem]) -> CodexResult<Vec<AnthropicMessage>> 
                     for block in content_items_to_blocks(content) {
                         pending_user_blocks.push(block);
                     }
+                }
+            }
+            ResponseItem::AgentMessage {
+                author, content, ..
+            } => {
+                let text = content
+                    .iter()
+                    .map(|part| match part {
+                        AgentMessageInputContent::InputText { text } => text.as_str(),
+                        AgentMessageInputContent::EncryptedContent { encrypted_content } => {
+                            encrypted_content.as_str()
+                        }
+                    })
+                    .collect::<String>();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if author == own_agent_path {
+                    flush_user(&mut messages, &mut pending_user_blocks);
+                    if !pending_thinking.is_empty() {
+                        pending_assistant_blocks.append(&mut pending_thinking);
+                    }
+                    pending_assistant_blocks.push(AnthropicContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    });
+                } else {
+                    flush_assistant(&mut messages, &mut pending_assistant_blocks);
+                    pending_thinking.clear();
+                    pending_user_blocks.push(AnthropicContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    });
                 }
             }
             ResponseItem::FunctionCall {

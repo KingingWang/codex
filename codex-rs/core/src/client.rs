@@ -85,6 +85,7 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -1053,6 +1054,15 @@ impl ModelClient {
             });
         }
         let is_openai = self.state.provider.info().is_openai();
+        if !is_openai {
+            let own_agent_path = self
+                .state
+                .session_source
+                .get_agent_path()
+                .unwrap_or_else(codex_protocol::AgentPath::root)
+                .to_string();
+            input = flatten_agent_messages_for_responses(input, &own_agent_path);
+        }
         let (instructions, tools) = if model_info.use_responses_lite {
             // These prompt-only items are rebuilt on every request. Hash their visible payloads
             // within the thread so retries and resumed sessions preserve their identity.
@@ -1394,6 +1404,61 @@ impl Drop for ModelClientSession {
         self.client
             .store_cached_websocket_session(websocket_session);
     }
+}
+
+fn agent_message_text(content: &[AgentMessageInputContent]) -> Option<String> {
+    let text = content
+        .iter()
+        .map(|part| match part {
+            AgentMessageInputContent::InputText { text } => text.as_str(),
+            AgentMessageInputContent::EncryptedContent { encrypted_content } => {
+                encrypted_content.as_str()
+            }
+        })
+        .collect::<String>();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn agent_message_role(author: &str, own_agent_path: &str) -> &'static str {
+    if author == own_agent_path {
+        "assistant"
+    } else {
+        "user"
+    }
+}
+
+fn flatten_agent_messages_for_responses(
+    input: Vec<ResponseItem>,
+    own_agent_path: &str,
+) -> Vec<ResponseItem> {
+    input
+        .into_iter()
+        .filter_map(|item| {
+            let ResponseItem::AgentMessage {
+                id,
+                author,
+                content,
+                ..
+            } = item
+            else {
+                return Some(item);
+            };
+            let text = agent_message_text(&content)?;
+            let role = agent_message_role(&author, own_agent_path);
+            let content = if role == "assistant" {
+                codex_protocol::models::ContentItem::OutputText { text }
+            } else {
+                codex_protocol::models::ContentItem::InputText { text }
+            };
+            Some(ResponseItem::Message {
+                id,
+                role: role.to_string(),
+                content: vec![content],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })
+        })
+        .collect()
 }
 
 impl ModelClientSession {
@@ -2489,7 +2554,18 @@ impl ModelClientSession {
                 self.client.state.auth_env_telemetry.clone(),
             );
 
-            let request = crate::client_anthropic::build_anthropic_request(prompt, model_info)?;
+            let own_agent_path = self
+                .client
+                .state
+                .session_source
+                .get_agent_path()
+                .unwrap_or_else(codex_protocol::AgentPath::root)
+                .to_string();
+            let request = crate::client_anthropic::build_anthropic_request_with_agent_path(
+                prompt,
+                model_info,
+                &own_agent_path,
+            )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.record_started(&request);
             let chat_stream = self.client.state.provider.info().chat_stream;
@@ -2948,6 +3024,43 @@ impl ModelClientSession {
                     if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
                         messages.append(&mut pending_warnings);
                     }
+                }
+                ResponseItem::AgentMessage {
+                    author, content, ..
+                } => {
+                    // The Responses API renders inter-agent messages natively, but the
+                    // Chat Completions API has no equivalent item type. Flatten the
+                    // message to plain text so the payload reaches the model instead
+                    // of being silently dropped. `EncryptedContent` is only opaque on
+                    // the wire to the OpenAI backend; locally it still holds the
+                    // payload text.
+                    let Some(text) = agent_message_text(content) else {
+                        continue;
+                    };
+                    let own_agent_path = self
+                        .client
+                        .state
+                        .session_source
+                        .get_agent_path()
+                        .unwrap_or_else(codex_protocol::AgentPath::root)
+                        .to_string();
+                    let role = agent_message_role(author, &own_agent_path);
+                    // Inter-agent messages are turn boundaries: flush any pending
+                    // assistant message and queued warnings first.
+                    if let Some(msg) = pending_assistant.take() {
+                        messages.push(msg);
+                    }
+                    pending_tool_outputs_in_turn = 0;
+                    if !pending_warnings.is_empty() {
+                        messages.append(&mut pending_warnings);
+                    }
+                    messages.push(ChatMessage {
+                        role: role.to_string(),
+                        content: Some(serde_json::Value::String(text)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    });
                 }
                 ResponseItem::Reasoning { .. } => {
                     // Reasoning belongs to the current assistant turn, so it should not flush a
@@ -3474,6 +3587,7 @@ mod chat_completions_request_tests {
     use codex_model_provider_info::create_oss_provider_with_base_url;
     use codex_protocol::ResponseItemId;
     use codex_protocol::ThreadId;
+    use codex_protocol::models::AgentMessageInputContent;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
@@ -3491,6 +3605,10 @@ mod chat_completions_request_tests {
     use codex_login::auth::AgentIdentityAuthPolicy;
 
     fn test_model_client() -> ModelClient {
+        test_model_client_with_session_source(SessionSource::Cli)
+    }
+
+    fn test_model_client_with_session_source(session_source: SessionSource) -> ModelClient {
         let provider =
             create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
         ModelClient::new(
@@ -3498,7 +3616,7 @@ mod chat_completions_request_tests {
             /*agent_identity_policy*/ AgentIdentityAuthPolicy::JwtOnly,
             ThreadId::new(),
             provider,
-            SessionSource::Cli,
+            session_source,
             /*originator*/ "test_originator".to_string(),
             /*model_verbosity*/ None,
             /*content_item_kinds_enabled*/ false,
@@ -3563,6 +3681,21 @@ mod chat_completions_request_tests {
 
     fn build_request(input: Vec<ResponseItem>) -> ChatCompletionsRequest {
         test_model_session()
+            .build_chat_completions_request(
+                &test_prompt(input),
+                &test_model_info(),
+                None,
+                "test-session",
+            )
+            .expect("build chat completions request")
+    }
+
+    fn build_request_with_session_source(
+        session_source: SessionSource,
+        input: Vec<ResponseItem>,
+    ) -> ChatCompletionsRequest {
+        test_model_client_with_session_source(session_source)
+            .new_session()
             .build_chat_completions_request(
                 &test_prompt(input),
                 &test_model_info(),
@@ -3682,6 +3815,30 @@ mod chat_completions_request_tests {
             output: FunctionCallOutputPayload::from_text(output.to_string()),
             internal_chat_message_metadata_passthrough: None,
         }
+    }
+
+    fn agent_message(
+        author: &str,
+        recipient: &str,
+        content: Vec<AgentMessageInputContent>,
+    ) -> ResponseItem {
+        ResponseItem::AgentMessage {
+            id: None,
+            author: author.to_string(),
+            recipient: recipient.to_string(),
+            content,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn subagent_session_source(agent_path: &str) -> SessionSource {
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(agent_path.parse().expect("valid agent path")),
+            agent_nickname: None,
+            agent_role: None,
+        })
     }
 
     fn custom_tool_call(call_id: &str, input: &str) -> ResponseItem {
@@ -3820,6 +3977,163 @@ mod chat_completions_request_tests {
                 {
                     "role": "user",
                     "content": "Warning: tool pressure warning"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_delivers_encrypted_agent_message_payload() {
+        // Subagent's view: the parent's task arrives as an AgentMessage whose
+        // payload lives in `encrypted_content` (see
+        // InterAgentCommunication::new_encrypted). The chat-completions
+        // request must carry the envelope and payload as plain text.
+        let request = build_request_with_session_source(
+            subagent_session_source("/root/probe"),
+            vec![agent_message(
+                "/root",
+                "/root/probe",
+                vec![
+                    AgentMessageInputContent::InputText {
+                        text: "Message Type: NEW_TASK\nTask name: /root/probe\nSender: /root\nPayload:\n"
+                            .to_string(),
+                    },
+                    AgentMessageInputContent::EncryptedContent {
+                        encrypted_content: "echo ZEBRA-7Q4K-1983".to_string(),
+                    },
+                ],
+            )],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "user",
+                    "content": "Message Type: NEW_TASK\nTask name: /root/probe\nSender: /root\nPayload:\necho ZEBRA-7Q4K-1983"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_delivers_plaintext_agent_message() {
+        let request = build_request(vec![agent_message(
+            "/root/worker",
+            "/root",
+            vec![AgentMessageInputContent::InputText {
+                text: "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\ndone"
+                    .to_string(),
+            }],
+        )]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "user",
+                    "content": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\ndone"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_marks_self_authored_agent_message_as_assistant() {
+        let request = build_request(vec![agent_message(
+            "/root",
+            "/root/worker",
+            vec![AgentMessageInputContent::InputText {
+                text: "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\nreview the diff"
+                    .to_string(),
+            }],
+        )]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\nreview the diff",
+                    "reasoning_content": "No reasoning required"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_flushes_pending_assistant_before_agent_message() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            agent_message(
+                "/root/worker",
+                "/root",
+                vec![AgentMessageInputContent::InputText {
+                    text: "Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\nping"
+                        .to_string(),
+                }],
+            ),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "user",
+                    "content": "Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\nping"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_skips_empty_agent_message_without_flushing_warnings() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"pwd"}"#),
+            warning_item("Warning: keep this with the tool turn"),
+            agent_message("/root/worker", "/root", Vec::new()),
+            function_call_output("call-1", "ok"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "ok",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "user",
+                    "content": "Warning: keep this with the tool turn"
                 }
             ])
         );

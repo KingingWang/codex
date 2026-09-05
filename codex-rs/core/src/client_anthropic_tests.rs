@@ -4,6 +4,7 @@ use super::*;
 use codex_api::AnthropicContentBlock;
 use codex_api::AnthropicImageSource;
 use codex_api::AnthropicMessageContent;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -110,6 +111,16 @@ fn function_output(call_id: &str, body: &str) -> ResponseItem {
             body: FunctionCallOutputBody::Text(body.to_string()),
             success: None,
         },
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn agent_message(author: &str, content: Vec<AgentMessageInputContent>) -> ResponseItem {
+    ResponseItem::AgentMessage {
+        id: None,
+        author: author.to_string(),
+        recipient: "/root".to_string(),
+        content,
         internal_chat_message_metadata_passthrough: None,
     }
 }
@@ -298,6 +309,58 @@ fn function_call_and_output_round_trip() {
         }
         other => panic!("expected ToolResult, got {other:?}"),
     }
+}
+
+#[test]
+fn agent_messages_are_preserved_for_anthropic_requests() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        agent_message(
+            "/root/worker",
+            vec![AgentMessageInputContent::InputText {
+                text: "Message Type: MESSAGE\nPayload:\nreply".to_string(),
+            }],
+        ),
+        agent_message(
+            "/root",
+            vec![
+                AgentMessageInputContent::InputText {
+                    text: "Message Type: NEW_TASK\nPayload:\n".to_string(),
+                },
+                AgentMessageInputContent::EncryptedContent {
+                    encrypted_content: "inspect the diff".to_string(),
+                },
+            ],
+        ),
+    ];
+    let req = build_anthropic_request_with_agent_path(&prompt, &test_model_info(), "/root")
+        .expect("build anthropic request");
+
+    assert_eq!(req.messages.len(), 2);
+    assert_eq!(req.messages[0].role, "user");
+    assert_eq!(req.messages[1].role, "assistant");
+    let user_blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(blocks) => blocks,
+        _ => panic!("expected user blocks"),
+    };
+    assert_eq!(
+        user_blocks,
+        &[AnthropicContentBlock::Text {
+            text: "Message Type: MESSAGE\nPayload:\nreply".to_string(),
+            cache_control: Some(AnthropicCacheControl::ephemeral()),
+        }]
+    );
+    let assistant_blocks = match &req.messages[1].content {
+        AnthropicMessageContent::Blocks(blocks) => blocks,
+        _ => panic!("expected assistant blocks"),
+    };
+    assert_eq!(
+        assistant_blocks,
+        &[AnthropicContentBlock::Text {
+            text: "Message Type: NEW_TASK\nPayload:\ninspect the diff".to_string(),
+            cache_control: None,
+        }]
+    );
 }
 
 #[test]
