@@ -2521,6 +2521,75 @@ async fn record_inter_agent_communication_preserves_item_id_in_rollout_and_resum
 }
 
 #[tokio::test]
+async fn record_inter_agent_communication_emits_user_message_turn_item() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let communication = InterAgentCommunication::new_encrypted(
+        AgentPath::root(),
+        AgentPath::root().join("probe").expect("probe path"),
+        Vec::new(),
+        "ZEBRA task text".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let ResponseItem::AgentMessage { content, .. } = communication.to_model_input_item() else {
+        panic!("expected an agent message input item");
+    };
+    let expected_text = content
+        .iter()
+        .map(|part| match part {
+            AgentMessageInputContent::InputText { text } => text.clone(),
+            AgentMessageInputContent::EncryptedContent { encrypted_content } => {
+                encrypted_content.clone()
+            }
+        })
+        .collect::<String>();
+    assert!(expected_text.contains("ZEBRA task text"));
+
+    session
+        .record_inter_agent_communication(&turn_context, communication)
+        .await;
+
+    let raw_response = rx.recv().await.expect("raw response item event");
+    assert!(matches!(raw_response.msg, EventMsg::RawResponseItem(_)));
+
+    let started = rx.recv().await.expect("started user message event");
+    let EventMsg::ItemStarted(ItemStartedEvent {
+        item: TurnItem::UserMessage(started_item),
+        ..
+    }) = &started.msg
+    else {
+        panic!(
+            "expected a started user message item, got {:?}",
+            started.msg
+        );
+    };
+    assert!(started_item.id.starts_with("amsg_"));
+    assert_eq!(started_item.client_id, None);
+    assert_eq!(
+        started_item.content,
+        vec![UserInput::Text {
+            text: expected_text.clone(),
+            text_elements: Vec::new(),
+        }]
+    );
+
+    let completed = rx.recv().await.expect("completed user message event");
+    let EventMsg::ItemCompleted(ItemCompletedEvent {
+        item: TurnItem::UserMessage(completed_item),
+        ..
+    }) = &completed.msg
+    else {
+        panic!(
+            "expected a completed user message item, got {:?}",
+            completed.msg
+        );
+    };
+    assert_eq!(completed_item.id, started_item.id);
+    assert_eq!(completed_item.content, started_item.content);
+
+    assert!(rx.try_recv().is_err(), "no extra events expected");
+}
+
+#[tokio::test]
 async fn prepares_image_failures_before_history_insertion() {
     let (session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
