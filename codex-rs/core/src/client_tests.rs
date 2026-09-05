@@ -47,6 +47,7 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
@@ -351,6 +352,74 @@ fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
     )?;
     assert_ne!(independent.input[0].id(), changed_tools.input[0].id());
     assert_ne!(independent.input[1].id(), changed_tools.input[1].id());
+    Ok(())
+}
+
+#[test]
+fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::AgentMessage {
+                id: None,
+                author: "/root/worker".to_string(),
+                recipient: "/root".to_string(),
+                content: vec![AgentMessageInputContent::InputText {
+                    text: "Message Type: MESSAGE\nPayload:\nfrom worker".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::AgentMessage {
+                id: None,
+                author: "/root".to_string(),
+                recipient: "/root/worker".to_string(),
+                content: vec![AgentMessageInputContent::EncryptedContent {
+                    encrypted_content: "Message Type: NEW_TASK\nPayload:\nfrom parent".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        ReasoningSummary::None,
+        /*service_tier*/ None,
+        &test_responses_metadata_for_client(
+            &client,
+            /*turn_id*/ None,
+            format!("{}:0", client.state.thread_id),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        ),
+    )?;
+
+    assert_eq!(
+        request.input,
+        vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Message Type: MESSAGE\nPayload:\nfrom worker".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "Message Type: NEW_TASK\nPayload:\nfrom parent".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]
+    );
+
     Ok(())
 }
 
