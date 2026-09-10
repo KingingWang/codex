@@ -152,7 +152,8 @@ jobs:
       - name: Set release version (commit-based)
         id: version
         run: |
-          VERSION="$(git show -s --date=format-utc:%Y%m%d-%H%M%S --format=%cd "${GITHUB_SHA}")"
+          COMMIT_TS="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          VERSION="$(date -u -d "@${COMMIT_TS}" '+%Y%m%d-%H%M%S')"
           echo "version=codex-${VERSION}" >> "$GITHUB_OUTPUT"
 
       # create-if-missing + upload --clobber：三个平台的 release job 完成
