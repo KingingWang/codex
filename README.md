@@ -359,6 +359,11 @@ curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patc
 ```
 
 ```bash
+# macOS 桌面端：用 fork 最新 release 替换内嵌 codex 二进制（幂等，已替换过会自动跳过）
+curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/replace-codex-desktop.sh | bash
+```
+
+```bash
 # macOS 桌面端解锁插件（需要输入密码,第一次启动app后需要读取钥匙串,输入密码后始终允许即可）
 curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlock-codex-plugins.sh | bash
 ```
@@ -375,7 +380,7 @@ curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlo
 | **macOS 签名** | 改 `.app` 内容会让原 notarization 失效；脚本会用 ad-hoc 重签 + 清 quarantine |
 | **macOS Codex 必须先退出** | 脚本会先 `pgrep` 检查，没退出会拒绝执行 |
 | **桌面端依赖** | 需要 `asar` 或 `npx`（脚本会自动用 `npx -y @electron/asar` 拉取） |
-| **回滚** | 两份脚本都会备份原文件到 `<target>.bak`；`--revert` 会从备份恢复 |
+| **回滚** | 各桌面端脚本都会备份原文件到 `<target>.bak`；`--revert` 会从备份恢复 |
 
 ---
 
