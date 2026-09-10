@@ -260,7 +260,13 @@ async fn convert_response_to_events(
     namespace_map: &std::collections::HashMap<String, String>,
 ) {
     let response_id = response.id.clone().unwrap_or_default();
-    if tx.send(Ok(ResponseEvent::Created)).await.is_err() {
+    if tx
+        .send(Ok(ResponseEvent::Created {
+            response_id: Some(response_id.clone()),
+        }))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -517,7 +523,7 @@ mod tests {
         let drain_handle = tokio::spawn(drain(rx));
         convert_response_to_events(response, tx, &namespace).await;
         let events = drain_handle.await.unwrap();
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(&events[1], Err(ApiError::Retryable { .. })));
     }
 
@@ -547,7 +553,7 @@ mod tests {
         convert_response_to_events(response, tx, &namespace).await;
         let events = drain_handle.await.unwrap();
 
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(&events[1], Ok(ResponseEvent::OutputItemAdded(_))));
         assert!(matches!(&events[2], Ok(ResponseEvent::OutputTextDelta(_))));
         assert!(matches!(&events[3], Ok(ResponseEvent::OutputItemDone(_))));
@@ -590,7 +596,7 @@ mod tests {
         convert_response_to_events(response, tx, &namespace).await;
         let events = drain_handle.await.unwrap();
 
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         match &events[1] {
             Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall {
                 name,

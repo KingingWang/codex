@@ -200,7 +200,13 @@ async fn convert_response_to_events(
     let response_id = response.id.clone();
     // Emit Created event first, consistent with the Responses API SSE stream
     // which sends Created before any output items.
-    if tx.send(Ok(ResponseEvent::Created)).await.is_err() {
+    if tx
+        .send(Ok(ResponseEvent::Created {
+            response_id: Some(response_id.clone()),
+        }))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -574,7 +580,7 @@ mod tests {
     async fn concatenated_tool_arguments_are_normalized() {
         let events = collect_events(concatenated_tool_arguments_response()).await;
 
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(
             &events[1],
             Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
@@ -600,7 +606,7 @@ mod tests {
             events.len() >= 2,
             "expected at least 2 events, got {events:?}"
         );
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(&events[1], Err(ApiError::Retryable { .. })));
     }
 
@@ -611,7 +617,7 @@ mod tests {
             events.len() >= 2,
             "expected at least 2 events, got {events:?}"
         );
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(&events[1], Err(ApiError::Retryable { .. })));
     }
 
@@ -622,7 +628,7 @@ mod tests {
             events.len() >= 2,
             "expected at least 2 events, got {events:?}"
         );
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(&events[1], Err(ApiError::Retryable { .. })));
     }
 
@@ -637,7 +643,7 @@ mod tests {
         //   [3] OutputItemDone(Message)     <- finalizes the item
         //   [4] Completed
         assert_eq!(events.len(), 5, "expected exactly 5 events, got {events:?}");
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(
             &events[1],
             Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }))
@@ -730,7 +736,7 @@ mod tests {
         // no second complete-reasoning event (AgentReasoningRawContent) is
         // emitted by the legacy event expansion.
         assert_eq!(events.len(), 3, "expected exactly 3 events, got {events:?}");
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(
             &events[1],
             Ok(ResponseEvent::OutputItemDone(

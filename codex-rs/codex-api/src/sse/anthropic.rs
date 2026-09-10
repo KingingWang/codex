@@ -127,7 +127,11 @@ pub async fn process_anthropic_sse(
     let mut stop_reason: Option<String> = None;
     let mut output_emitted = false;
 
-    if tx_event.send(Ok(ResponseEvent::Created)).await.is_err() {
+    if tx_event
+        .send(Ok(ResponseEvent::Created { response_id: None }))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -577,7 +581,7 @@ mod tests {
         // Expected: Created, OutputItemAdded(Message), OutputTextDelta("Hi"),
         // OutputTextDelta(" there"), OutputItemDone(Message), Completed
         assert_eq!(events.len(), 6, "events: {events:#?}");
-        assert!(matches!(&events[0], Ok(ResponseEvent::Created)));
+        assert!(matches!(&events[0], Ok(ResponseEvent::Created { .. })));
         assert!(matches!(
             &events[1],
             Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }))
@@ -657,7 +661,10 @@ mod tests {
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ];
         let events = collect_events(chunks).await;
-        assert!(matches!(events.first(), Some(Ok(ResponseEvent::Created))));
+        assert!(matches!(
+            events.first(),
+            Some(Ok(ResponseEvent::Created { .. }))
+        ));
         assert!(
             events
                 .iter()
