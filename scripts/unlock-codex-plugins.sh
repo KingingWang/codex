@@ -9,11 +9,49 @@
 # `openai-curated-remote` when you sign in with an API key. After patching,
 # `h` (the hidden-marketplace list) stays empty, so every marketplace shows.
 #
+# Signature: by default this only clears com.apple.quarantine and leaves the
+# app's Developer ID signature alone. Replacing app.asar does break the bundle
+# seal, but nothing on the launch path checks it, whereas an ad-hoc re-sign
+# swaps the main executable's identity and invalidates Keychain ACLs / TCC
+# grants / update checks that are bound to it. Pass --resign (or set
+# CODEX_RESIGN=1) if Gatekeeper actually blocks launch.
+#
 # Idempotent: if already patched it does NOTHING (no repack, no re-sign),
 # so re-running is 100% safe and never triggers Keychain prompts.
 # Re-run it once after every Codex auto-update.
 #
+# Usage:
+#   unlock-codex-plugins.sh             # patch (idempotent)
+#   unlock-codex-plugins.sh --resign    # additionally ad-hoc re-sign the bundle
+#   unlock-codex-plugins.sh --help
+#
 set -euo pipefail
+
+RESIGN=false
+[ -n "${CODEX_RESIGN:-}" ] && RESIGN=true
+RESIGNED=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --resign) RESIGN=true ;;
+        -h|--help)
+            cat <<'HELP'
+unlock-codex-plugins.sh — unlock all official plugin marketplaces in Codex macOS desktop
+
+Usage:
+  unlock-codex-plugins.sh             # patch (idempotent)
+  unlock-codex-plugins.sh --resign    # additionally ad-hoc re-sign the bundle
+  unlock-codex-plugins.sh --help
+
+Environment: CODEX_APP (default /Applications/Codex.app), CODEX_RESIGN=1 (same as --resign)
+
+By default the app's Developer ID signature is left untouched: only
+com.apple.quarantine is cleared. Add --resign if Gatekeeper blocks launch.
+HELP
+            exit 0 ;;
+        *) echo "ERROR: unknown argument: $1 (try --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
 
 APP="${CODEX_APP:-/Applications/Codex.app}"
 ASAR="$APP/Contents/Resources/app.asar"
@@ -29,6 +67,14 @@ trap cleanup EXIT
 green() { printf "\033[32m%s\033[0m\n" "$1"; }
 red()   { printf "\033[31m%s\033[0m\n" "$1"; }
 dim()   { printf "\033[2m%s\033[0m\n" "$1"; }
+
+# Is the bundle already ad-hoc signed? Deliberately avoids a pipeline: grep -q
+# exits early on a match, and pipefail would then report failure.
+app_is_adhoc_signed() {
+    local info
+    info="$(codesign -dvv "$APP" 2>&1 || true)"
+    [[ "$info" == *$'\n'Signature=adhoc* || "$info" == Signature=adhoc* ]]
+}
 
 # ---------- preflight ----------
 [ -d "$APP" ] || { red "ERROR: $APP not found."; exit 1; }
@@ -112,13 +158,21 @@ else
     dim "    app.asar.bak already exists — keeping the first backup."
 fi
 
-# ---------- replace + re-sign ----------
+# ---------- replace + clear quarantine ----------
 green "==> Replacing app.asar..."
 sudo cp "$PATCHED" "$ASAR"
 
-green "==> Re-signing app (ad-hoc)..."
-sudo codesign --force --deep --sign - "$APP" 2>/dev/null \
-    || { red "WARNING: codesign failed. Run manually:\n  sudo codesign --force --deep --sign - '$APP'"; }
+green "==> Clearing com.apple.quarantine..."
+sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+if [ "$RESIGN" != true ] && ! app_is_adhoc_signed; then
+    green "==> Keeping the app's original signature; not re-signing (--resign to force)"
+else
+    green "==> Re-signing app (ad-hoc)..."
+    sudo codesign --force --deep --sign - "$APP" 2>/dev/null \
+        || { red "WARNING: codesign failed. Run manually:\n  sudo codesign --force --deep --sign - '$APP'"; }
+    RESIGNED=true
+fi
 
 echo ""
 green "================ DONE ================"
@@ -128,8 +182,13 @@ green "  you should now see openai-curated /
   openai-curated-remote marketplaces too."
 dim ""
 dim "  Rollback: sudo cp '$ASAR_BAK' '$ASAR'"
-dim "            (then re-sign: sudo codesign --force --deep --sign - '$APP')"
-dim "  Note: first launch after this patch may"
-dim "  ask for Keychain access once (due to the"
-dim "  ad-hoc re-sign). Click 'Always Allow' or"
-dim "  re-login once in the app to silence it."
+if [ "$RESIGNED" = true ]; then
+    dim "            (then re-sign: sudo codesign --force --deep --sign - '$APP')"
+    dim "  Note: first launch after this patch may ask for"
+    dim "  Keychain access once (due to the ad-hoc re-sign)."
+    dim "  Click 'Always Allow' or re-login once to silence it."
+else
+    dim "            (no re-sign needed: original signature kept)"
+    dim "  Note: the app's Developer ID signature was left"
+    dim "  untouched, so Keychain/TCC grants keep working."
+fi

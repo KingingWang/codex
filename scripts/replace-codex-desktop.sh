@@ -19,10 +19,31 @@
 #        共享同一 tag 发布，因此 releases/latest/download/... 是固定 URL）；
 #   2. 安装到 ~/.codex/fork-desktop/codex（本脚本托管路径，属主是当前用户）；
 #   3. 把 app 内嵌路径备份为 codex.bak，替换为指向托管路径的软链；
-#   4. ad-hoc 重签 + 清 quarantine（改 .app 内容会让原 notarization 失效）。
+#   4. 清 quarantine（默认不重签，理由见下面「关于签名」）。
 #
 # 幂等：目标已经是软链（说明之前替换过，或用户手动替换过）时默认直接跳过，
 # 不做任何修改。
+#
+# 关于签名
+# --------
+# 只替换 Contents/Resources/codex 不会让 app 起不来，因为三道检查的作用域都不
+# 覆盖这个改动：
+#   - 内核 exec 时只验被启动的 Mach-O 自身签名，不验 bundle 的资源封印；
+#   - Gatekeeper 的整包评估只在首次启动（带 quarantine 时）发生一次；
+#   - library validation 只管加载进进程的 dylib，不管 spawn 出来的子进程。
+#
+# bundle 封印确实会破（codesign --verify 和 spctl --assess 都会失败），但启动
+# 路径上没有人去查它。所以默认只清 quarantine：那一步覆盖的是「装好还没启动过
+# 就改 bundle」的情况，此时首次启动会撞上整包评估并弹「已损坏」。
+#
+# ad-hoc 重签反而是更大的扰动：它把主程序的 Developer ID 身份换成 ad-hoc，
+# cdhash 变化会牵连按签名身份绑定的钥匙串 ACL、TCC 授权和自动更新校验。
+# 不重签还有个好处：--revert 还原原始二进制后，bundle 内容与原签名重新自洽，
+# 公证记录也跟着恢复。
+#
+# 确实撞到 Gatekeeper 拦截时用 --resign 兜底。另外，如果 app 当前已经是 ad-hoc
+# 签名（说明之前跑过旧版脚本、原始身份已丢失），脚本会继续 ad-hoc 重签以保持
+# 封印自洽——此时已经没有可保留的东西了。
 #
 # 用法
 # -----
@@ -32,6 +53,7 @@
 #   scripts/replace-codex-desktop.sh --revert            # 从 codex.bak 还原官方二进制
 #   scripts/replace-codex-desktop.sh --from-file ./codex # 用本地二进制替换（离线 / 自测）
 #   scripts/replace-codex-desktop.sh --release <tag>     # 用指定 release，而不是 latest
+#   scripts/replace-codex-desktop.sh --resign            # 额外 ad-hoc 重签整个 bundle（默认不重签）
 #   scripts/replace-codex-desktop.sh --help
 #
 # 环境变量：
@@ -39,6 +61,7 @@
 #   CODEX_FORK_REPO    覆盖 "owner/repo"（默认 KingingWang/codex）
 #   CODEX_FORK_DIR     托管二进制目录（默认 ~/.codex/fork-desktop）
 #   CODEX_RELEASE_URL  完整覆盖下载 URL（优先于 --release）
+#   CODEX_RESIGN       设成非空即等价于 --resign（方便 curl | bash 的用法）
 #
 # 需要：
 #   - macOS（会用 codesign、xattr、pgrep、file）
@@ -67,11 +90,14 @@ RELEASE_TAG=""
 FROM_FILE=""
 
 mode="patch"
+RESIGN=false
+[ -n "${CODEX_RESIGN:-}" ] && RESIGN=true
 while [ $# -gt 0 ]; do
   case "$1" in
     --update) mode="update" ;;
     --force) mode="force" ;;
     --revert) mode="revert" ;;
+    --resign) RESIGN=true ;;
     --release)
       [ $# -ge 2 ] || { echo "error: --release requires a tag" >&2; exit 2; }
       RELEASE_TAG="$2"; shift ;;
@@ -89,8 +115,10 @@ replace-codex-desktop.sh — 用 fork release 二进制替换 macOS 桌面端内
   replace-codex-desktop.sh --revert     # 从 codex.bak 还原
   replace-codex-desktop.sh --from-file <path>   # 用本地二进制（离线）
   replace-codex-desktop.sh --release <tag>      # 指定 release，而非 latest
+  replace-codex-desktop.sh --resign             # 额外 ad-hoc 重签（默认不重签）
 
 环境变量：CODEX_APP / CODEX_FORK_REPO / CODEX_FORK_DIR / CODEX_RELEASE_URL
+           CODEX_RESIGN=1 等价于 --resign
 HELP
       exit 0 ;;
     *) echo "error: unknown argument: $1 (try --help)" >&2; exit 2 ;;
@@ -100,6 +128,11 @@ done
 
 if [ -n "$FROM_FILE" ] && [ -n "$RELEASE_TAG" ]; then
   echo "error: --from-file and --release are mutually exclusive" >&2
+  exit 2
+fi
+
+if [ "$RESIGN" = true ] && [ "$mode" = "update" ]; then
+  echo "error: --resign does not apply to --update (the app bundle is not touched)" >&2
   exit 2
 fi
 
@@ -161,6 +194,8 @@ trap cleanup EXIT
 TMP_BIN="$TMPDIR_DL/codex"
 FETCHED_BIN=""
 BIN_VERSION=""
+SIG_NOTE=""
+DID_RESIGN=false
 
 # ---------------------------------------------------------------------------
 # 下载（或使用本地文件）+ 校验
@@ -214,15 +249,38 @@ install_managed() {
 }
 
 # ---------------------------------------------------------------------------
-# ad-hoc 重签 + 清 quarantine（改 .app 内容会让原 notarization 失效）
+# 清 quarantine（默认动作）；必要时 ad-hoc 重签（--resign，或 app 已是 ad-hoc）
 # ---------------------------------------------------------------------------
-resign_app() {
+# 判定当前 bundle 是否已经是 ad-hoc 签名。这里刻意不用管道：grep -q 命中后提前
+# 退出会让 pipefail 把成功误判成失败。
+app_is_adhoc_signed() {
+  local info
+  info="$(codesign -dvv "$APP" 2>&1 || true)"
+  [[ "$info" == *$'\n'Signature=adhoc* || "$info" == Signature=adhoc* ]]
+}
+
+unquarantine_app() {
+  step "Clearing com.apple.quarantine on app bundle"
+  sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+  if [ "$RESIGN" != true ]; then
+    if app_is_adhoc_signed; then
+      step "App is already ad-hoc signed; re-signing to keep the bundle seal consistent"
+    else
+      SIG_NOTE="original signature preserved (--resign to ad-hoc re-sign)"
+      DID_RESIGN=false
+      step "Keeping the app's original signature; not re-signing"
+      return 0
+    fi
+  fi
+
+  DID_RESIGN=true
+  SIG_NOTE="ad-hoc re-signed (original notarization no longer applies)"
   step "Re-signing app (ad-hoc). Watch for nested signing failures..."
   if ! sudo codesign --force --deep --sign - "$APP"; then
     echo "warning: codesign reported errors; app may fail to launch." >&2
     echo "         try manually: sudo codesign --force --deep --sign - '$APP'" >&2
   fi
-  sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 }
 
 verify_target() {
@@ -243,10 +301,14 @@ if [ "$mode" = "revert" ]; then
     sudo rm "$TARGET"
     step "Restoring original from backup: $BAK"
     sudo mv "$BAK" "$TARGET"
-    resign_app
+    unquarantine_app
     echo
     echo "============================================"
     echo "  Reverted. Restart Codex desktop to apply."
+    if [ "$DID_RESIGN" = false ]; then
+      echo "  No re-sign: if this was the only change to the bundle, the app's"
+      echo "  original signature and notarization are valid again."
+    fi
     echo "============================================"
     exit 0
   elif [ -L "$TARGET" ]; then
@@ -302,7 +364,7 @@ if [ -L "$TARGET" ]; then
       install_managed
       step "Re-pointing symlink -> $MANAGED_BIN"
       sudo ln -sfn "$MANAGED_BIN" "$TARGET"
-      resign_app
+      unquarantine_app
       verify_target
       ;;
   esac
@@ -321,7 +383,7 @@ elif [ -e "$TARGET" ]; then
   sudo mv "$TARGET" "$BAK"
   step "Installing symlink -> $MANAGED_BIN"
   sudo ln -s "$MANAGED_BIN" "$TARGET"
-  resign_app
+  unquarantine_app
   verify_target
 else
   die "codex binary not found at: $TARGET
@@ -336,6 +398,7 @@ echo
 echo "  Managed binary : $MANAGED_BIN"
 echo "  Version        : $BIN_VERSION"
 echo "  Original backup: $BAK (if created)"
+echo "  Signature      : $SIG_NOTE"
 echo
 echo "  Next: launch Codex desktop."
 echo "  Upgrade later:  $0 --update"

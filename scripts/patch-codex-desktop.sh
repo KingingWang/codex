@@ -36,6 +36,7 @@
 # -----
 #   scripts/patch-codex-desktop.sh             # patch（幂等，可重复运行）
 #   scripts/patch-codex-desktop.sh --revert    # 从 .bak 还原
+#   scripts/patch-codex-desktop.sh --resign    # 额外 ad-hoc 重签整个 bundle（默认不重签）
 #   scripts/patch-codex-desktop.sh --help
 #
 # 需要：
@@ -45,9 +46,11 @@
 #
 # 重要：
 #   - 每次 Codex 桌面端自动更新都会覆盖被 patch 的 app.asar；升级后重跑一次即可
-#   - 改 .app 内容会让原 notarization 失效；脚本会用 ad-hoc 重签 + 清 quarantine
-#   - 如果 .app 自带 privileged helper / 嵌套 framework，ad-hoc 签可能签不全，
-#     脚本会把 codesign 的 stderr 显示出来让你看
+#   - 改 app.asar 会破坏 bundle 封印，但启动路径上不校验它，所以默认只清
+#     quarantine、不重签，保留 app 原来的 Developer ID 身份与公证记录；撞到
+#     Gatekeeper 拦截时加 --resign 兜底（app 已是 ad-hoc 签名时会自动重签）
+#   - 用了 --resign 时，如果 .app 自带 privileged helper / 嵌套 framework，
+#     ad-hoc 签可能签不全，脚本会把 codesign 的 stderr 显示出来让你看
 #   - 替换 app.asar 之前必须退出 Codex，脚本会先 pgrep 检查
 #
 # 退出码：
@@ -84,15 +87,20 @@ PATCHED_RE='([A-Za-z_$][A-Za-z_$0-9]*=false[;,]|!1\?[A-Za-z_$][A-Za-z_$0-9.]*\.h
 # 模式解析
 # ---------------------------------------------------------------------------
 mode="patch"
-case "${1:-}" in
-  --revert) mode="revert" ;;
-  -h|--help)
-    cat <<'HELP'
+RESIGN=false
+[ -n "${CODEX_RESIGN:-}" ] && RESIGN=true
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --revert) mode="revert" ;;
+    --resign) RESIGN=true ;;
+    -h|--help)
+      cat <<'HELP'
 patch-codex-desktop.sh — 让 macOS 版 Codex 桌面端显示 model_catalog_json 里的全部模型
 
 用法：
   patch-codex-desktop.sh             # patch（幂等，可重复运行）
   patch-codex-desktop.sh --revert    # 从 .bak 还原
+  patch-codex-desktop.sh --resign    # 额外 ad-hoc 重签整个 bundle（默认不重签）
   patch-codex-desktop.sh --help
 
 需要：
@@ -101,13 +109,16 @@ patch-codex-desktop.sh — 让 macOS 版 Codex 桌面端显示 model_catalog_jso
   - sudo 写权限（写入 /Applications 或 ~/Applications 下的 .app）
 
 每次 Codex 桌面端自动更新都会覆盖被 patch 的 app.asar；升级后重跑一次即可。
-改 .app 内容会让原 notarization 失效；脚本会用 ad-hoc 重签 + 清 quarantine。
+改 app.asar 会破坏 bundle 封印，但启动路径上不校验它，所以默认只清 quarantine、
+不重签，保留 app 原来的 Developer ID 身份与公证记录。撞到 Gatekeeper 拦截时再加
+--resign（也可以设 CODEX_RESIGN=1，方便 curl | bash 的用法）。
 HELP
-    exit 0
-    ;;
-  "") : ;;
-  *) echo "error: unknown argument: ${1:-} (try --help)" >&2; exit 2 ;;
-esac
+      exit 0
+      ;;
+    *) echo "error: unknown argument: $1 (try --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 # ---------------------------------------------------------------------------
 # 拒绝在非 macOS 上跑
@@ -196,6 +207,48 @@ trap cleanup EXIT
 EXTRACTED="$TMPDIR_PATCH/extracted"
 PACKED="$TMPDIR_PATCH/app-patched.asar"
 VERIFY_DIR="$TMPDIR_PATCH/verify"
+DID_RESIGN=false
+
+# ---------------------------------------------------------------------------
+# 清 quarantine（默认动作）；必要时 ad-hoc 重签（--resign，或 app 已是 ad-hoc）
+#
+# 只换 Contents/Resources/app.asar 不会让 app 起不来：内核 exec 时只验被启动的
+# Mach-O 自身签名，Gatekeeper 的整包评估只在带 quarantine 的首次启动发生一次，
+# library validation 只管加载进进程的 dylib。封印确实会破（codesign --verify 和
+# spctl --assess 都会失败），但启动路径上没有人去查它。
+#
+# ad-hoc 重签反而是更大的扰动：它把主程序的 Developer ID 身份换成 ad-hoc，
+# cdhash 变化会牵连按签名身份绑定的钥匙串 ACL、TCC 授权和自动更新校验。
+# ---------------------------------------------------------------------------
+# 判定当前 bundle 是否已经是 ad-hoc 签名。刻意不用管道：grep -q 命中后提前退出
+# 会让 pipefail 把成功误判成失败。
+app_is_adhoc_signed() {
+  local info
+  info="$(codesign -dvv "$APP" 2>&1 || true)"
+  [[ "$info" == *$'\n'Signature=adhoc* || "$info" == Signature=adhoc* ]]
+}
+
+unquarantine_app() {
+  echo "==> Clearing com.apple.quarantine on app bundle"
+  sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+  if [ "$RESIGN" != true ]; then
+    if app_is_adhoc_signed; then
+      echo "==> App is already ad-hoc signed; re-signing to keep the bundle seal consistent"
+    else
+      echo "==> Keeping the app's original signature; not re-signing (use --resign to force)"
+      DID_RESIGN=false
+      return 0
+    fi
+  fi
+
+  DID_RESIGN=true
+  echo "==> Re-signing app (ad-hoc). Watch the output for any nested failures..."
+  if ! sudo codesign --force --deep --sign - "$APP"; then
+    echo "warning: codesign reported errors above. App may fail to launch." >&2
+    echo "         try manually: sudo codesign --force --deep --sign - '$APP'" >&2
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Revert 模式
@@ -209,16 +262,15 @@ if [ "$mode" = "revert" ]; then
   echo "==> Restoring app.asar from backup..."
   sudo cp -p "$ASAR_BAK" "$ASAR"
 
-  echo "==> Re-signing app (ad-hoc)..."
-  if ! sudo codesign --force --deep --sign - "$APP"; then
-    echo "warning: codesign reported errors above. App may fail to launch." >&2
-    echo "         try manually: sudo codesign --force --deep --sign - '$APP'" >&2
-  fi
-  sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+  unquarantine_app
 
   echo
   echo "============================================"
   echo "  Reverted. Restart Codex desktop to apply."
+  if [ "$DID_RESIGN" = false ]; then
+    echo "  No re-sign: if this was the only change to the bundle, the app's"
+    echo "  original signature and notarization are valid again."
+  fi
   echo "============================================"
   exit 0
 fi
@@ -342,16 +394,8 @@ echo "==> Installing patched asar..."
 sudo install -o root -g admin -m 0644 "$PACKED" "$ASAR.tmp.$$"
 sudo mv -f "$ASAR.tmp.$$" "$ASAR"
 
-# 9. re-sign + clean quarantine --------------------------------------------
-echo "==> Re-signing app (ad-hoc). Watch the output for any nested failures..."
-if ! sudo codesign --force --deep --sign - "$APP"; then
-  echo "warning: codesign reported errors above." >&2
-  echo "         App may fail to launch. Try manually:" >&2
-  echo "           sudo codesign --force --deep --sign - '$APP'" >&2
-  echo "         then:" >&2
-  echo "           sudo xattr -dr com.apple.quarantine '$APP'" >&2
-fi
-sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+# 9. clean quarantine (+ optional ad-hoc re-sign) ----------------------------
+unquarantine_app
 
 # ---------------------------------------------------------------------------
 echo
