@@ -42,7 +42,8 @@ Usage:
   unlock-codex-plugins.sh --resign    # additionally ad-hoc re-sign the bundle
   unlock-codex-plugins.sh --help
 
-Environment: CODEX_APP (default /Applications/Codex.app), CODEX_RESIGN=1 (same as --resign)
+Environment: CODEX_APP (default: auto-detect ChatGPT.app, fall back to Codex.app),
+             CODEX_RESIGN=1 (same as --resign)
 
 By default the app's Developer ID signature is left untouched: only
 com.apple.quarantine is cleared. Add --resign if Gatekeeper blocks launch.
@@ -53,7 +54,21 @@ HELP
     shift
 done
 
-APP="${CODEX_APP:-/Applications/Codex.app}"
+# ---------- locate the desktop .app ----------
+# OpenAI renamed the desktop app from Codex.app to ChatGPT.app (2025-07). Both
+# share the same Contents/Resources/app.asar layout and the same webview
+# filter, so prefer the new name and fall back to the old one. CODEX_APP
+# overrides the lookup.
+APP="${CODEX_APP:-}"
+if [ -z "$APP" ]; then
+    for candidate in \
+        "/Applications/ChatGPT.app" \
+        "/Applications/Codex.app" \
+        "$HOME/Applications/ChatGPT.app" \
+        "$HOME/Applications/Codex.app"; do
+        if [ -d "$candidate" ]; then APP="$candidate"; break; fi
+    done
+fi
 ASAR="$APP/Contents/Resources/app.asar"
 ASAR_BAK="$APP/Contents/Resources/app.asar.bak"
 TMPDIR=$(mktemp -d /tmp/codex-plugin-unlock.XXXXXX)
@@ -77,7 +92,11 @@ app_is_adhoc_signed() {
 }
 
 # ---------- preflight ----------
-[ -d "$APP" ] || { red "ERROR: $APP not found."; exit 1; }
+if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+    red "ERROR: ChatGPT.app / Codex.app not found under /Applications or \$HOME/Applications."
+    red "       set CODEX_APP=/path/to/ChatGPT.app to override."
+    exit 1
+fi
 [ -f "$ASAR" ] || { red "ERROR: $ASAR not found."; exit 1; }
 
 # ---------- auto-install @electron/asar if missing ----------

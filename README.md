@@ -376,7 +376,7 @@ curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlo
 | **生效** | VS Code: `Ctrl/Cmd+Shift+P → Developer: Reload Window`；macOS: 重启 Codex |
 | **升级后** | 每次客户端自动升级都会覆盖被 patch 的资源，重跑一次即可 |
 | **VS Code 扫描范围** | `~/.vscode{,-server}{,-insiders}/extensions`、`~/.cursor{,-server}/extensions` |
-| **macOS .app 位置** | `/Applications/Codex.app` 或 `~/Applications/Codex.app`，可用 `CODEX_APP=` 环境变量覆盖 |
+| **macOS .app 位置** | 自动探测 `/Applications/ChatGPT.app`（新名字，优先）→ `/Applications/Codex.app`（旧名字）→ `~/Applications/` 下同名两者；可用 `CODEX_APP=` 环境变量覆盖 |
 | **macOS 签名** | 改 `.app` 内容会破坏 bundle 封印，但启动路径上不校验它（内核 exec 只验被启动的 Mach-O，Gatekeeper 整包评估只在带 quarantine 的首次启动发生一次）。三个桌面端脚本默认都只清 quarantine、保留原 Developer ID 签名与公证记录；撞到 Gatekeeper 拦截时加 `--resign`（或设 `CODEX_RESIGN=1`），app 已是 ad-hoc 签名时会自动重签 |
 | **macOS Codex 必须先退出** | 脚本会先 `pgrep` 检查，没退出会拒绝执行 |
 | **桌面端依赖** | 需要 `asar` 或 `npx`（脚本会自动用 `npx -y @electron/asar` 拉取） |
