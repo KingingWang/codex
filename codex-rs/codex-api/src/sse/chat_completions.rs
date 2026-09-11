@@ -296,10 +296,10 @@ pub async fn process_chat_completions_sse(
         if let Some(usage) = &event.usage {
             final_usage = Some(TokenUsage {
                 input_tokens: usage.prompt_tokens,
-                cached_input_tokens: 0,
+                cached_input_tokens: usage.cached_input_tokens(),
                 cache_write_input_tokens: 0,
                 output_tokens: usage.completion_tokens,
-                reasoning_output_tokens: 0,
+                reasoning_output_tokens: usage.reasoning_output_tokens(),
                 total_tokens: usage.total_tokens,
                 codex_rollout_budget_units: None,
             });
@@ -626,6 +626,31 @@ mod tests {
         ));
         assert!(matches!(&events[3], Ok(ResponseEvent::OutputItemDone(_))));
         assert!(matches!(&events[4], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn usage_chunk_reports_cached_prompt_tokens() {
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,\"prompt_tokens_details\":{\"cached_tokens\":64},\"completion_tokens_details\":{\"reasoning_tokens\":7}}}\n\n";
+        let chunk3 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3]).await;
+
+        match events.last().expect("a Completed event") {
+            Ok(ResponseEvent::Completed { token_usage, .. }) => assert_eq!(
+                token_usage.as_ref(),
+                Some(&TokenUsage {
+                    input_tokens: 100,
+                    cached_input_tokens: 64,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 20,
+                    reasoning_output_tokens: 7,
+                    total_tokens: 120,
+                    codex_rollout_budget_units: None,
+                })
+            ),
+            other => panic!("expected a Completed event, got {other:?}"),
+        }
     }
 
     #[tokio::test]

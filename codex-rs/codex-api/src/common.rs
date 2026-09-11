@@ -429,6 +429,17 @@ impl Stream for ResponseStream {
 
 // Chat Completions API types
 
+/// Streaming options for Chat Completions requests, sent as `stream_options`.
+///
+/// `include_usage` asks OpenAI-compatible servers to append a trailing
+/// `choices: []` chunk that carries `usage`. Servers that follow the OpenAI
+/// contract omit usage from streams entirely without it, which would leave
+/// token and prompt-cache accounting at zero.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatStreamOptions {
+    pub include_usage: bool,
+}
+
 /// Request for the OpenAI Chat Completions API (`/v1/chat/completions`).
 #[derive(Debug, Serialize, Clone)]
 pub struct ChatCompletionsRequest {
@@ -439,6 +450,10 @@ pub struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
     pub stream: bool,
+    /// Streaming-only options, sent on the wire as `stream_options`. Always
+    /// `None` for non-streaming requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<ChatStreamOptions>,
     /// Cache-routing key sent on the wire as camelCase `promptCacheKey`,
     /// matching the OpenCode-compatible Chat Completions contract. Always
     /// serialized; omission is unrepresentable.
@@ -572,6 +587,64 @@ pub struct ChatCompletionUsage {
     pub completion_tokens: i64,
     #[serde(default)]
     pub total_tokens: i64,
+    /// OpenAI-style prompt token breakdown, which carries the prompt-cache hit
+    /// count for providers that report one.
+    #[serde(default)]
+    pub prompt_tokens_details: Option<ChatCompletionPromptTokensDetails>,
+    /// DeepSeek-style prompt-cache hit count, for providers that report cache
+    /// usage without `prompt_tokens_details`.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<i64>,
+    /// OpenAI-style completion token breakdown (`completion_tokens_details`),
+    /// which carries the reasoning token count for reasoning models.
+    #[serde(default)]
+    pub completion_tokens_details: Option<ChatCompletionOutputTokensDetails>,
+}
+
+impl ChatCompletionUsage {
+    /// Number of prompt tokens served from the provider's prompt cache.
+    ///
+    /// `prompt_tokens` already includes this count, mirroring the Responses API
+    /// contract where `cached_input_tokens` is a subset of `input_tokens`.
+    pub fn cached_input_tokens(&self) -> i64 {
+        // Providers report cache hits in one of two shapes; both agree when a
+        // provider sends them together.
+        let details = self
+            .prompt_tokens_details
+            .as_ref()
+            .map(|prompt_tokens_details| prompt_tokens_details.cached_tokens)
+            .unwrap_or(0);
+        details
+            .max(self.prompt_cache_hit_tokens.unwrap_or(0))
+            .max(0)
+    }
+
+    /// Number of output tokens the model spent on reasoning.
+    ///
+    /// `completion_tokens` already includes this count, mirroring how the
+    /// Responses API reports `reasoning_tokens` as a subset of `output_tokens`.
+    pub fn reasoning_output_tokens(&self) -> i64 {
+        self.completion_tokens_details
+            .as_ref()
+            .map(|details| details.reasoning_tokens)
+            .unwrap_or(0)
+            .max(0)
+    }
+}
+
+/// Prompt token breakdown reported by Chat Completions-compatible providers.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionPromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: i64,
+}
+
+/// Completion token breakdown reported by Chat Completions-compatible
+/// providers on the wire as `completion_tokens_details`.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionOutputTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: i64,
 }
 
 /// Non-streaming response from the chat/completions API.
@@ -689,9 +762,8 @@ mod chat_message_tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    #[test]
-    fn chat_completions_request_serializes_prompt_cache_key_as_camel_case() {
-        let req = ChatCompletionsRequest {
+    fn chat_request(stream: bool) -> ChatCompletionsRequest {
+        ChatCompletionsRequest {
             model: "gpt-4o".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
@@ -702,7 +774,8 @@ mod chat_message_tests {
             }],
             tools: Vec::new(),
             tool_choice: None,
-            stream: false,
+            stream,
+            stream_options: None,
             prompt_cache_key: "session-abc".to_string(),
             temperature: None,
             max_tokens: None,
@@ -711,7 +784,12 @@ mod chat_message_tests {
             parallel_tool_calls: None,
             service_tier: None,
             tool_namespace_map: std::collections::HashMap::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn chat_completions_request_serializes_prompt_cache_key_as_camel_case() {
+        let req = chat_request(/*stream*/ false);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(
             json,
@@ -725,6 +803,27 @@ mod chat_message_tests {
         assert!(
             json.get("prompt_cache_key").is_none(),
             "snake_case prompt_cache_key must not appear on the wire"
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_serializes_stream_options() {
+        let mut streaming = chat_request(/*stream*/ true);
+        streaming.stream_options = Some(ChatStreamOptions {
+            include_usage: true,
+        });
+
+        let json = serde_json::to_value(&streaming).expect("serialize streaming request");
+        assert_eq!(
+            json.get("stream_options"),
+            Some(&serde_json::json!({ "include_usage": true }))
+        );
+
+        let non_streaming =
+            serde_json::to_value(chat_request(/*stream*/ false)).expect("serialize request");
+        assert!(
+            non_streaming.get("stream_options").is_none(),
+            "non-streaming requests must not send stream_options, got {non_streaming}"
         );
     }
 
@@ -783,6 +882,56 @@ mod chat_message_tests {
             !json.contains("reasoning_content"),
             "should not contain reasoning_content when None"
         );
+    }
+
+    #[test]
+    fn chat_completion_usage_reads_reasoning_tokens_from_details() {
+        let usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "completion_tokens_details": { "reasoning_tokens": 7 },
+        }))
+        .expect("parse usage with completion details");
+        assert_eq!(usage.reasoning_output_tokens(), 7);
+
+        let without_details: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+        }))
+        .expect("parse usage without completion details");
+        assert_eq!(without_details.reasoning_output_tokens(), 0);
+    }
+
+    #[test]
+    fn chat_completion_usage_reads_cache_hits_from_either_wire_shape() {
+        let openai_usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": { "cached_tokens": 64 },
+        }))
+        .expect("parse OpenAI-style usage");
+        assert_eq!(openai_usage.cached_input_tokens(), 64);
+
+        let deepseek_usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_cache_hit_tokens": 64,
+            "prompt_cache_miss_tokens": 36,
+        }))
+        .expect("parse DeepSeek-style usage");
+        assert_eq!(deepseek_usage.cached_input_tokens(), 64);
+
+        let uncached_usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+        }))
+        .expect("parse usage without cache details");
+        assert_eq!(uncached_usage.cached_input_tokens(), 0);
     }
 
     #[test]

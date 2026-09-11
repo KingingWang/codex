@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::auth::SharedAuthProvider;
 use crate::common::ChatCompletionsRequest;
 use crate::common::ChatCompletionsResponse;
+use crate::common::ChatStreamOptions;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::common::normalize_chat_completion_tool_arguments;
@@ -86,6 +87,12 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
         extra_headers: HeaderMap,
     ) -> Result<ResponseStream, ApiError> {
         req.stream = true;
+        // Servers following the OpenAI contract only report `usage` on a stream
+        // when it is explicitly requested; without the trailing usage chunk
+        // token and prompt-cache accounting stay at zero.
+        req.stream_options = Some(ChatStreamOptions {
+            include_usage: true,
+        });
 
         let body = serde_json::to_value(&req).map_err(|e| {
             ApiError::Stream(format!("failed to encode chat completions request: {e}"))
@@ -219,10 +226,10 @@ async fn convert_response_to_events(
 
     let token_usage = response.usage.map(|u| TokenUsage {
         input_tokens: u.prompt_tokens,
-        cached_input_tokens: 0,
+        cached_input_tokens: u.cached_input_tokens(),
         cache_write_input_tokens: 0,
         output_tokens: u.completion_tokens,
-        reasoning_output_tokens: 0,
+        reasoning_output_tokens: u.reasoning_output_tokens(),
         total_tokens: u.total_tokens,
         codex_rollout_budget_units: None,
     });
@@ -450,6 +457,8 @@ fn extract_reasoning_text(reasoning: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::ChatCompletionOutputTokensDetails;
+    use crate::common::ChatCompletionPromptTokensDetails;
     use crate::common::ChatCompletionResponseChoice;
     use crate::common::ChatCompletionResponseFunction;
     use crate::common::ChatCompletionResponseMessage;
@@ -545,6 +554,9 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                prompt_tokens_details: None,
+                prompt_cache_hit_tokens: None,
+                completion_tokens_details: None,
             }),
         }
     }
@@ -671,6 +683,58 @@ mod tests {
             events.iter().all(std::result::Result::is_ok),
             "expected all Ok events, got {events:?}"
         );
+    }
+
+    fn cached_prompt_tokens_response() -> ChatCompletionsResponse {
+        ChatCompletionsResponse {
+            id: "resp-cached".to_string(),
+            object: "chat.completion".to_string(),
+            created: Some(1234567890),
+            model: Some("test-model".to_string()),
+            choices: vec![ChatCompletionResponseChoice {
+                index: 0,
+                message: ChatCompletionResponseMessage {
+                    role: "assistant".to_string(),
+                    content: Some("Hello!".to_string()),
+                    tool_calls: None,
+                    reasoning: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(ChatCompletionUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+                prompt_tokens_details: Some(ChatCompletionPromptTokensDetails {
+                    cached_tokens: 64,
+                }),
+                prompt_cache_hit_tokens: None,
+                completion_tokens_details: Some(ChatCompletionOutputTokensDetails {
+                    reasoning_tokens: 7,
+                }),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_event_reports_cached_prompt_tokens() {
+        let events = collect_events(cached_prompt_tokens_response()).await;
+
+        match events.last().expect("a Completed event") {
+            Ok(ResponseEvent::Completed { token_usage, .. }) => assert_eq!(
+                token_usage.as_ref(),
+                Some(&TokenUsage {
+                    input_tokens: 100,
+                    cached_input_tokens: 64,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 20,
+                    reasoning_output_tokens: 7,
+                    total_tokens: 120,
+                    codex_rollout_budget_units: None,
+                })
+            ),
+            other => panic!("expected a Completed event, got {other:?}"),
+        }
     }
 
     fn reasoning_only_response() -> ChatCompletionsResponse {

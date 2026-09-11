@@ -123,6 +123,7 @@ pub async fn process_anthropic_sse(
     // Final usage rolled up across message_start + message_delta.
     let mut input_tokens: i64 = 0;
     let mut cached_input_tokens: i64 = 0;
+    let mut cache_write_input_tokens: i64 = 0;
     let mut output_tokens: i64 = 0;
     let mut stop_reason: Option<String> = None;
     let mut output_emitted = false;
@@ -196,6 +197,7 @@ pub async fn process_anthropic_sse(
                         &usage,
                         &mut input_tokens,
                         &mut cached_input_tokens,
+                        &mut cache_write_input_tokens,
                         &mut output_tokens,
                     );
                 }
@@ -408,6 +410,7 @@ pub async fn process_anthropic_sse(
                         &usage,
                         &mut input_tokens,
                         &mut cached_input_tokens,
+                        &mut cache_write_input_tokens,
                         &mut output_tokens,
                     );
                 }
@@ -471,7 +474,7 @@ pub async fn process_anthropic_sse(
                 let token_usage = Some(TokenUsage {
                     input_tokens,
                     cached_input_tokens,
-                    cache_write_input_tokens: 0,
+                    cache_write_input_tokens,
                     output_tokens,
                     reasoning_output_tokens: 0,
                     total_tokens: total,
@@ -513,6 +516,7 @@ fn accumulate_usage(
     usage: &AnthropicUsage,
     input_tokens: &mut i64,
     cached_input_tokens: &mut i64,
+    cache_write_input_tokens: &mut i64,
     output_tokens: &mut i64,
 ) {
     // Anthropic reports `input_tokens` as the count it actually billed for the
@@ -525,6 +529,7 @@ fn accumulate_usage(
     let cache_creation = usage.cache_creation().max(0);
     *input_tokens += input + cache_read + cache_creation;
     *cached_input_tokens += cache_read;
+    *cache_write_input_tokens += cache_creation;
     *output_tokens += usage.output_tokens.max(0);
 }
 
@@ -687,9 +692,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_read_tokens_roll_into_cached_input() {
+    async fn cache_tokens_roll_into_usage() {
         let chunks: &[&[u8]] = &[
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_5\",\"usage\":{\"input_tokens\":3,\"cache_read_input_tokens\":97,\"output_tokens\":0}}}\n\n",
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_5\",\"usage\":{\"input_tokens\":3,\"cache_read_input_tokens\":97,\"cache_creation_input_tokens\":20,\"output_tokens\":0}}}\n\n",
             b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
             b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
             b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
@@ -699,13 +704,18 @@ mod tests {
         let events = collect_events(chunks).await;
         let last = events.last().unwrap();
         match last {
-            Ok(ResponseEvent::Completed { token_usage, .. }) => {
-                let usage = token_usage.as_ref().unwrap();
-                assert_eq!(usage.input_tokens, 100);
-                assert_eq!(usage.cached_input_tokens, 97);
-                assert_eq!(usage.output_tokens, 2);
-                assert_eq!(usage.total_tokens, 102);
-            }
+            Ok(ResponseEvent::Completed { token_usage, .. }) => assert_eq!(
+                token_usage.as_ref(),
+                Some(&TokenUsage {
+                    input_tokens: 120,
+                    cached_input_tokens: 97,
+                    cache_write_input_tokens: 20,
+                    output_tokens: 2,
+                    reasoning_output_tokens: 0,
+                    total_tokens: 122,
+                    codex_rollout_budget_units: None,
+                })
+            ),
             other => panic!("expected Completed, got {other:?}"),
         }
     }

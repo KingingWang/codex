@@ -3139,6 +3139,9 @@ impl ModelClientSession {
             tools,
             tool_choice: Some(serde_json::Value::String("auto".to_string())),
             stream: false,
+            // Set by the Chat Completions endpoint when it upgrades the request
+            // to SSE streaming.
+            stream_options: None,
             temperature: None,
             max_tokens: None,
             stop: None,
