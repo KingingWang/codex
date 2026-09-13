@@ -2799,6 +2799,7 @@ impl ModelClientSession {
         // Queue them until the current assistant tool-result block is complete,
         // or we reach a non-tool boundary.
         let mut pending_warnings: Vec<ChatMessage> = Vec::new();
+        let mut pending_tool_image_parts: Vec<serde_json::Value> = Vec::new();
         let mut pending_tool_outputs_in_turn = 0usize;
         for (idx, item) in input.iter().enumerate() {
             let reasoning = reasoning_by_index.get(&idx).cloned();
@@ -2870,6 +2871,7 @@ impl ModelClientSession {
                         if let Some(msg) = pending_assistant.take() {
                             messages.push(msg);
                         }
+                        flush_pending_tool_images(&mut messages, &mut pending_tool_image_parts);
                         pending_tool_outputs_in_turn = 0;
                         if !pending_warnings.is_empty() {
                             messages.append(&mut pending_warnings);
@@ -2986,18 +2988,15 @@ impl ModelClientSession {
                         tool_call_id: call_id.clone(),
                         reasoning_content: None,
                     });
-                    if let Some(image_content) = user_image_content {
-                        messages.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: Some(image_content),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                        });
+                    if let Some(serde_json::Value::Array(image_parts)) = user_image_content {
+                        pending_tool_image_parts.extend(image_parts);
                     }
                     pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
-                    if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
-                        messages.append(&mut pending_warnings);
+                    if pending_tool_outputs_in_turn == 0 {
+                        flush_pending_tool_images(&mut messages, &mut pending_tool_image_parts);
+                        if !pending_warnings.is_empty() {
+                            messages.append(&mut pending_warnings);
+                        }
                     }
                 }
                 ResponseItem::CustomToolCallOutput {
@@ -3022,18 +3021,15 @@ impl ModelClientSession {
                         tool_call_id: Some(call_id.clone()),
                         reasoning_content: None,
                     });
-                    if let Some(image_content) = user_image_content {
-                        messages.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: Some(image_content),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                        });
+                    if let Some(serde_json::Value::Array(image_parts)) = user_image_content {
+                        pending_tool_image_parts.extend(image_parts);
                     }
                     pending_tool_outputs_in_turn = pending_tool_outputs_in_turn.saturating_sub(1);
-                    if pending_tool_outputs_in_turn == 0 && !pending_warnings.is_empty() {
-                        messages.append(&mut pending_warnings);
+                    if pending_tool_outputs_in_turn == 0 {
+                        flush_pending_tool_images(&mut messages, &mut pending_tool_image_parts);
+                        if !pending_warnings.is_empty() {
+                            messages.append(&mut pending_warnings);
+                        }
                     }
                 }
                 ResponseItem::AgentMessage {
@@ -3061,6 +3057,7 @@ impl ModelClientSession {
                     if let Some(msg) = pending_assistant.take() {
                         messages.push(msg);
                     }
+                    flush_pending_tool_images(&mut messages, &mut pending_tool_image_parts);
                     pending_tool_outputs_in_turn = 0;
                     if !pending_warnings.is_empty() {
                         messages.append(&mut pending_warnings);
@@ -3083,6 +3080,7 @@ impl ModelClientSession {
                     if let Some(msg) = pending_assistant.take() {
                         messages.push(msg);
                     }
+                    flush_pending_tool_images(&mut messages, &mut pending_tool_image_parts);
                     pending_tool_outputs_in_turn = 0;
                     if !pending_warnings.is_empty() {
                         messages.append(&mut pending_warnings);
@@ -3094,6 +3092,7 @@ impl ModelClientSession {
         if let Some(msg) = pending_assistant.take() {
             messages.push(msg);
         }
+        flush_pending_tool_images(&mut messages, &mut pending_tool_image_parts);
         if !pending_warnings.is_empty() {
             messages.append(&mut pending_warnings);
         }
@@ -3546,6 +3545,31 @@ fn split_tool_output_into_tool_and_user_content(
         }
     }
 }
+
+/// Flushes accumulated tool-result image parts into a single `role: "user"`
+/// multipart message.
+///
+/// Strict Chat Completions providers require every assistant tool call to be
+/// followed directly by the corresponding `role: "tool"` message. Tool results
+/// that contain images are therefore queued until all tool results in the
+/// current assistant turn have been emitted, then materialized as one user
+/// message to avoid inserting a user message between consecutive tool results.
+fn flush_pending_tool_images(
+    messages: &mut Vec<ChatMessage>,
+    image_parts: &mut Vec<serde_json::Value>,
+) {
+    if image_parts.is_empty() {
+        return;
+    }
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: Some(serde_json::Value::Array(std::mem::take(image_parts))),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    });
+}
+
 /// Builds a map from flat tool name to namespace prefix for MCP tools.
 /// When the Chat Completions API returns a tool call with a flat name like
 /// `ast_grep_search`, this map lets us look up the namespace (e.g. `omx_code_intel__`)
@@ -4817,6 +4841,70 @@ mod chat_completions_request_tests {
         assert_eq!(arr[0]["type"], "image_url");
         assert_eq!(arr[0]["image_url"]["url"], "data:image/png;base64,abc123");
         assert_eq!(arr[0]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn chat_completions_request_parallel_tool_outputs_defer_image_user_message() {
+        let request = build_request(vec![
+            function_call("call-1", r#"{"cmd":"view_image"}"#),
+            function_call("call-2", r#"{"cmd":"pwd"}"#),
+            function_call_output_with_image(
+                "call-1",
+                "Here is the image:",
+                "data:image/png;base64,abc123",
+            ),
+            function_call_output("call-2", "second"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).expect("serialize messages"),
+            json!([
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"view_image\"}"
+                            }
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }
+                    ],
+                    "reasoning_content": "No reasoning required"
+                },
+                {
+                    "role": "tool",
+                    "content": "Here is the image:",
+                    "tool_call_id": "call-1"
+                },
+                {
+                    "role": "tool",
+                    "content": "second",
+                    "tool_call_id": "call-2"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,abc123",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
     }
 
     #[test]
