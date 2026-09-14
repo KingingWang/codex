@@ -514,11 +514,11 @@ fn reasoning_effort_in_request(
     effort: ReasoningEffort,
 ) -> ReasoningEffort {
     let client = test_model_client(session_source);
-    client
+    let responses_effort = client
         .build_responses_request(
             &Prompt::default(),
             model_info,
-            Some(effort),
+            Some(effort.clone()),
             codex_protocol::config_types::ReasoningSummary::None,
             /*service_tier*/ None,
             &test_responses_metadata_for_client(
@@ -532,8 +532,20 @@ fn reasoning_effort_in_request(
         .expect("build responses request")
         .reasoning
         .expect("request should include reasoning")
-        .effort
-        .expect("request should include reasoning effort")
+        .effort;
+    let chat_effort = client
+        .new_session()
+        .build_chat_completions_request(
+            &Prompt::default(),
+            model_info,
+            Some(effort),
+            "test-session",
+        )
+        .expect("build chat completions request")
+        .reasoning_effort;
+
+    assert_eq!(chat_effort, responses_effort);
+    responses_effort.expect("request should include reasoning effort")
 }
 
 #[test]

@@ -3125,12 +3125,10 @@ impl ModelClientSession {
             ));
         }
 
-        // Determine reasoning_effort for models that support reasoning
-        let reasoning_effort = if model_info.supports_reasoning_summary_parameter {
-            effort.or_else(|| model_info.default_reasoning_level.clone())
-        } else {
-            None
-        };
+        let reasoning_effort = self
+            .client
+            .build_reasoning(model_info, effort, ReasoningSummaryConfig::None)
+            .effort;
 
         let request = ChatCompletionsRequest {
             model: model_info.slug.clone(),
