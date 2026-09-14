@@ -311,13 +311,19 @@ codex
 
 ---
 
-## Codex 客户端模型列表补丁（VS Code / macOS 桌面端）
+## Codex 客户端模型列表补丁（VS Code 扩展）
 
 ### 现象
 
 CLI 已经能正确加载 `model_catalog_json` 里所有 `visibility:"list"` 的模型
 （GLM / Qwen / MiniMax / DeepSeek / Kimi / Claude / ring 等），但
-**VS Code 扩展和 macOS 桌面端的模型选择器里只显示 `gpt-*`**。
+**VS Code 扩展的模型选择器里只显示 `gpt-*`**。
+
+> macOS 桌面端历史上也有同样的问题，旧版本需要用补丁脚本修前端过滤、
+> 还需要单独的脚本解锁插件显示；新版官方桌面端已经不再过滤模型，也
+> 不再隐藏插件，对应的 `patch-codex-desktop.sh` 和
+> `unlock-codex-plugins.sh` 已移除。桌面端现在只需要下面的
+> `replace-codex-desktop.sh`（把内嵌 codex 二进制换成 fork 版本）。
 
 ### 根因（简版）
 
@@ -343,7 +349,7 @@ r.forEach(n => {
 脚本托管在本仓库的 `scripts/` 目录，通过 GitHub raw URL 拉取执行：
 
 ```
-https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-<target>.sh
+https://raw.githubusercontent.com/KingingWang/codex/main/scripts/<script>.sh
 ```
 
 ### patch命令(直接复制运行即可)
@@ -354,18 +360,8 @@ curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patc
 ```
 
 ```bash
-# macOS 桌面端（需要输入密码）
-curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/patch-codex-desktop.sh | bash
-```
-
-```bash
 # macOS 桌面端：用 fork 最新 release 替换内嵌 codex 二进制（幂等，已替换过会自动跳过）
 curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/replace-codex-desktop.sh | bash
-```
-
-```bash
-# macOS 桌面端解锁插件（需要输入密码,第一次启动app后需要读取钥匙串,输入密码后始终允许即可）
-curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlock-codex-plugins.sh | bash
 ```
 
 
@@ -377,10 +373,9 @@ curl -fsSL https://raw.githubusercontent.com/KingingWang/codex/main/scripts/unlo
 | **升级后** | 每次客户端自动升级都会覆盖被 patch 的资源，重跑一次即可 |
 | **VS Code 扫描范围** | `~/.vscode{,-server}{,-insiders}/extensions`、`~/.cursor{,-server}/extensions` |
 | **macOS .app 位置** | 自动探测 `/Applications/ChatGPT.app`（新名字，优先）→ `/Applications/Codex.app`（旧名字）→ `~/Applications/` 下同名两者；可用 `CODEX_APP=` 环境变量覆盖 |
-| **macOS 签名** | 改 `.app` 内容会破坏 bundle 封印，但启动路径上不校验它（内核 exec 只验被启动的 Mach-O，Gatekeeper 整包评估只在带 quarantine 的首次启动发生一次）。三个桌面端脚本默认都只清 quarantine、保留原 Developer ID 签名与公证记录；撞到 Gatekeeper 拦截时加 `--resign`（或设 `CODEX_RESIGN=1`），app 已是 ad-hoc 签名时会自动重签 |
+| **macOS 签名** | 改 `.app` 内容会破坏 bundle 封印，但启动路径上不校验它（内核 exec 只验被启动的 Mach-O，Gatekeeper 整包评估只在带 quarantine 的首次启动发生一次）。桌面端脚本默认只清 quarantine、保留原 Developer ID 签名与公证记录；撞到 Gatekeeper 拦截时加 `--resign`（或设 `CODEX_RESIGN=1`），app 已是 ad-hoc 签名时会自动重签 |
 | **macOS Codex 必须先退出** | 脚本会先 `pgrep` 检查，没退出会拒绝执行 |
-| **桌面端依赖** | 需要 `asar` 或 `npx`（脚本会自动用 `npx -y @electron/asar` 拉取） |
-| **回滚** | 各桌面端脚本都会备份原文件到 `<target>.bak`；`--revert` 会从备份恢复 |
+| **回滚** | 脚本会备份原始二进制到 `codex.bak`；`--revert` 会从备份恢复 |
 
 ---
 
