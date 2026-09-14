@@ -17,7 +17,11 @@
 #   1. 从 fork 的 GitHub Release 固定链接下载当前架构的裸二进制
 #      （release 由 rust-release-simple{,-macos,-windows} 三个 workflow
 #        共享同一 tag 发布，因此 releases/latest/download/... 是固定 URL）；
-#   2. 安装到 ~/.codex/fork-desktop/codex（本脚本托管路径，属主是当前用户）；
+#      下载结果按 release tag 缓存在 ~/.codex/fork-desktop/releases/ 下：
+#      桌面端自动更新后重跑本脚本时，若缓存里已有同一 tag 的二进制，
+#      校验通过就直接复用，不再重新下载；
+#   2. 安装到 ~/.codex/fork-desktop/codex（本脚本托管路径；命中缓存时
+#      是指向缓存文件的软链，否则是二进制副本）；
 #   3. 把 app 内嵌路径备份为 codex.bak，替换为指向托管路径的软链；
 #   4. 清 quarantine（默认不重签，理由见下面「关于签名」）。
 #
@@ -53,6 +57,7 @@
 #   scripts/replace-codex-desktop.sh --revert            # 从 codex.bak 还原官方二进制
 #   scripts/replace-codex-desktop.sh --from-file ./codex # 用本地二进制替换（离线 / 自测）
 #   scripts/replace-codex-desktop.sh --release <tag>     # 用指定 release，而不是 latest
+#   scripts/replace-codex-desktop.sh --no-cache          # 不使用/不写入二进制缓存
 #   scripts/replace-codex-desktop.sh --resign            # 额外 ad-hoc 重签整个 bundle（默认不重签）
 #   scripts/replace-codex-desktop.sh --help
 #
@@ -61,6 +66,7 @@
 #   CODEX_FORK_REPO    覆盖 "owner/repo"（默认 KingingWang/codex）
 #   CODEX_FORK_DIR     托管二进制目录（默认 ~/.codex/fork-desktop）
 #   CODEX_RELEASE_URL  完整覆盖下载 URL（优先于 --release）
+#   CODEX_NO_CACHE     设成非空即等价于 --no-cache
 #   CODEX_RESIGN       设成非空即等价于 --resign（方便 curl | bash 的用法）
 #
 # 需要：
@@ -91,11 +97,13 @@ FROM_FILE=""
 
 mode="patch"
 RESIGN=false
+NO_CACHE=false
+[ -n "${CODEX_NO_CACHE:-}" ] && NO_CACHE=true
 [ -n "${CODEX_RESIGN:-}" ] && RESIGN=true
 while [ $# -gt 0 ]; do
   case "$1" in
     --update) mode="update" ;;
-    --force) mode="force" ;;
+    --force) mode="force"; NO_CACHE=true ;;  # force 语义是重装，绕过缓存
     --revert) mode="revert" ;;
     --resign) RESIGN=true ;;
     --release)
@@ -104,6 +112,7 @@ while [ $# -gt 0 ]; do
     --from-file)
       [ $# -ge 2 ] || { echo "error: --from-file requires a path" >&2; exit 2; }
       FROM_FILE="$2"; shift ;;
+    --no-cache) NO_CACHE=true ;;
     -h|--help)
       cat <<'HELP'
 replace-codex-desktop.sh — 用 fork release 二进制替换 macOS 桌面端内嵌的 codex
@@ -115,10 +124,11 @@ replace-codex-desktop.sh — 用 fork release 二进制替换 macOS 桌面端内
   replace-codex-desktop.sh --revert     # 从 codex.bak 还原
   replace-codex-desktop.sh --from-file <path>   # 用本地二进制（离线）
   replace-codex-desktop.sh --release <tag>      # 指定 release，而非 latest
+  replace-codex-desktop.sh --no-cache           # 不使用/不写入二进制缓存
   replace-codex-desktop.sh --resign             # 额外 ad-hoc 重签（默认不重签）
 
 环境变量：CODEX_APP / CODEX_FORK_REPO / CODEX_FORK_DIR / CODEX_RELEASE_URL
-           CODEX_RESIGN=1 等价于 --resign
+           CODEX_NO_CACHE=1 等价于 --no-cache；CODEX_RESIGN=1 等价于 --resign
 HELP
       exit 0 ;;
     *) echo "error: unknown argument: $1 (try --help)" >&2; exit 2 ;;
@@ -196,43 +206,106 @@ FETCHED_BIN=""
 BIN_VERSION=""
 SIG_NOTE=""
 DID_RESIGN=false
+TAG=""
+CACHE_BIN=""
+FROM_CACHE=false
 
 # ---------------------------------------------------------------------------
-# 下载（或使用本地文件）+ 校验
+# 解析 release tag（用于按 tag 缓存二进制，避免桌面端每次更新都重新下载）
+# ---------------------------------------------------------------------------
+resolve_tag() {
+  if [ -n "$RELEASE_TAG" ]; then
+    TAG="$RELEASE_TAG"
+  elif [ -n "${CODEX_RELEASE_URL:-}" ]; then
+    # 自定义 URL 里按固定 GitHub release 格式提取 tag；提取不到就放弃缓存
+    case "$CODEX_RELEASE_URL" in
+      */releases/download/*/*)
+        local rest="${CODEX_RELEASE_URL#*/releases/download/}"
+        TAG="${rest%%/*}" ;;
+    esac
+  else
+    # latest：只发一个请求拿重定向地址，解析出 tag，不下载资产本体
+    local loc
+    loc="$(curl -fsS -o /dev/null -w '%{redirect_url}' \
+      "https://github.com/${REPO}/releases/latest")" \
+      || die "could not resolve latest release tag for $REPO (network error?)"
+    TAG="${loc##*/}"
+    [ -n "$TAG" ] && [ "$TAG" != "latest" ] && [ "$TAG" != "$loc" ] \
+      || die "could not parse release tag from redirect: $loc"
+  fi
+  [ -z "$TAG" ] || CACHE_BIN="$FORK_DIR/releases/${ASSET}-${TAG}"
+}
+
+# 校验二进制（返回非零表示不可用；x86_64 二进制在 Apple Silicon 上 --version
+# 也能经 Rosetta 跑，所以不能只靠 --version 冒烟，必须先查 Mach-O 头部）
+verify_binary() {
+  local out
+  out="$(file -b "$1" 2>/dev/null)" || return 1
+  case "$out" in
+    *"Mach-O"*"${WANT_ARCH}"*) : ;;
+    *) return 1 ;;
+  esac
+  chmod 0755 "$1" 2>/dev/null || true
+  BIN_VERSION="$("$1" --version 2>&1 | head -n 1)"
+}
+
+# ---------------------------------------------------------------------------
+# 下载（或使用本地文件 / 缓存）+ 校验
 # ---------------------------------------------------------------------------
 fetch_binary() {
   if [ -n "$FROM_FILE" ]; then
     [ -f "$FROM_FILE" ] || die "--from-file not found: $FROM_FILE"
+    verify_binary "$FROM_FILE" \
+      || die "binary is not a runnable macOS ${WANT_ARCH} executable: $FROM_FILE"
     FETCHED_BIN="$FROM_FILE"
     step "Using local binary: $FROM_FILE"
-  else
-    local url
-    if [ -n "${CODEX_RELEASE_URL:-}" ]; then
-      url="$CODEX_RELEASE_URL"
-    elif [ -n "$RELEASE_TAG" ]; then
-      url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${ASSET}"
-    else
-      url="https://github.com/${REPO}/releases/latest/download/${ASSET}"
-    fi
-    step "Downloading $url"
-    curl -fL --retry 3 --retry-delay 1 -o "$TMP_BIN" "$url" \
-      || die "download failed: $url
-       hint: 该架构的 release 资产可能还没构建完，稍等 workflow 跑完后重试"
-    FETCHED_BIN="$TMP_BIN"
+    step "Binary verified: $BIN_VERSION ($WANT_ARCH)"
+    return 0
   fi
 
-  # 架构校验（x86_64 二进制在 Apple Silicon 上 --version 也能经 Rosetta 跑，
-  # 所以不能只靠 --version 冒烟，必须先查 Mach-O 头部）
-  local file_out
-  file_out="$(file -b "$FETCHED_BIN")"
-  case "$file_out" in
-    *"Mach-O"*"${WANT_ARCH}"*) : ;;
-    *) die "binary is not a macOS ${WANT_ARCH} executable: ${file_out}" ;;
-  esac
+  local url
+  if [ -n "${CODEX_RELEASE_URL:-}" ]; then
+    url="$CODEX_RELEASE_URL"
+  elif [ -n "$RELEASE_TAG" ]; then
+    url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${ASSET}"
+  else
+    url="https://github.com/${REPO}/releases/latest/download/${ASSET}"
+  fi
 
-  chmod 0755 "$FETCHED_BIN" 2>/dev/null || true
-  if ! BIN_VERSION="$("$FETCHED_BIN" --version 2>&1 | head -n 1)"; then
-    die "smoke test failed: '$FETCHED_BIN --version' could not run"
+  resolve_tag
+
+  # 命中缓存：校验通过直接复用，不再下载；校验失败删缓存重新下载
+  if [ -n "$CACHE_BIN" ] && [ "$NO_CACHE" != true ] && [ -f "$CACHE_BIN" ]; then
+    if verify_binary "$CACHE_BIN"; then
+      FETCHED_BIN="$CACHE_BIN"
+      FROM_CACHE=true
+      step "Reusing cached binary: $CACHE_BIN (release $TAG)"
+      step "Binary verified: $BIN_VERSION ($WANT_ARCH)"
+      return 0
+    else
+      step "Cached binary failed verification; removing and re-downloading"
+      rm -f "$CACHE_BIN"
+    fi
+  fi
+
+  step "Downloading $url"
+  curl -fL --retry 3 --retry-delay 1 -o "$TMP_BIN" "$url" \
+    || die "download failed: $url
+       hint: 该架构的 release 资产可能还没构建完，稍等 workflow 跑完后重试"
+
+  if ! verify_binary "$TMP_BIN"; then
+    die "binary is not a runnable macOS ${WANT_ARCH} executable: $TMP_BIN"
+  fi
+  FETCHED_BIN="$TMP_BIN"
+
+  # 写入缓存（原子替换；tag 未知的自定义 URL 不缓存）
+  if [ -n "$CACHE_BIN" ] && [ "$NO_CACHE" != true ]; then
+    mkdir -p "$FORK_DIR/releases"
+    install -m 0755 "$TMP_BIN" "$CACHE_BIN.tmp.$$"
+    mv -f "$CACHE_BIN.tmp.$$" "$CACHE_BIN"
+    xattr -d com.apple.quarantine "$CACHE_BIN" 2>/dev/null || true
+    FETCHED_BIN="$CACHE_BIN"
+    step "Cached: $CACHE_BIN"
   fi
   step "Binary verified: $BIN_VERSION ($WANT_ARCH)"
 }
@@ -242,9 +315,13 @@ fetch_binary() {
 # ---------------------------------------------------------------------------
 install_managed() {
   mkdir -p "$FORK_DIR"
-  install -m 0755 "$FETCHED_BIN" "$MANAGED_BIN.tmp.$$"
-  mv -f "$MANAGED_BIN.tmp.$$" "$MANAGED_BIN"
-  xattr -d com.apple.quarantine "$MANAGED_BIN" 2>/dev/null || true
+  if [ "$FROM_CACHE" = true ]; then
+    ln -sfn "$CACHE_BIN" "$MANAGED_BIN"
+  else
+    install -m 0755 "$FETCHED_BIN" "$MANAGED_BIN.tmp.$$"
+    mv -f "$MANAGED_BIN.tmp.$$" "$MANAGED_BIN"
+    xattr -d com.apple.quarantine "$MANAGED_BIN" 2>/dev/null || true
+  fi
   step "Managed binary installed: $MANAGED_BIN"
 }
 
