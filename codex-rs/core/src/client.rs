@@ -2400,6 +2400,14 @@ impl ModelClientSession {
                 })?;
             extra_headers.insert(X_SESSION_AFFINITY_HEADER, session_header_value.clone());
             extra_headers.insert(X_SESSION_ID_HEADER, session_header_value);
+            // Only the compaction-window identity is forwarded here. The rest of the Responses
+            // compatibility metadata stays off this path because `WireApi::Chat` providers are
+            // frequently third parties.
+            let window_header_value = HeaderValue::from_str(&responses_metadata.window_id)
+                .map_err(|err| {
+                    CodexErr::InvalidRequest(format!("invalid Codex window ID header: {err}"))
+                })?;
+            extra_headers.insert(X_CODEX_WINDOW_ID_HEADER, window_header_value);
             if let Some(parent_thread_id) = responses_metadata.parent_thread_id {
                 let parent_header_value = HeaderValue::from_str(&parent_thread_id.to_string())
                     .map_err(|err| {

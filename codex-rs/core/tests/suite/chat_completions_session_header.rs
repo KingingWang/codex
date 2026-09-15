@@ -11,13 +11,20 @@
 //! The contract is exercised at the outbound HTTP boundary for both response
 //! modes: non-streaming JSON (`chat_stream = false`) and streaming SSE
 //! (`chat_stream = true`).
+//!
+//! Chat requests additionally carry `x-codex-window-id` so servers can observe
+//! compaction boundaries. Its value is `{thread_id}:{window_number}`, stable
+//! across turns and incremented once per compaction.
 
 use anyhow::Result;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use wiremock::Mock;
@@ -28,12 +35,33 @@ use wiremock::matchers::path;
 
 const X_SESSION_AFFINITY_HEADER: &str = "x-session-affinity";
 const X_SESSION_ID_HEADER: &str = "x-session-id";
+const X_CODEX_WINDOW_ID_HEADER: &str = "x-codex-window-id";
 
 async fn build_chat_session(server: &MockServer, chat_stream: bool) -> Result<TestCodex> {
     let mut provider =
         ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     provider.wire_api = WireApi::Chat;
     provider.chat_stream = chat_stream;
+    provider.supports_websockets = false;
+
+    test_codex()
+        .with_config(move |config| {
+            config.model_provider = provider;
+        })
+        .build_with_auto_env(server)
+        .await
+}
+
+/// Builds a chat session against a non-OpenAI provider, which is the realistic
+/// shape for `WireApi::Chat`. The provider name matters: an OpenAI-named
+/// provider advertises remote compaction and would compact through
+/// `/responses/compact` instead of the chat endpoint.
+async fn build_third_party_chat_session(server: &MockServer) -> Result<TestCodex> {
+    let mut provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
+    provider.name = "third-party".to_string();
+    provider.wire_api = WireApi::Chat;
+    provider.chat_stream = false;
     provider.supports_websockets = false;
 
     test_codex()
@@ -197,6 +225,91 @@ async fn assert_prompt_cache_wire_contract(chat_stream: bool) -> Result<()> {
             );
         }
     }
+
+    Ok(())
+}
+
+/// Collects the `x-codex-window-id` header from every recorded chat request.
+async fn recorded_window_ids(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .expect("mock server should record requests")
+        .into_iter()
+        .filter(|request| request.url.path() == "/v1/chat/completions")
+        .map(|request| {
+            request
+                .headers
+                .get(X_CODEX_WINDOW_ID_HEADER)
+                .expect("chat completions request should include an `x-codex-window-id` header")
+                .to_str()
+                .expect("`x-codex-window-id` should be a valid header value")
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_completions_window_id_is_stable_across_turns() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(chat_completion_json_body()),
+        )
+        .expect(/*requests*/ 2)
+        .mount(&server)
+        .await;
+
+    let session = build_chat_session(&server, /*chat_stream*/ false).await?;
+    session.submit_text_turn("first request").await?;
+    session.submit_text_turn("second request").await?;
+
+    let thread_id = session.session_configured.thread_id;
+    let expected = format!("{thread_id}:0");
+    assert_eq!(
+        recorded_window_ids(&server).await,
+        vec![expected.clone(), expected],
+        "`x-codex-window-id` must stay stable across turns of one compaction window"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_completions_window_id_advances_after_compaction() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(chat_completion_json_body()),
+        )
+        .expect(/*requests*/ 3)
+        .mount(&server)
+        .await;
+
+    let session = build_third_party_chat_session(&server).await?;
+    session.submit_text_turn("first request").await?;
+
+    session.codex.submit(Op::Compact).await?;
+    wait_for_event(&session.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    session.submit_text_turn("after compaction").await?;
+
+    let thread_id = session.session_configured.thread_id;
+    assert_eq!(
+        recorded_window_ids(&server).await,
+        vec![
+            format!("{thread_id}:0"),
+            format!("{thread_id}:0"),
+            format!("{thread_id}:1"),
+        ],
+        "the compaction request itself keeps the old window; the next turn opens a new one"
+    );
 
     Ok(())
 }
