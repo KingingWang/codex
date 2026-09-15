@@ -1126,7 +1126,7 @@ impl ModelClient {
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
-            if item.id().is_some_and(|id| !id.is_prefixed()) {
+            if !item.has_responses_api_id() {
                 item.set_id(/*new_id*/ None);
             }
             if !self.state.content_item_kinds_enabled {

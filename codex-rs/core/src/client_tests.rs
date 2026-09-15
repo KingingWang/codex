@@ -50,6 +50,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
@@ -481,6 +482,58 @@ async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyh
     assert_eq!(request.input, vec![encrypted_reasoning, assistant_message]);
 
     Ok(())
+}
+
+#[test]
+fn outbound_request_omits_reasoning_ids_synthesized_by_other_providers() {
+    let client = test_model_client(SessionSource::Cli);
+    // The Anthropic adapter labels thinking blocks by their index within a
+    // single response, so every turn reuses `reasoning_0`. Replaying that to
+    // the Responses API fails with "Expected an ID that begins with 'rs'".
+    let anthropic_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("reasoning_0".to_string())),
+        summary: Vec::new(),
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: "claude thinking".to_string(),
+        }]),
+        encrypted_content: Some("anthropic-signature".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let responses_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("rs_server".to_string())),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("responses-encrypted".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let mut input = vec![anthropic_reasoning.clone(), responses_reasoning.clone()];
+    client.prepare_response_items_for_request(&mut input);
+
+    let mut expected_anthropic = anthropic_reasoning;
+    expected_anthropic.set_id(/*new_id*/ None);
+    assert_eq!(input, vec![expected_anthropic, responses_reasoning]);
+
+    // The foreign ID is omitted rather than serialized as null, and the
+    // Anthropic signature survives so the item stays replayable to Anthropic.
+    assert_eq!(
+        serde_json::to_value(&input).expect("serialize request input"),
+        serde_json::json!([
+            {
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "claude thinking"}],
+                "encrypted_content": "anthropic-signature",
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_server",
+                "summary": [],
+                "content": null,
+                "encrypted_content": "responses-encrypted",
+            },
+        ])
+    );
 }
 
 fn test_session_telemetry() -> SessionTelemetry {
