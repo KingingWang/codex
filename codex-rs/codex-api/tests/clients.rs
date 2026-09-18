@@ -8,6 +8,9 @@ use bytes::Bytes;
 use codex_api::ApiError;
 use codex_api::AuthError;
 use codex_api::AuthProvider;
+use codex_api::ChatCompletionsClient;
+use codex_api::ChatCompletionsRequest;
+use codex_api::ChatMessage;
 use codex_api::Compression;
 use codex_api::Provider;
 use codex_api::ResponsesApiRequest;
@@ -622,4 +625,57 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
     assert_eq!(input_id, Some("msg_1"));
 
     Ok(())
+}
+
+#[tokio::test]
+async fn chat_completions_streaming_request_asks_for_usage_chunk() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = ChatCompletionsClient::new(
+        transport,
+        provider("openai"),
+        Arc::new(NoAuth),
+        /*chat_stream*/ true,
+    );
+
+    let _stream = client
+        .request(chat_completions_request(), HeaderMap::new())
+        .await?;
+
+    let requests = state.take_stream_requests();
+    assert_path_ends_with(&requests, "/chat/completions");
+    let body: serde_json::Value = serde_json::from_slice(request_body_bytes(&requests[0]))?;
+    assert_eq!(body.get("stream"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        body.get("stream_options"),
+        Some(&serde_json::json!({ "include_usage": true })),
+        "streaming chat completions requests must ask for the trailing usage chunk"
+    );
+
+    Ok(())
+}
+
+fn chat_completions_request() -> ChatCompletionsRequest {
+    ChatCompletionsRequest {
+        model: "gpt-test".to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(serde_json::json!("hi")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        tools: Vec::new(),
+        tool_choice: None,
+        stream: false,
+        stream_options: None,
+        prompt_cache_key: "session-abc".to_string(),
+        temperature: None,
+        max_tokens: None,
+        stop: None,
+        reasoning_effort: None,
+        parallel_tool_calls: None,
+        service_tier: None,
+        tool_namespace_map: std::collections::HashMap::new(),
+    }
 }
