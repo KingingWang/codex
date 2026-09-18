@@ -399,11 +399,11 @@ impl CodexErr {
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::UsageLimitReached(_)
-            | CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::BioPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => None,
-            CodexErrorDetails::Stream(..)
+            CodexErrorDetails::ServerOverloaded
+            | CodexErrorDetails::Stream(..)
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout

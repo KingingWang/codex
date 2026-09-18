@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::client::ModelClientSession;
+use crate::client::StreamErrorNotifier;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::compact::InitialContextInjection;
@@ -160,6 +161,32 @@ pub(crate) struct McpStartupRequirements {
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the turn complete.
 ///
+/// [`StreamErrorNotifier`] implementation that surfaces Chat Completions /
+/// Anthropic retry progress to the UI via the session's stream-error event
+/// channel. Fire-and-forget: the retry loop invokes [`notify`](StreamErrorNotifier::notify)
+/// synchronously; this impl spawns a task to call the async session method so
+/// the retry backoff is not blocked.
+struct TurnStreamErrorNotifier {
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+}
+
+impl StreamErrorNotifier for TurnStreamErrorNotifier {
+    fn notify(&self, message: String, additional_details: String, http_status_code: Option<u16>) {
+        let sess = Arc::clone(&self.sess);
+        let turn_context = Arc::clone(&self.turn_context);
+        tokio::spawn(async move {
+            sess.notify_stream_retry(
+                turn_context.as_ref(),
+                message,
+                additional_details,
+                http_status_code,
+            )
+            .await;
+        });
+    }
+}
+
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
@@ -174,8 +201,21 @@ pub(crate) async fn run_turn(
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    // Reuse the prewarmed session when its provider matches the turn's
+    // provider (covers both session-level and per-model provider overrides).
+    // Otherwise, create a new session with the correct provider.
+    let mut client_session = match prewarmed_client_session {
+        Some(prewarmed_client_session)
+            if prewarmed_client_session.has_same_provider(&turn_context.provider) =>
+        {
+            prewarmed_client_session
+        }
+        _ => sess.model_client_for_turn(&turn_context).new_session(),
+    };
+    client_session.set_stream_error_notifier(Some(Arc::new(TurnStreamErrorNotifier {
+        sess: Arc::clone(&sess),
+        turn_context: Arc::clone(&turn_context),
+    })));
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -1574,6 +1614,139 @@ pub(crate) fn build_prompt(
     }
 }
 
+/// Maximum number of bytes of script output to include in the prompt.
+/// Prevents accidentally exhausting the context window with large output.
+const MAX_DYNAMIC_CONTEXT_BYTES: usize = 4096;
+
+async fn append_dynamic_context(
+    mut input: Vec<ResponseItem>,
+    turn_context: &TurnContext,
+) -> Vec<ResponseItem> {
+    let Some(script_path) = turn_context.config.dynamic_context_script.as_ref() else {
+        return input;
+    };
+
+    if script_path.trim().is_empty() {
+        return input;
+    }
+
+    let script_path_trimmed = script_path.trim();
+
+    #[allow(deprecated)]
+    let cwd: std::path::PathBuf = turn_context
+        .environments
+        .primary()
+        .map(|env| env.cwd().to_path_buf())
+        .unwrap_or_else(|| turn_context.cwd.to_path_buf());
+
+    // Resolve and validate the script path.
+    let resolved_path = if script_path_trimmed.starts_with('/') {
+        std::path::PathBuf::from(script_path_trimmed)
+    } else {
+        cwd.join(script_path_trimmed)
+    };
+
+    if !resolved_path.is_file() {
+        warn!(
+            script = %script_path_trimmed,
+            resolved = %resolved_path.display(),
+            "dynamic_context_script path does not exist or is not a file"
+        );
+        return input;
+    }
+
+    let timeout = turn_context.config.dynamic_context_script_timeout;
+    trace!(
+        script = %script_path_trimmed,
+        resolved = %resolved_path.display(),
+        cwd = %cwd.display(),
+        timeout_secs = timeout.as_secs(),
+        "executing dynamic_context_script"
+    );
+
+    let output = match tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(&resolved_path)
+            .current_dir(&cwd)
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            warn!(
+                script = %script_path_trimmed,
+                resolved = %resolved_path.display(),
+                error = %err,
+                "failed to execute dynamic_context_script"
+            );
+            return input;
+        }
+        Err(_) => {
+            warn!(
+                script = %script_path_trimmed,
+                timeout_secs = timeout.as_secs(),
+                "dynamic_context_script timed out"
+            );
+            return input;
+        }
+    };
+
+    if !output.status.success() {
+        warn!(
+            script = %script_path_trimmed,
+            exit_code = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "dynamic_context_script exited with non-zero status"
+        );
+        return input;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return input;
+    }
+
+    // Truncate output to prevent exhausting context window.
+    let (text, truncated) = if trimmed.len() > MAX_DYNAMIC_CONTEXT_BYTES {
+        let byte_boundary = trimmed
+            .char_indices()
+            .take_while(|(i, _)| *i < MAX_DYNAMIC_CONTEXT_BYTES)
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        (&trimmed[..byte_boundary], true)
+    } else {
+        (trimmed, false)
+    };
+
+    if truncated {
+        warn!(
+            script = %script_path_trimmed,
+            original_len = trimmed.len(),
+            truncated_len = text.len(),
+            "dynamic_context_script output truncated"
+        );
+    }
+
+    trace!(
+        script = %script_path_trimmed,
+        text_len = text.len(),
+        "appending dynamic context to prompt"
+    );
+    input.push(ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    });
+
+    input
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
 #[instrument(level = "trace",
@@ -1626,6 +1799,7 @@ async fn run_sampling_request(
         sess.services
             .executed_tool_calls
             .attach_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);
+        let prompt_input = append_dynamic_context(prompt_input, turn_context.as_ref()).await;
         let prompt = build_prompt(
             prompt_input,
             step_context.as_ref(),

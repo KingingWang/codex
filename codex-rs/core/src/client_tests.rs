@@ -38,15 +38,20 @@ use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ToolResultMetadata;
 use codex_protocol::models::ToolResultSource;
@@ -798,6 +803,186 @@ fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::AgentMessage {
+                id: None,
+                author: "/root/worker".to_string(),
+                recipient: "/root".to_string(),
+                content: vec![AgentMessageInputContent::InputText {
+                    text: "Message Type: MESSAGE\nPayload:\nfrom worker".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::AgentMessage {
+                id: None,
+                author: "/root".to_string(),
+                recipient: "/root/worker".to_string(),
+                content: vec![AgentMessageInputContent::EncryptedContent {
+                    encrypted_content: "Message Type: NEW_TASK\nPayload:\nfrom parent".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        ReasoningSummary::None,
+        /*service_tier*/ None,
+        &test_responses_metadata_for_client(
+            &client,
+            /*turn_id*/ None,
+            format!("{}:0", client.state.thread_id),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        ),
+    )?;
+
+    assert_eq!(
+        request.input,
+        vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Message Type: MESSAGE\nPayload:\nfrom worker".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "Message Type: NEW_TASK\nPayload:\nfrom parent".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let encrypted_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("rs_server".to_string())),
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "responses reasoning".to_string(),
+        }],
+        content: None,
+        encrypted_content: Some("encrypted-responses-reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let assistant_message = ResponseItem::Message {
+        id: Some(ResponseItemId::from_server("msg_server".to_string())),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "answer".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::Reasoning {
+                id: Some(ResponseItemId::new("rs")),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "chat completions reasoning".to_string(),
+                }],
+                content: None,
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            encrypted_reasoning.clone(),
+            assistant_message.clone(),
+        ],
+        ..Default::default()
+    };
+
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        ReasoningSummary::Auto,
+        /*service_tier*/ None,
+        &responses_metadata,
+    )?;
+
+    assert!(!request.store);
+    assert_eq!(request.input, vec![encrypted_reasoning, assistant_message]);
+
+    Ok(())
+}
+
+#[test]
+fn outbound_request_omits_reasoning_ids_synthesized_by_other_providers() {
+    let client = test_model_client(SessionSource::Cli);
+    // The Anthropic adapter labels thinking blocks by their index within a
+    // single response, so every turn reuses `reasoning_0`. Replaying that to
+    // the Responses API fails with "Expected an ID that begins with 'rs'".
+    let anthropic_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("reasoning_0".to_string())),
+        summary: Vec::new(),
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: "claude thinking".to_string(),
+        }]),
+        encrypted_content: Some("anthropic-signature".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let responses_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("rs_server".to_string())),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("responses-encrypted".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let mut input = vec![anthropic_reasoning.clone(), responses_reasoning.clone()];
+    client.prepare_response_items_for_request(&mut input);
+
+    let mut expected_anthropic = anthropic_reasoning;
+    expected_anthropic.set_id(/*new_id*/ None);
+    assert_eq!(input, vec![expected_anthropic, responses_reasoning]);
+
+    // The foreign ID is omitted rather than serialized as null, and the
+    // Anthropic signature survives so the item stays replayable to Anthropic.
+    assert_eq!(
+        serde_json::to_value(&input).expect("serialize request input"),
+        serde_json::json!([
+            {
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "claude thinking"}],
+                "encrypted_content": "anthropic-signature",
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_server",
+                "summary": [],
+                "content": null,
+                "encrypted_content": "responses-encrypted",
+            },
+        ])
+    );
+}
+
 fn test_session_telemetry() -> SessionTelemetry {
     SessionTelemetry::new(
         ThreadId::new(),
@@ -866,11 +1051,11 @@ fn reasoning_effort_in_request(
     effort: ReasoningEffort,
 ) -> ReasoningEffort {
     let client = test_model_client(session_source);
-    client
+    let responses_effort = client
         .build_responses_request(
             &Prompt::default(),
             model_info,
-            Some(effort),
+            Some(effort.clone()),
             codex_protocol::config_types::ReasoningSummary::None,
             /*service_tier*/ None,
             &test_responses_metadata_for_client(
@@ -884,8 +1069,20 @@ fn reasoning_effort_in_request(
         .expect("build responses request")
         .reasoning
         .expect("request should include reasoning")
-        .effort
-        .expect("request should include reasoning effort")
+        .effort;
+    let chat_effort = client
+        .new_session()
+        .build_chat_completions_request(
+            &Prompt::default(),
+            model_info,
+            Some(effort),
+            "test-session",
+        )
+        .expect("build chat completions request")
+        .reasoning_effort;
+
+    assert_eq!(chat_effort, responses_effort);
+    responses_effort.expect("request should include reasoning effort")
 }
 
 #[test]

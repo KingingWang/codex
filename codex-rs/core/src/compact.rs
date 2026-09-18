@@ -2,6 +2,8 @@ use crate::context::GuardianContextMode;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
@@ -267,7 +269,9 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
-    let mut client_session = sess.services.model_client.new_session();
+    // Honor per-model provider overrides from the model catalog instead of
+    // always using the session-level provider.
+    let mut client_session = sess.model_client_for_turn(&turn_context).new_session();
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
     // survives retries within this compact turn.
@@ -284,8 +288,18 @@ async fn run_compact_task_inner_impl(
             .executed_tool_calls
             .attach_to_compaction_prompt(&mut turn_input);
         let turn_input_len = turn_input.len();
+
+        // Get tools for the prompt (same as in turn.rs build_prompt).
+        // built_tools now lives behind capture_step_context (rust-v0.146.0): it builds the
+        // per-step ToolRouter and stores it on the captured StepContext.
+        let cancellation_token = CancellationToken::new();
+        let step_context = sess
+            .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
+            .await?;
         let prompt = Prompt {
             input: turn_input,
+            tools: step_context.tool_router.model_visible_specs(),
+            parallel_tool_calls: true,
             base_instructions: sess.get_prompt_base_instructions().await,
             ..Default::default()
         };

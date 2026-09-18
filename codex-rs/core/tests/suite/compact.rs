@@ -8,7 +8,6 @@ use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::CollaborationMode;
@@ -282,8 +281,7 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
 }
 
 fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.name = "OpenAI (test)".into();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -291,8 +289,7 @@ fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
 }
 
 fn openai_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider
@@ -393,7 +390,7 @@ fn remote_v2_compaction_response() -> String {
 }
 
 fn local_compaction_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
-    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.name = "OpenAI-compatible test provider".to_string();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -5508,4 +5505,197 @@ async fn remote_v2_compaction_refreshes_instructions_and_preserves_them_on_cold_
     );
 
     Ok(())
+}
+
+/// Regression test: when a model catalog entry specifies a per-model provider
+/// (`ModelInfo.provider`), compaction must send the summarization request to
+/// that provider instead of the session-level default provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_uses_per_model_provider() {
+    skip_if_no_network!();
+
+    // Session-level default provider; should receive no model requests at all.
+    let default_server = start_mock_server().await;
+    // Per-model provider; should serve both the user turn and the compaction.
+    let model_server = start_mock_server().await;
+
+    let request_log = mount_sse_sequence(
+        &model_server,
+        vec![
+            sse(vec![
+                ev_assistant_message("m1", FIRST_REPLY),
+                ev_completed("r1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m2", SUMMARY_TEXT),
+                ev_completed("r2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut alt_provider = ModelProviderInfo::create_openai_provider(None);
+    alt_provider.name = "Per-model provider (test)".into();
+    alt_provider.base_url = Some(format!("{}/v1", model_server.uri()));
+    alt_provider.supports_websockets = false;
+
+    let default_provider = non_openai_model_provider(&default_server);
+
+    let mut builder = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info.provider = Some("alt-provider".to_string());
+        })
+        .with_config(move |config| {
+            config.model_provider = default_provider;
+            config
+                .model_providers
+                .insert("alt-provider".to_string(), alt_provider);
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(200_000);
+        });
+    let test = builder.build(&default_server).await.unwrap();
+    let codex = test.codex.clone();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello world".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    // Both the user turn and the compaction request must land on the
+    // per-model provider.
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "expected the user turn and compaction requests on the per-model provider"
+    );
+    assert_eq!(requests[1].path(), "/v1/responses");
+
+    // The session-level default provider must not have been called.
+    let default_requests = default_server.received_requests().await.unwrap_or_default();
+    assert!(
+        default_requests.is_empty(),
+        "default provider should receive no requests, got {} request(s)",
+        default_requests.len()
+    );
+}
+
+/// Regression test: inline auto-compaction triggered by the token limit must
+/// also honor per-model provider overrides from the model catalog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_compact_uses_per_model_provider() {
+    skip_if_no_network!();
+
+    // Session-level default provider; should receive no model requests at all.
+    let default_server = start_mock_server().await;
+    // Per-model provider; serves the turns, the auto-compaction, and follow-up.
+    let model_server = start_mock_server().await;
+
+    let request_log = mount_sse_sequence(
+        &model_server,
+        vec![
+            sse(vec![
+                ev_assistant_message("m1", FIRST_REPLY),
+                ev_completed_with_tokens("r1", /*total_tokens*/ 70_000),
+            ]),
+            sse(vec![
+                ev_assistant_message("m2", "SECOND_REPLY"),
+                ev_completed_with_tokens("r2", /*total_tokens*/ 330_000),
+            ]),
+            sse(vec![
+                ev_assistant_message("m3", AUTO_SUMMARY_TEXT),
+                ev_completed_with_tokens("r3", /*total_tokens*/ 200),
+            ]),
+            sse(vec![
+                ev_assistant_message("m4", FINAL_REPLY),
+                ev_completed_with_tokens("r4", /*total_tokens*/ 120),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut alt_provider = ModelProviderInfo::create_openai_provider(None);
+    alt_provider.name = "Per-model provider (test)".into();
+    alt_provider.base_url = Some(format!("{}/v1", model_server.uri()));
+    alt_provider.supports_websockets = false;
+
+    let default_provider = non_openai_model_provider(&default_server);
+
+    let mut builder = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info.provider = Some("alt-provider".to_string());
+        })
+        .with_config(move |config| {
+            config.model_provider = default_provider;
+            config
+                .model_providers
+                .insert("alt-provider".to_string(), alt_provider);
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(200_000);
+        });
+    let test = builder.build(&default_server).await.unwrap();
+    let codex = test.codex.clone();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: FIRST_AUTO_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: SECOND_AUTO_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    // This turn exceeds the auto-compact token limit, so pre-sampling
+    // auto-compaction runs before the follow-up request.
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: POST_AUTO_USER_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    // Two user turns, one auto-compaction, and the post-compaction follow-up
+    // must all land on the per-model provider.
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "expected user turns, a compaction request, and the follow-up on the per-model provider"
+    );
+    let compact_count = requests
+        .iter()
+        .filter(|request| {
+            body_contains_text(&request.body_json().to_string(), SUMMARIZATION_PROMPT)
+        })
+        .count();
+    assert_eq!(
+        compact_count, 1,
+        "expected exactly one auto compact request"
+    );
+
+    // The session-level default provider must not have been called.
+    let default_requests = default_server.received_requests().await.unwrap_or_default();
+    assert!(
+        default_requests.is_empty(),
+        "default provider should receive no requests, got {} request(s)",
+        default_requests.len()
+    );
 }

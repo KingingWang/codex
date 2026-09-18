@@ -404,3 +404,526 @@ impl Stream for ResponseStream {
         self.rx_event.poll_recv(cx)
     }
 }
+
+// Chat Completions API types
+
+/// Streaming options for Chat Completions requests, sent as `stream_options`.
+///
+/// `include_usage` asks OpenAI-compatible servers to append a trailing
+/// `choices: []` chunk that carries `usage`. Servers that follow the OpenAI
+/// contract omit usage from streams entirely without it, which would leave
+/// token and prompt-cache accounting at zero.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatStreamOptions {
+    pub include_usage: bool,
+}
+
+/// Request for the OpenAI Chat Completions API (`/v1/chat/completions`).
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatCompletionsRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    pub stream: bool,
+    /// Streaming-only options, sent on the wire as `stream_options`. Always
+    /// `None` for non-streaming requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<ChatStreamOptions>,
+    /// Cache-routing key sent on the wire as camelCase `promptCacheKey`,
+    /// matching the OpenCode-compatible Chat Completions contract. Always
+    /// serialized; omission is unrepresentable.
+    #[serde(rename = "promptCacheKey")]
+    pub prompt_cache_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
+    /// Whether to enable parallel tool calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    /// Service tier for the request (e.g., "auto", "default", "priority").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Maps flat tool names (as sent to the Chat Completions API) to their
+    /// namespace prefix. Used when converting responses back to ResponseItems
+    /// so that MCP tool calls carry the correct namespace for tool resolution.
+    #[serde(skip)]
+    pub tool_namespace_map: std::collections::HashMap<String, String>,
+}
+
+/// A single message in the chat completions format.
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Reasoning content for models with thinking/reasoning mode (e.g., DeepSeek).
+    /// This field maps to the wire key `reasoning_content` as required by DeepSeek's
+    /// thinking mode API. When tool calls are present in an assistant message, the
+    /// API mandates passing this field back in subsequent requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+}
+
+/// A tool call in a chat message.
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub function: ChatFunctionCall,
+}
+
+/// A function call within a tool call.
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatFunctionCall {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// SSE event from the chat completions streaming API.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionsStreamEvent {
+    pub id: Option<String>,
+    pub object: Option<String>,
+    pub created: Option<i64>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub choices: Vec<ChatCompletionChoice>,
+    #[serde(default)]
+    pub usage: Option<ChatCompletionUsage>,
+}
+
+/// A choice in the chat completions response.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionChoice {
+    pub index: i64,
+    #[serde(default)]
+    pub delta: ChatCompletionDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+/// Delta content in a streaming chat completion choice.
+#[derive(Debug, Deserialize, Default)]
+pub struct ChatCompletionDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatToolCallDelta>>,
+    /// Reasoning content for models that support reasoning (e.g., o1, o3).
+    #[serde(alias = "reasoning_content", skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
+}
+
+/// A tool call delta in streaming.
+#[derive(Debug, Deserialize)]
+pub struct ChatToolCallDelta {
+    pub index: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<ChatFunctionCallDelta>,
+}
+
+/// A function call delta in streaming.
+#[derive(Debug, Deserialize)]
+pub struct ChatFunctionCallDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// Usage statistics for chat completions.
+///
+/// Some Chat Completions-compatible providers (for example MiniMax) send
+/// `usage` objects that omit `prompt_tokens`/`completion_tokens` in streaming
+/// chunks, so missing counts default to 0 instead of failing deserialization
+/// of the whole chunk (which would silently drop content deltas).
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionUsage {
+    #[serde(default)]
+    pub prompt_tokens: i64,
+    #[serde(default)]
+    pub completion_tokens: i64,
+    #[serde(default)]
+    pub total_tokens: i64,
+    /// OpenAI-style prompt token breakdown, which carries the prompt-cache hit
+    /// count for providers that report one.
+    #[serde(default)]
+    pub prompt_tokens_details: Option<ChatCompletionPromptTokensDetails>,
+    /// DeepSeek-style prompt-cache hit count, for providers that report cache
+    /// usage without `prompt_tokens_details`.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<i64>,
+    /// OpenAI-style completion token breakdown (`completion_tokens_details`),
+    /// which carries the reasoning token count for reasoning models.
+    #[serde(default)]
+    pub completion_tokens_details: Option<ChatCompletionOutputTokensDetails>,
+}
+
+impl ChatCompletionUsage {
+    /// Number of prompt tokens served from the provider's prompt cache.
+    ///
+    /// `prompt_tokens` already includes this count, mirroring the Responses API
+    /// contract where `cached_input_tokens` is a subset of `input_tokens`.
+    pub fn cached_input_tokens(&self) -> i64 {
+        // Providers report cache hits in one of two shapes; both agree when a
+        // provider sends them together.
+        let details = self
+            .prompt_tokens_details
+            .as_ref()
+            .map(|prompt_tokens_details| prompt_tokens_details.cached_tokens)
+            .unwrap_or(0);
+        details
+            .max(self.prompt_cache_hit_tokens.unwrap_or(0))
+            .max(0)
+    }
+
+    /// Number of output tokens the model spent on reasoning.
+    ///
+    /// `completion_tokens` already includes this count, mirroring how the
+    /// Responses API reports `reasoning_tokens` as a subset of `output_tokens`.
+    pub fn reasoning_output_tokens(&self) -> i64 {
+        self.completion_tokens_details
+            .as_ref()
+            .map(|details| details.reasoning_tokens)
+            .unwrap_or(0)
+            .max(0)
+    }
+}
+
+/// Prompt token breakdown reported by Chat Completions-compatible providers.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionPromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: i64,
+}
+
+/// Completion token breakdown reported by Chat Completions-compatible
+/// providers on the wire as `completion_tokens_details`.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionOutputTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: i64,
+}
+
+/// Non-streaming response from the chat/completions API.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionsResponse {
+    pub id: String,
+    pub object: String,
+    #[serde(default)]
+    pub created: Option<i64>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub choices: Vec<ChatCompletionResponseChoice>,
+    #[serde(default)]
+    pub usage: Option<ChatCompletionUsage>,
+}
+
+/// A choice in a non-streaming chat completions response.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseChoice {
+    pub index: i64,
+    pub message: ChatCompletionResponseMessage,
+    pub finish_reason: Option<String>,
+}
+
+/// The message in a non-streaming chat completion choice.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseMessage {
+    pub role: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ChatCompletionResponseToolCall>>,
+    /// Reasoning content for models that support reasoning (e.g., o1, o3).
+    #[serde(default, alias = "reasoning_content")]
+    pub reasoning: Option<serde_json::Value>,
+}
+
+/// A tool call in a non-streaming chat completion message.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseToolCall {
+    pub id: String,
+    pub r#type: String,
+    pub function: ChatCompletionResponseFunction,
+}
+
+/// Function call in a non-streaming chat completion tool call.
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponseFunction {
+    pub name: String,
+    /// The arguments field may be returned as either a JSON string or a JSON
+    /// object by different providers. This custom deserializer normalizes both
+    /// forms into a JSON string so downstream code always sees a string.
+    #[serde(deserialize_with = "deserialize_arguments")]
+    pub arguments: String,
+}
+
+/// Deserializes `arguments` from either a JSON string or a JSON value.
+///
+/// Some providers (e.g. DashScope) return `arguments` as a parsed JSON object
+/// instead of the standard JSON string. This function handles both cases by
+/// converting objects/arrays/primitives to their JSON string representation.
+fn deserialize_arguments<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        other => Ok(other.to_string()),
+    }
+}
+
+/// Normalizes chat completions tool call arguments to a single JSON value.
+///
+/// Some Chat Completions-compatible providers occasionally return multiple
+/// adjacent JSON values in `function.arguments` (for example `{}` followed by
+/// the actual object). Downstream tool handlers expect one JSON string, so keep
+/// valid single values as-is and recover adjacent JSON values by using the last
+/// object. Empty or unrecoverable arguments default to `{}` to match the
+/// existing streaming fallback behavior.
+pub(crate) fn normalize_chat_completion_tool_arguments(arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return "{}".to_string();
+    }
+
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    let mut parsed_values = serde_json::Deserializer::from_str(trimmed).into_iter();
+    let mut last_value = None;
+    let mut value_count = 0;
+    for value in &mut parsed_values {
+        let value = match value {
+            Ok(value) => value,
+            Err(_) => return "{}".to_string(),
+        };
+        value_count += 1;
+        last_value = Some(value);
+    }
+
+    if value_count > 1
+        && let Some(value @ serde_json::Value::Object(_)) = last_value
+    {
+        return value.to_string();
+    }
+
+    "{}".to_string()
+}
+
+#[cfg(test)]
+mod chat_message_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn chat_request(stream: bool) -> ChatCompletionsRequest {
+        ChatCompletionsRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: Some(serde_json::Value::String("Hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            stream,
+            stream_options: None,
+            prompt_cache_key: "session-abc".to_string(),
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            reasoning_effort: None,
+            parallel_tool_calls: None,
+            service_tier: None,
+            tool_namespace_map: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn chat_completions_request_serializes_prompt_cache_key_as_camel_case() {
+        let req = chat_request(/*stream*/ false);
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": false,
+                "promptCacheKey": "session-abc",
+            })
+        );
+        assert!(
+            json.get("prompt_cache_key").is_none(),
+            "snake_case prompt_cache_key must not appear on the wire"
+        );
+    }
+
+    #[test]
+    fn chat_completions_request_serializes_stream_options() {
+        let mut streaming = chat_request(/*stream*/ true);
+        streaming.stream_options = Some(ChatStreamOptions {
+            include_usage: true,
+        });
+
+        let json = serde_json::to_value(&streaming).expect("serialize streaming request");
+        assert_eq!(
+            json.get("stream_options"),
+            Some(&serde_json::json!({ "include_usage": true }))
+        );
+
+        let non_streaming =
+            serde_json::to_value(chat_request(/*stream*/ false)).expect("serialize request");
+        assert!(
+            non_streaming.get("stream_options").is_none(),
+            "non-streaming requests must not send stream_options, got {non_streaming}"
+        );
+    }
+
+    #[test]
+    fn normalizes_concatenated_tool_arguments_to_last_object() {
+        assert_eq!(
+            normalize_chat_completion_tool_arguments(r#"{}{"cmd":"pwd"}"#),
+            r#"{"cmd":"pwd"}"#
+        );
+    }
+
+    #[test]
+    fn preserves_valid_tool_arguments() {
+        assert_eq!(
+            normalize_chat_completion_tool_arguments(r#" {"cmd":"pwd"} "#),
+            r#"{"cmd":"pwd"}"#
+        );
+    }
+
+    #[test]
+    fn defaults_unrecoverable_tool_arguments_to_empty_object() {
+        assert_eq!(normalize_chat_completion_tool_arguments("not json"), "{}");
+    }
+
+    #[test]
+    fn reasoning_content_serializes_when_some() {
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(serde_json::Value::String("Hello".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: Some("DeepSeek thinking...".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains("reasoning_content"),
+            "should contain reasoning_content key"
+        );
+        assert!(
+            json.contains("DeepSeek thinking..."),
+            "should contain the reasoning text"
+        );
+    }
+
+    #[test]
+    fn reasoning_content_omitted_when_none() {
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(serde_json::Value::String("Hello".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("reasoning_content"),
+            "should not contain reasoning_content when None"
+        );
+    }
+
+    #[test]
+    fn chat_completion_usage_reads_reasoning_tokens_from_details() {
+        let usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "completion_tokens_details": { "reasoning_tokens": 7 },
+        }))
+        .expect("parse usage with completion details");
+        assert_eq!(usage.reasoning_output_tokens(), 7);
+
+        let without_details: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+        }))
+        .expect("parse usage without completion details");
+        assert_eq!(without_details.reasoning_output_tokens(), 0);
+    }
+
+    #[test]
+    fn chat_completion_usage_reads_cache_hits_from_either_wire_shape() {
+        let openai_usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": { "cached_tokens": 64 },
+        }))
+        .expect("parse OpenAI-style usage");
+        assert_eq!(openai_usage.cached_input_tokens(), 64);
+
+        let deepseek_usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_cache_hit_tokens": 64,
+            "prompt_cache_miss_tokens": 36,
+        }))
+        .expect("parse DeepSeek-style usage");
+        assert_eq!(deepseek_usage.cached_input_tokens(), 64);
+
+        let uncached_usage: ChatCompletionUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+        }))
+        .expect("parse usage without cache details");
+        assert_eq!(uncached_usage.cached_input_tokens(), 0);
+    }
+
+    #[test]
+    fn parses_stream_event_when_usage_omits_token_counts() {
+        // MiniMax M3 streams `usage` objects without `prompt_tokens` or
+        // `completion_tokens`; the chunk must still parse so its content
+        // deltas are not dropped by the SSE processor.
+        let data = r#"{"id":"06d8bae5","choices":[{"finish_reason":"stop","index":0,"delta":{"content":"Hi there!","role":"assistant","name":"MiniMax AI","audio_content":"","reasoning_content":""}}],"created":1787398117,"model":"MiniMax-M3","object":"chat.completion.chunk","usage":{"total_tokens":10,"total_characters":9},"service_tier":"standard"}"#;
+        let event: ChatCompletionsStreamEvent = serde_json::from_str(data).unwrap();
+        assert_eq!(event.choices.len(), 1);
+        assert_eq!(event.choices[0].delta.content.as_deref(), Some("Hi there!"));
+        let usage = event.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 10);
+    }
+}
