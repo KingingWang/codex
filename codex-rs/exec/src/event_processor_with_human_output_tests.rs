@@ -31,6 +31,7 @@ use crate::event_processor::EventProcessor;
 fn suppresses_final_stdout_message_when_both_streams_are_terminals() {
     assert!(!should_print_final_message_to_stdout(
         Some("hello"),
+        /*final_message_rendered*/ false,
         /*stdout_is_terminal*/ true,
         /*stderr_is_terminal*/ true
     ));
@@ -40,6 +41,7 @@ fn suppresses_final_stdout_message_when_both_streams_are_terminals() {
 fn prints_final_stdout_message_when_stdout_is_not_terminal() {
     assert!(should_print_final_message_to_stdout(
         Some("hello"),
+        /*final_message_rendered*/ false,
         /*stdout_is_terminal*/ false,
         /*stderr_is_terminal*/ true
     ));
@@ -49,6 +51,7 @@ fn prints_final_stdout_message_when_stdout_is_not_terminal() {
 fn prints_final_stdout_message_when_stderr_is_not_terminal() {
     assert!(should_print_final_message_to_stdout(
         Some("hello"),
+        /*final_message_rendered*/ false,
         /*stdout_is_terminal*/ true,
         /*stderr_is_terminal*/ false
     ));
@@ -57,8 +60,18 @@ fn prints_final_stdout_message_when_stderr_is_not_terminal() {
 #[test]
 fn suppresses_final_stdout_message_when_missing() {
     assert!(!should_print_final_message_to_stdout(
-        /*final_message*/ None, /*stdout_is_terminal*/ false,
-        /*stderr_is_terminal*/ false
+        /*final_message*/ None, /*final_message_rendered*/ false,
+        /*stdout_is_terminal*/ false, /*stderr_is_terminal*/ false
+    ));
+}
+
+#[test]
+fn suppresses_final_stdout_message_when_already_rendered() {
+    assert!(!should_print_final_message_to_stdout(
+        Some("hello"),
+        /*final_message_rendered*/ true,
+        /*stdout_is_terminal*/ false,
+        /*stderr_is_terminal*/ true,
     ));
 }
 

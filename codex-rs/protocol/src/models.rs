@@ -1313,6 +1313,26 @@ impl ResponseItem {
         }
     }
 
+    /// Returns whether this item's ID can be replayed to the Responses API.
+    ///
+    /// The Responses API only accepts item IDs it issued itself, identified by the
+    /// per-variant prefix from [`Self::id_prefix`]. Adapters for other providers
+    /// (Anthropic, chat completions) synthesize local placeholder IDs so streaming
+    /// events can be correlated within a response; those must not be replayed as
+    /// though the Responses API had issued them. Items with no ID are trivially
+    /// safe, since the ID field is omitted during serialization.
+    pub fn has_responses_api_id(&self) -> bool {
+        let Some(id) = self.id() else {
+            return true;
+        };
+        let Some(expected_prefix) = self.id_prefix() else {
+            return false;
+        };
+        id.strip_prefix(expected_prefix)
+            .and_then(|suffix| suffix.strip_prefix('_'))
+            .is_some_and(|suffix| !suffix.is_empty())
+    }
+
     /// Returns the non-empty turn ID stamped onto this item, if present.
     pub fn turn_id(&self) -> Option<&str> {
         self.internal_chat_message_metadata_passthrough()

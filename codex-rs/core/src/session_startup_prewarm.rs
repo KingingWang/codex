@@ -318,7 +318,11 @@ async fn schedule_startup_prewarm_inner(
     let responses_metadata = session
         .responses_metadata(&startup_turn_context, CodexResponsesRequestKind::Prewarm)
         .await;
-    let mut client_session = session.services.model_client.new_session();
+    // Honor per-model provider overrides from the model catalog so the
+    // prewarm request targets the same provider as the upcoming turn.
+    let mut client_session = session
+        .model_client_for_turn(&startup_turn_context)
+        .new_session();
     let websocket_warmup_started_at = Instant::now();
     // Prewarm establishes the request baseline before the first turn can change effort.
     client_session

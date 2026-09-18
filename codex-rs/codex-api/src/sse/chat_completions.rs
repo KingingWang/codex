@@ -1,0 +1,1208 @@
+//! SSE processing for the OpenAI Chat Completions API.
+
+use super::chat_completions_reasoning::ReasoningStream;
+use crate::common::ChatCompletionChoice;
+use crate::common::ChatCompletionsStreamEvent;
+use crate::common::ResponseEvent;
+use crate::common::ResponseStream;
+use crate::common::normalize_chat_completion_tool_arguments;
+use crate::error::ApiError;
+use crate::telemetry::SseTelemetry;
+use codex_client::ByteStream;
+use codex_client::StreamResponse;
+use codex_protocol::ResponseItemId;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::TokenUsage;
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time::Instant;
+use tokio::time::timeout;
+use tracing::debug;
+use tracing::trace;
+
+// Accumulated state for a single streaming tool call:
+// (call_id, function_name, concatenated_arguments)
+type ToolCallAccumulator = (Option<String>, Option<String>, Option<String>);
+
+/// Normalizes accumulated tool call arguments to a valid JSON string.
+///
+/// When no argument deltas were received, defaults to `"{}"`. When the
+/// accumulated string is not valid JSON, also falls back to `"{}"`.
+/// This prevents the next request from being rejected with a 400 error
+/// ("arguments must be in JSON format").
+fn normalize_tool_call_arguments(arguments: Option<String>) -> String {
+    match arguments {
+        Some(args) => normalize_chat_completion_tool_arguments(&args),
+        _ => "{}".to_string(),
+    }
+}
+
+/// Spawns a background task to process SSE events from a chat completions stream.
+pub fn spawn_chat_completions_stream(
+    stream_response: StreamResponse,
+    idle_timeout: Duration,
+    telemetry: Option<Arc<dyn SseTelemetry>>,
+    namespace_map: HashMap<String, String>,
+) -> ResponseStream {
+    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
+    tokio::spawn(async move {
+        process_chat_completions_sse(
+            stream_response.bytes,
+            tx_event,
+            idle_timeout,
+            telemetry,
+            namespace_map,
+        )
+        .await;
+    });
+    ResponseStream {
+        rx_event,
+        upstream_request_id: None,
+    }
+}
+
+/// Processes SSE events from the chat completions streaming API.
+pub async fn process_chat_completions_sse(
+    stream: ByteStream,
+    tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    idle_timeout: Duration,
+    telemetry: Option<Arc<dyn SseTelemetry>>,
+    namespace_map: HashMap<String, String>,
+) {
+    let mut stream = stream.eventsource();
+    let mut accumulated_tool_calls: HashMap<i64, ToolCallAccumulator> = HashMap::new();
+    let mut final_usage: Option<TokenUsage> = None;
+    // Whether an OutputItemAdded for the assistant text message has been emitted.
+    // The turn processor requires an OutputItemAdded before it can handle
+    // OutputTextDelta events; without it the deltas are silently dropped.
+    let mut text_item_added = false;
+    // Whether an OutputItemDone for the assistant text message has been emitted.
+    let mut text_item_done = false;
+    // Accumulated text content from all OutputTextDelta events, used to build
+    // the OutputItemDone message.
+    let mut accumulated_text = String::new();
+    // Reasoning/thinking item lifecycle. The item is closed as soon as the
+    // thinking segment ends — before the assistant message opens — so the order
+    // the turn processor records and announces stays thinking -> answer -> tools.
+    let mut reasoning = ReasoningStream::new();
+    // The last finish_reason seen across all choices, used to infer
+    // end_turn for the Completed event.
+    let mut last_finish_reason: Option<String> = None;
+    // Whether any deliverable output item was emitted during the stream
+    // (assistant text or tool call). Reasoning/thinking content is NOT
+    // considered a deliverable: a turn that only produced reasoning and no
+    // text or tool calls must be treated as an empty response so the turn
+    // layer can retry the request.
+    let mut output_emitted = false;
+
+    loop {
+        let start = Instant::now();
+        let response = timeout(idle_timeout, stream.next()).await;
+        if let Some(t) = telemetry.as_ref() {
+            t.on_sse_poll(&response, start.elapsed());
+        }
+        let sse = match response {
+            Ok(Some(Ok(sse))) => sse,
+            Ok(Some(Err(e))) => {
+                debug!("SSE Error: {e:#}");
+                let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                return;
+            }
+            Ok(None) => {
+                let _ = tx_event
+                    .send(Err(ApiError::Stream(
+                        "stream closed before completion".into(),
+                    )))
+                    .await;
+                return;
+            }
+            Err(_) => {
+                let _ = tx_event
+                    .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
+                    .await;
+                return;
+            }
+        };
+
+        let data = sse.data.trim();
+
+        // Handle the [DONE] marker
+        if data == "[DONE]" {
+            // Flush a still-open reasoning item first. A stream that ends
+            // without a finish_reason chunk can leave thinking open, and it
+            // belongs ahead of the assistant message and the tool calls.
+            reasoning.close(&tx_event).await;
+
+            // Emit OutputItemDone for the assistant text message if we added one
+            // but haven't yet closed it (e.g. the stream ended without a
+            // finish_reason chunk). This must happen BEFORE tool call events so
+            // the TUI can finalize the stream_controller while it is still
+            // active, preventing duplicate rendering of the text content.
+            if text_item_added && !text_item_done {
+                let done_item = ResponseItem::Message {
+                    id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: accumulated_text.clone(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                };
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::OutputItemDone(done_item)))
+                    .await;
+                // No need to update `text_item_done`: the [DONE] handler
+                // returns from this function once it finishes flushing.
+            }
+
+            // Emit any remaining tool calls with the proper event sequence
+            // (OutputItemAdded -> ToolCallInputDelta -> OutputItemDone) so the
+            // turn processor can establish the active tool before receiving deltas.
+            for (index, (id, name, arguments)) in accumulated_tool_calls.drain() {
+                if let (Some(id), Some(name)) = (id, name) {
+                    let args = normalize_tool_call_arguments(arguments);
+                    let function_call_item = ResponseItem::FunctionCall {
+                        id: None,
+                        namespace: namespace_map.get(&name).cloned(),
+                        name: name.clone(),
+                        arguments: args.clone(),
+                        encrypted_function_args: None,
+                        call_id: id.clone(),
+                        internal_chat_message_metadata_passthrough: None,
+                    };
+                    if tx_event
+                        .send(Ok(ResponseEvent::OutputItemAdded(
+                            function_call_item.clone(),
+                        )))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if tx_event
+                        .send(Ok(ResponseEvent::ToolCallInputDelta {
+                            item_id: format!("call_{index}"),
+                            call_id: Some(id),
+                            delta: args,
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if tx_event
+                        .send(Ok(ResponseEvent::OutputItemDone(function_call_item)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    output_emitted = true;
+                }
+            }
+
+            // Check if stream had no meaningful output - treat as retryable error.
+            // Must happen AFTER flushing accumulated tool calls and text items,
+            // since those flushes may produce output not tracked during streaming.
+            //
+            // Retry semantics (see codex-core/src/responses_retry.rs):
+            //   - max retries: `stream_max_retries()` (default 5, hard cap 100).
+            //   - backoff is applied BEFORE each retry (sleep, then resend):
+            //     delay = 200ms * 2^(n-1) * jitter(0.9..1.1), no upper bound.
+            //   - after max retries exhausted (and no transport fallback), the
+            //     error is surfaced to the turn layer and the turn ends.
+            // A reasoning-only response falls into this branch, so a provider
+            // that persistently returns reasoning-only will retry up to the
+            // configured limit before failing the turn; worst-case extra
+            // requests = max_retries (default 5) per affected turn.
+            if !output_emitted {
+                let _ = tx_event
+                    .send(Err(ApiError::Retryable {
+                        message: "chat completions stream completed with no output content"
+                            .to_string(),
+                        delay: None,
+                    }))
+                    .await;
+                return;
+            }
+
+            // Emit completion event with end_turn inferred from finish_reason.
+            // "stop" means the model finished its turn; "tool_calls" means it
+            // expects tool output before continuing.
+            let end_turn = match last_finish_reason.as_deref() {
+                Some("stop") | Some("length") => Some(true),
+                Some("tool_calls") => Some(false),
+                _ => None,
+            };
+            let _ = tx_event
+                .send(Ok(ResponseEvent::Completed {
+                    response_id: String::new(),
+                    token_usage: final_usage,
+                    end_turn,
+                    usage_metadata: None,
+                }))
+                .await;
+            return;
+        }
+
+        trace!("Chat completions SSE event: {}", data);
+
+        let event: ChatCompletionsStreamEvent = match serde_json::from_str(data) {
+            Ok(event) => event,
+            Err(e) => {
+                debug!(
+                    "Failed to parse chat completions SSE event: {e}, data: {}",
+                    data
+                );
+                continue;
+            }
+        };
+
+        // Extract usage if present (usually in the final chunk when streaming)
+        if let Some(usage) = &event.usage {
+            final_usage = Some(TokenUsage {
+                input_tokens: usage.prompt_tokens,
+                cached_input_tokens: usage.cached_input_tokens(),
+                cache_write_input_tokens: 0,
+                output_tokens: usage.completion_tokens,
+                reasoning_output_tokens: usage.reasoning_output_tokens(),
+                total_tokens: usage.total_tokens,
+                codex_rollout_budget_units: None,
+            });
+        }
+
+        // Skip events with no choices (e.g., usage-only events).
+        if event.choices.is_empty() {
+            continue;
+        }
+
+        // Process choices
+        for choice in &event.choices {
+            if let Some(fr) = &choice.finish_reason
+                && !fr.is_empty()
+            {
+                last_finish_reason = Some(fr.clone());
+            }
+            if let Err(_e) = process_chat_choice(
+                choice,
+                &tx_event,
+                &mut accumulated_tool_calls,
+                &mut reasoning,
+                &mut text_item_added,
+                &mut text_item_done,
+                &mut accumulated_text,
+                &mut output_emitted,
+                &namespace_map,
+            )
+            .await
+            {
+                // Errors from individual choice processing are logged within
+                // process_chat_choice; we continue processing remaining choices.
+            }
+        }
+    }
+}
+
+/// Processes a single choice from the chat completions stream.
+#[allow(clippy::too_many_arguments)]
+async fn process_chat_choice(
+    choice: &ChatCompletionChoice,
+    tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    accumulated_tool_calls: &mut HashMap<i64, ToolCallAccumulator>,
+    reasoning: &mut ReasoningStream,
+    text_item_added: &mut bool,
+    text_item_done: &mut bool,
+    accumulated_text: &mut String,
+    output_emitted: &mut bool,
+    namespace_map: &HashMap<String, String>,
+) -> Result<(), ApiError> {
+    let delta = &choice.delta;
+
+    // Handle role (usually in first chunk)
+    if let Some(_role) = &delta.role {
+        // Role is typically "assistant" - we don't need to emit an event for this
+    }
+
+    // Handle content delta
+    if let Some(content) = &delta.content
+        && !content.is_empty()
+    {
+        // Close the reasoning item before the answer starts. The turn processor
+        // records items in OutputItemDone order, so leaving thinking open until
+        // finish_reason would place it after the assistant message: clients that
+        // render on item completion would show the answer before the thinking.
+        // Finalizing it while the message is already the active item is worse
+        // still: it steals the active item, so the message completion re-emits
+        // `item.started` and clients that honour it render the answer twice.
+        if !reasoning.close(tx_event).await {
+            return Ok(());
+        }
+        // Emit OutputItemAdded before the first text delta so the turn
+        // processor has an active_item to attach deltas to.
+        if !*text_item_added {
+            let added_item = ResponseItem::Message {
+                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: String::new(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            };
+            let _ = tx_event
+                .send(Ok(ResponseEvent::OutputItemAdded(added_item)))
+                .await;
+            *text_item_added = true;
+        }
+        accumulated_text.push_str(content);
+        *output_emitted = true;
+        let _ = tx_event
+            .send(Ok(ResponseEvent::OutputTextDelta(content.clone())))
+            .await;
+    }
+
+    // Handle reasoning delta (e.g., DeepSeek thinking mode)
+    if let Some(reasoning_delta) = &delta.reasoning {
+        let reasoning_text = match reasoning_delta {
+            serde_json::Value::String(s) => s.clone(),
+            _ => String::new(),
+        };
+        // Reasoning is not a deliverable; `push_delta` leaves output_emitted
+        // alone so only assistant text or tool calls count as real output and a
+        // reasoning-only response is still retried by the turn layer.
+        if !reasoning_text.is_empty()
+            && !reasoning
+                .push_delta(tx_event, choice.index, &reasoning_text)
+                .await
+        {
+            return Ok(());
+        }
+    }
+
+    // Handle tool calls delta
+    if let Some(tool_calls) = &delta.tool_calls {
+        for tool_call_delta in tool_calls {
+            let index = tool_call_delta.index;
+
+            // Get or create entry for this tool call
+            let entry = accumulated_tool_calls
+                .entry(index)
+                .or_insert((None, None, None));
+
+            // Update ID if present and non-empty.
+            // Some providers (e.g. qwen) send {"id": ""} in subsequent chunks,
+            // which would overwrite the real call_id with an empty string.
+            if let Some(id) = &tool_call_delta.id
+                && !id.is_empty()
+            {
+                entry.0 = Some(id.clone());
+            }
+
+            // Update function name if present and non-empty.
+            // OpenAI Chat Completions API sends the name only in the first chunk,
+            // but subsequent chunks may include {"name": ""} which would
+            // overwrite the accumulated name with an empty string.
+            if let Some(func) = &tool_call_delta.function {
+                if let Some(name) = &func.name
+                    && !name.is_empty()
+                {
+                    entry.1 = Some(name.clone());
+                }
+                if let Some(args) = &func.arguments {
+                    // Accumulate arguments
+                    entry.2 = Some(entry.2.clone().unwrap_or_default() + args);
+                }
+            }
+        }
+    }
+
+    // Handle finish reason — skip empty strings sent by some providers
+    // (e.g. qwen) in intermediate chunks, which are not real finish signals.
+    if let Some(finish_reason) = &choice.finish_reason {
+        if finish_reason.is_empty() {
+            return Ok(());
+        }
+        // Flush a still-open reasoning item before the answer and the tool
+        // calls; thinking precedes both in the model's output.
+        if !reasoning.close(tx_event).await {
+            return Ok(());
+        }
+        // Emit OutputItemDone for the assistant text message if we added one.
+        // This must happen BEFORE tool call events so the TUI can finalize the
+        // stream_controller while it is still active, preventing duplicate rendering.
+        if *text_item_added && !*text_item_done {
+            let done_item = ResponseItem::Message {
+                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: accumulated_text.clone(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            };
+            let _ = tx_event
+                .send(Ok(ResponseEvent::OutputItemDone(done_item)))
+                .await;
+            *text_item_done = true;
+        }
+
+        // Emit accumulated tool calls with the proper event sequence
+        // (OutputItemAdded -> ToolCallInputDelta -> OutputItemDone) so the
+        // turn processor can establish the active tool before receiving deltas.
+        for (index, (id, name, arguments)) in accumulated_tool_calls.drain() {
+            if let (Some(id), Some(name)) = (id, name) {
+                let args = normalize_tool_call_arguments(arguments);
+                let function_call_item = ResponseItem::FunctionCall {
+                    id: None,
+                    namespace: namespace_map.get(&name).cloned(),
+                    name: name.clone(),
+                    arguments: args.clone(),
+                    encrypted_function_args: None,
+                    call_id: id.clone(),
+                    internal_chat_message_metadata_passthrough: None,
+                };
+                if tx_event
+                    .send(Ok(ResponseEvent::OutputItemAdded(
+                        function_call_item.clone(),
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                *output_emitted = true;
+                if tx_event
+                    .send(Ok(ResponseEvent::ToolCallInputDelta {
+                        item_id: format!("call_{index}"),
+                        call_id: Some(id),
+                        delta: args,
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                if tx_event
+                    .send(Ok(ResponseEvent::OutputItemDone(function_call_item)))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ApiError;
+    use codex_client::TransportError;
+    use codex_protocol::models::ResponseItem;
+    use futures::TryStreamExt;
+    use pretty_assertions::assert_eq;
+    use tokio_test::io::Builder as IoBuilder;
+    use tokio_util::io::ReaderStream;
+
+    async fn collect_chat_events(chunks: &[&[u8]]) -> Vec<Result<ResponseEvent, ApiError>> {
+        let mut builder = IoBuilder::new();
+        for chunk in chunks {
+            builder.read(chunk);
+        }
+
+        let reader = builder.build();
+        let stream = ReaderStream::new(reader)
+            .map_err(|err: std::io::Error| TransportError::Network(err.to_string()));
+        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+        tokio::spawn(process_chat_completions_sse(
+            Box::pin(stream),
+            tx,
+            idle_timeout(),
+            /*telemetry*/ None,
+            HashMap::new(),
+        ));
+
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+        events
+    }
+
+    fn idle_timeout() -> Duration {
+        Duration::from_millis(1000)
+    }
+
+    #[tokio::test]
+    async fn parses_content_delta() {
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        // Now includes OutputItemAdded + OutputItemDone events:
+        // OutputItemAdded, OutputTextDelta("Hello"), OutputTextDelta(" world"),
+        // OutputItemDone, Completed
+        assert_eq!(events.len(), 5);
+        assert!(matches!(&events[0], Ok(ResponseEvent::OutputItemAdded(_))));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputTextDelta(s)) if s == "Hello"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputTextDelta(s)) if s == " world"
+        ));
+        assert!(matches!(&events[3], Ok(ResponseEvent::OutputItemDone(_))));
+        assert!(matches!(&events[4], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn usage_chunk_reports_cached_prompt_tokens() {
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,\"prompt_tokens_details\":{\"cached_tokens\":64},\"completion_tokens_details\":{\"reasoning_tokens\":7}}}\n\n";
+        let chunk3 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3]).await;
+
+        match events.last().expect("a Completed event") {
+            Ok(ResponseEvent::Completed { token_usage, .. }) => assert_eq!(
+                token_usage.as_ref(),
+                Some(&TokenUsage {
+                    input_tokens: 100,
+                    cached_input_tokens: 64,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 20,
+                    reasoning_output_tokens: 7,
+                    total_tokens: 120,
+                    codex_rollout_budget_units: None,
+                })
+            ),
+            other => panic!("expected a Completed event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parses_tool_calls() {
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"loc\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ation\\\":\\\"SF\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        // Expected sequence:
+        //   OutputItemAdded(FunctionCall)  ← establishes active tool
+        //   ToolCallInputDelta             ← carries the arguments
+        //   OutputItemDone(FunctionCall)   ← finalizes the tool call
+        //   Completed
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(
+                ResponseItem::FunctionCall { name, .. }
+            )) if name == "get_weather"
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::ToolCallInputDelta { call_id, delta, .. })
+            if call_id.as_deref() == Some("call_123")
+            && delta == "{\"location\":\"SF\"}"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(
+                ResponseItem::FunctionCall { name, .. }
+            )) if name == "get_weather"
+        ));
+        assert!(matches!(&events[3], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn concatenated_tool_arguments_are_normalized() {
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
+            if name == "exec_command"
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::ToolCallInputDelta { call_id, delta, .. })
+            if call_id.as_deref() == Some("call_123")
+            && delta == r#"{"cmd":"pwd"}"#
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { arguments, .. }))
+            if arguments == r#"{"cmd":"pwd"}"#
+        ));
+        assert!(matches!(&events[3], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn tool_calls_empty_name_in_delta_does_not_overwrite() {
+        // Test that empty name in subsequent chunks does not overwrite accumulated name.
+        // Some API implementations send {"name": ""} in subsequent chunks, which should
+        // be ignored to preserve the name from the first chunk.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"cmd\\\"\"}}]},\"finish_reason\":null}]}\n\n";
+        // Second chunk has empty name - should NOT overwrite "shell"
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        // The tool name should still be "shell", not empty
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(
+                ResponseItem::FunctionCall { name, .. }
+            )) if name == "shell"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(
+                ResponseItem::FunctionCall { name, .. }
+            )) if name == "shell"
+        ));
+        assert!(matches!(&events[3], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn text_then_tool_calls_emits_item_done_before_tools() {
+        // When a response has both text content AND tool calls, the OutputItemDone
+        // for the text message must be emitted BEFORE the tool call events.
+        // This ensures the TUI can finalize the stream_controller while it is still
+        // active, preventing duplicate rendering of the text content.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me check that.\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        // Expected sequence:
+        // 1. OutputItemAdded(Message) - for text
+        // 2. OutputTextDelta("Let me check that.")
+        // 3. OutputItemDone(Message) - text finalized BEFORE tool calls
+        // 4. OutputItemAdded(FunctionCall) - tool call begins
+        // 5. ToolCallInputDelta - tool arguments
+        // 6. OutputItemDone(FunctionCall) - tool call finalized
+        // 7. Completed
+        assert_eq!(events.len(), 7);
+
+        // 1. OutputItemAdded(Message)
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+
+        // 2. OutputTextDelta
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputTextDelta(s)) if s == "Let me check that."
+        ));
+
+        // 3. OutputItemDone(Message) - text MUST be finalized before tool calls
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+
+        // 4. OutputItemAdded(FunctionCall)
+        assert!(matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
+
+        // 5. ToolCallInputDelta
+        assert!(matches!(
+            &events[4],
+            Ok(ResponseEvent::ToolCallInputDelta { delta, .. })
+            if delta == "{\"cmd\":\"pwd\"}"
+        ));
+
+        // 6. OutputItemDone(FunctionCall)
+        assert!(matches!(
+            &events[5],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
+
+        // 7. Completed
+        assert!(matches!(&events[6], Ok(ResponseEvent::Completed { .. })));
+    }
+    #[tokio::test]
+    async fn text_then_tool_calls_done_only_emits_text_done_before_tools() {
+        // Regression test: some providers terminate a streaming response with
+        // [DONE] without first emitting a chunk that carries `finish_reason`
+        // (or send finish_reason in a chunk that lacks any tool_calls, leaving
+        // accumulated tool calls to be flushed by the [DONE] handler).
+        // In that case the [DONE] branch must still emit OutputItemDone for
+        // the assistant text BEFORE flushing tool calls; otherwise the TUI
+        // observes the assistant text being finalized AFTER a tool call has
+        // already consumed the stream_controller, which renders the assistant
+        // message a second time.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me check that.\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n";
+        // No finish_reason chunk; stream terminates directly with [DONE].
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        // Expected sequence:
+        // 1. OutputItemAdded(Message)
+        // 2. OutputTextDelta("Let me check that.")
+        // 3. OutputItemDone(Message)             <- text finalized BEFORE tool calls
+        // 4. OutputItemAdded(FunctionCall)
+        // 5. ToolCallInputDelta
+        // 6. OutputItemDone(FunctionCall)
+        // 7. Completed
+        assert_eq!(events.len(), 7);
+
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::OutputTextDelta(s)) if s == "Let me check that."
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
+            if role == "assistant"
+        ));
+        assert!(matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
+        assert!(matches!(
+            &events[4],
+            Ok(ResponseEvent::ToolCallInputDelta { delta, .. })
+            if delta == "{\"cmd\":\"pwd\"}"
+        ));
+        assert!(matches!(
+            &events[5],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { name, .. }))
+            if name == "shell"
+        ));
+        assert!(matches!(&events[6], Ok(ResponseEvent::Completed { .. })));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_stream_is_treated_as_empty_and_retried() {
+        // Regression: a response that only produced reasoning/thinking content
+        // and no assistant text or tool calls must NOT be considered a complete
+        // turn. The stream should surface a retryable error so the turn layer
+        // can retry the request instead of ending the turn with no deliverable
+        // output.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"thinking about it\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        // Expected ordered sequence:
+        //   [0] OutputItemAdded(Reasoning)
+        //   [1] ReasoningContentDelta("thinking about it")
+        //   [2] OutputItemDone(Reasoning)
+        //   [3] Err(Retryable { "no output content" })
+        // No OutputItemDone(Message), no OutputTextDelta, no Completed.
+        assert_eq!(events.len(), 4, "expected exactly 4 events, got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(
+                ResponseItem::Reasoning { .. }
+            ))
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) if delta == "thinking about it"
+        ));
+        // The done item carries the full reasoning text in `summary` (not
+        // `content`), so the legacy event expansion emits a single
+        // AgentReasoning that codex-acp's seen_reasoning_deltas flag (set by
+        // the delta above) suppresses — preventing the duplicate reasoning
+        // render in Zed. `content` is None so no AgentReasoningRawContent is
+        // emitted alongside.
+        assert!(matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(
+                ResponseItem::Reasoning { summary, content: None, .. }
+            )) if summary.len() == 1
+        ));
+        if let Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { summary, .. })) =
+            &events[2]
+        {
+            match &summary[0] {
+                codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => {
+                    assert_eq!(
+                        text, "thinking about it",
+                        "summary carries full reasoning text: {events:?}"
+                    );
+                }
+            }
+        } else {
+            panic!("expected OutputItemDone(Reasoning) with summary: {events:?}");
+        }
+        assert!(
+            matches!(
+                &events[3],
+                Err(ApiError::Retryable { message, .. })
+                    if message.contains("no output content")
+            ),
+            "last event must be Retryable 'no output content', got {:?}",
+            &events[3]
+        );
+
+        // Negative assertions: no deliverable output and no Completed.
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::OutputTextDelta(_))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "reasoning-only stream must not emit assistant text or Completed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_then_text_completes_normally() {
+        // Sanity: when reasoning is followed by real assistant text, the
+        // response completes normally (no retryable error) and the text item
+        // is finalized.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hmm\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        let mut saw_completed = false;
+        let mut saw_text_done = false;
+        for ev in &events {
+            match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                    role, content, ..
+                })) if role == "assistant"
+                    && content.iter().any(
+                        |c| matches!(c, ContentItem::OutputText { text } if text == "Hello"),
+                    ) =>
+                {
+                    saw_text_done = true;
+                }
+                Ok(ResponseEvent::Completed { .. }) => saw_completed = true,
+                Err(ApiError::Retryable { .. }) => panic!("must not retry when text is present"),
+                _ => {}
+            }
+        }
+        assert!(saw_text_done, "assistant text item should be finalized");
+        assert!(saw_completed, "stream should complete normally");
+    }
+
+    #[tokio::test]
+    async fn mixed_choices_stream_with_text_completes_normally() {
+        // Multi-choice stream: choice 0 only has reasoning, choice 1 has
+        // assistant text. A deliverable exists (choice 1 text), so the stream
+        // must complete normally without a retryable error.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"think0\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":1,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"answer1\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"},{\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        let mut saw_completed = false;
+        let mut saw_text_done = false;
+        for ev in &events {
+            match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                    role, content, ..
+                })) if role == "assistant"
+                    && content.iter().any(
+                        |c| matches!(c, ContentItem::OutputText { text } if text == "answer1"),
+                    ) =>
+                {
+                    saw_text_done = true;
+                }
+                Ok(ResponseEvent::Completed { .. }) => saw_completed = true,
+                Err(ApiError::Retryable { .. }) => {
+                    panic!("must not retry when a choice has assistant text: {events:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_text_done, "choice 1 text should be finalized");
+        assert!(saw_completed, "stream should complete normally");
+    }
+
+    #[tokio::test]
+    async fn all_choices_reasoning_only_stream_yields_retryable() {
+        // Multi-choice stream: every choice only has reasoning, no
+        // deliverable anywhere. Must be treated as empty and retried; no
+        // Completed, no assistant Message.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"t0\"},\"finish_reason\":null},{\"index\":1,\"delta\":{\"reasoning\":\"t1\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"},{\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk3 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3]).await;
+
+        let last = events.last().expect("expected at least one event");
+        assert!(
+            matches!(
+                last,
+                Err(ApiError::Retryable { message, .. }) if message.contains("no output content")
+            ),
+            "last event must be Retryable 'no output content', got {last:?}"
+        );
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::OutputTextDelta(_))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "all-reasoning multi-choice stream must not emit assistant text or Completed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_done_not_emitted_twely_across_finish_reason_and_done() {
+        // Regression: when a reasoning-only stream carries finish_reason in a
+        // chunk (flushing reasoning done via the finish_reason handler) and
+        // then terminates with [DONE] (which also has a reasoning-done flush
+        // branch), the reasoning OutputItemDone must be emitted exactly once.
+        // Before the reasoning_item_done dedup flag was introduced, this
+        // produced a duplicate OutputItemDone(Reasoning).
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"thinking\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk3 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3]).await;
+
+        let reasoning_done_count = events
+            .iter()
+            .filter(|ev| {
+                matches!(
+                    ev,
+                    Ok(ResponseEvent::OutputItemDone(
+                        ResponseItem::Reasoning { .. }
+                    ))
+                )
+            })
+            .count();
+        assert_eq!(
+            reasoning_done_count, 1,
+            "reasoning OutputItemDone must be emitted exactly once across finish_reason + [DONE], got {events:?}"
+        );
+        // No Completed (reasoning-only is retried), no assistant Message.
+        assert!(
+            !events.iter().any(|ev| matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+                    | Ok(ResponseEvent::Completed { .. })
+            )),
+            "reasoning-only stream must not emit assistant text or Completed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_id_stable_across_added_and_done_when_text_intervenes() {
+        // Regression: a reasoning -> assistant text -> tool call stream must
+        // carry the SAME non-empty reasoning item id on OutputItemAdded and
+        // OutputItemDone, and the reasoning item must be completed BEFORE the
+        // assistant message. With an empty id on the done event the turn
+        // processor cannot inherit the active item's id and generates a fresh
+        // one, so codex-acp's per-item reasoning dedup
+        // (seenReasoningDeltaItemIds) misses and Zed renders the thinking a
+        // second time. Completing reasoning after the message instead makes
+        // clients that render on item completion (mindfs and other app-server
+        // v2 consumers) show the answer ahead of the thinking, and leaves
+        // build_chat_completions_request unable to attach the reasoning to the
+        // assistant message it precedes.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hmm\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n";
+        let chunk5 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let chunk6 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5, chunk6]).await;
+
+        let added_id = events
+            .iter()
+            .find_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning { id, .. })) => {
+                    id.clone()
+                }
+                _ => None,
+            })
+            .expect("reasoning OutputItemAdded should be emitted");
+        assert!(
+            !added_id.is_empty(),
+            "reasoning item id must not be empty: {events:?}"
+        );
+
+        let done_id = events
+            .iter()
+            .find_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { id, .. })) => id.clone(),
+                _ => None,
+            })
+            .expect("reasoning OutputItemDone should be emitted");
+        assert_eq!(
+            done_id, added_id,
+            "reasoning OutputItemDone must reuse the OutputItemAdded id so codex-acp can dedup by item id: {events:?}"
+        );
+
+        let positions: Vec<(String, usize)> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ev)| match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
+                    if role == "assistant" =>
+                {
+                    Some(("text".to_string(), i))
+                }
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. })) => {
+                    Some(("reasoning".to_string(), i))
+                }
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { .. })) => {
+                    Some(("tool".to_string(), i))
+                }
+                _ => None,
+            })
+            .collect();
+        let kind_at = |kind: &str| {
+            positions
+                .iter()
+                .find(|(k, _)| k == kind)
+                .map(|(_, i)| *i)
+                .unwrap_or(usize::MAX)
+        };
+        assert!(
+            kind_at("reasoning") < kind_at("text") && kind_at("text") < kind_at("tool"),
+            "expected reasoning -> text -> tool done ordering, got {positions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_closes_before_assistant_message_opens() {
+        // The reasoning item must be completed before the assistant message is
+        // even added, so the turn processor never has the message active while
+        // the thinking item is finalized.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hmm\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning { .. })) => {
+                    Some("reasoning.added")
+                }
+                Ok(ResponseEvent::ReasoningContentDelta { .. }) => Some("reasoning.delta"),
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. })) => {
+                    Some("reasoning.done")
+                }
+                Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { .. })) => {
+                    Some("text.added")
+                }
+                Ok(ResponseEvent::OutputTextDelta(_)) => Some("text.delta"),
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. })) => {
+                    Some("text.done")
+                }
+                Ok(ResponseEvent::Completed { .. }) => Some("completed"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "reasoning.added",
+                "reasoning.delta",
+                "reasoning.done",
+                "text.added",
+                "text.delta",
+                "text.done",
+                "completed",
+            ],
+            "unexpected event order: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_after_text_opens_a_second_item() {
+        // Providers that interleave thinking and visible text get a separate
+        // reasoning item per segment instead of appending to a completed one.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"before\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"after\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        let reasoning_dones: Vec<String> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                    id, summary, ..
+                })) => {
+                    let text = match summary.first() {
+                        Some(
+                            codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
+                                text,
+                            },
+                        ) => text.clone(),
+                        None => String::new(),
+                    };
+                    Some(format!("{}:{text}", id.as_deref().unwrap_or_default()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasoning_dones,
+            vec![
+                "reasoning_0:before".to_string(),
+                "reasoning_0_1:after".to_string()
+            ],
+            "each reasoning segment must be completed once with its own id: {events:?}"
+        );
+    }
+}
