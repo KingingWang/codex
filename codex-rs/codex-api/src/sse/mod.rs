@@ -1,5 +1,6 @@
 pub(crate) mod anthropic;
 pub(crate) mod chat_completions;
+mod chat_completions_reasoning;
 pub(crate) mod responses;
 
 pub use anthropic::spawn_anthropic_stream;

@@ -1,5 +1,6 @@
 //! SSE processing for the OpenAI Chat Completions API.
 
+use super::chat_completions_reasoning::ReasoningStream;
 use crate::common::ChatCompletionChoice;
 use crate::common::ChatCompletionsStreamEvent;
 use crate::common::ResponseEvent;
@@ -85,24 +86,10 @@ pub async fn process_chat_completions_sse(
     // Accumulated text content from all OutputTextDelta events, used to build
     // the OutputItemDone message.
     let mut accumulated_text = String::new();
-    // Accumulated reasoning content for models that support reasoning/thinking mode.
-    let mut accumulated_reasoning = String::new();
-    // Whether an OutputItemAdded for reasoning has been emitted.
-    let mut reasoning_item_added = false;
-    // Whether an OutputItemDone for reasoning has been emitted. Prevents the
-    // finish_reason handler and the [DONE] handler from each emitting a
-    // duplicate reasoning done event for the same item.
-    let mut reasoning_item_done = false;
-    // Stable id shared by the reasoning OutputItemAdded, the live
-    // ReasoningContentDelta events (via the active item), and the
-    // OutputItemDone completion. A fixed id is required because the turn
-    // processor only inherits the active item's id when the done event
-    // arrives while that item is still active; an intervening assistant
-    // message consumes the active item first, so an empty id here would be
-    // replaced with a freshly generated one. Clients such as codex-acp dedup
-    // reasoning by item id (seenReasoningDeltaItemIds), and a mismatched
-    // completed-item id would render the same thinking a second time.
-    let mut reasoning_item_id: Option<ResponseItemId> = None;
+    // Reasoning/thinking item lifecycle. The item is closed as soon as the
+    // thinking segment ends — before the assistant message opens — so the order
+    // the turn processor records and announces stays thinking -> answer -> tools.
+    let mut reasoning = ReasoningStream::new();
     // The last finish_reason seen across all choices, used to infer
     // end_turn for the Completed event.
     let mut last_finish_reason: Option<String> = None;
@@ -146,6 +133,11 @@ pub async fn process_chat_completions_sse(
 
         // Handle the [DONE] marker
         if data == "[DONE]" {
+            // Flush a still-open reasoning item first. A stream that ends
+            // without a finish_reason chunk can leave thinking open, and it
+            // belongs ahead of the assistant message and the tool calls.
+            reasoning.close(&tx_event).await;
+
             // Emit OutputItemDone for the assistant text message if we added one
             // but haven't yet closed it (e.g. the stream ended without a
             // finish_reason chunk). This must happen BEFORE tool call events so
@@ -165,27 +157,6 @@ pub async fn process_chat_completions_sse(
                     .send(Ok(ResponseEvent::OutputItemDone(done_item)))
                     .await;
                 // No need to update `text_item_done`: the [DONE] handler
-                // returns from this function once it finishes flushing.
-            }
-
-            // Emit OutputItemDone for reasoning if we started one and have not
-            // already finalized it via the finish_reason handler.
-            if reasoning_item_added && !reasoning_item_done {
-                let reasoning_done = ResponseItem::Reasoning {
-                    id: reasoning_item_id.clone(),
-                    summary: vec![
-                        codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
-                            text: accumulated_reasoning.clone(),
-                        },
-                    ],
-                    content: None,
-                    encrypted_content: None,
-                    internal_chat_message_metadata_passthrough: None,
-                };
-                let _ = tx_event
-                    .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
-                    .await;
-                // No need to update `reasoning_item_done`: the [DONE] handler
                 // returns from this function once it finishes flushing.
             }
 
@@ -321,10 +292,7 @@ pub async fn process_chat_completions_sse(
                 choice,
                 &tx_event,
                 &mut accumulated_tool_calls,
-                &mut accumulated_reasoning,
-                &mut reasoning_item_id,
-                &mut reasoning_item_added,
-                &mut reasoning_item_done,
+                &mut reasoning,
                 &mut text_item_added,
                 &mut text_item_done,
                 &mut accumulated_text,
@@ -346,10 +314,7 @@ async fn process_chat_choice(
     choice: &ChatCompletionChoice,
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     accumulated_tool_calls: &mut HashMap<i64, ToolCallAccumulator>,
-    accumulated_reasoning: &mut String,
-    reasoning_item_id: &mut Option<ResponseItemId>,
-    reasoning_item_added: &mut bool,
-    reasoning_item_done: &mut bool,
+    reasoning: &mut ReasoningStream,
     text_item_added: &mut bool,
     text_item_done: &mut bool,
     accumulated_text: &mut String,
@@ -367,6 +332,16 @@ async fn process_chat_choice(
     if let Some(content) = &delta.content
         && !content.is_empty()
     {
+        // Close the reasoning item before the answer starts. The turn processor
+        // records items in OutputItemDone order, so leaving thinking open until
+        // finish_reason would place it after the assistant message: clients that
+        // render on item completion would show the answer before the thinking.
+        // Finalizing it while the message is already the active item is worse
+        // still: it steals the active item, so the message completion re-emits
+        // `item.started` and clients that honour it render the answer twice.
+        if !reasoning.close(tx_event).await {
+            return Ok(());
+        }
         // Emit OutputItemAdded before the first text delta so the turn
         // processor has an active_item to attach deltas to.
         if !*text_item_added {
@@ -392,41 +367,20 @@ async fn process_chat_choice(
     }
 
     // Handle reasoning delta (e.g., DeepSeek thinking mode)
-    if let Some(reasoning) = &delta.reasoning {
-        let reasoning_text = match reasoning {
+    if let Some(reasoning_delta) = &delta.reasoning {
+        let reasoning_text = match reasoning_delta {
             serde_json::Value::String(s) => s.clone(),
             _ => String::new(),
         };
-        if !reasoning_text.is_empty() {
-            if !*reasoning_item_added {
-                let item_id = ResponseItemId::from_server(format!("reasoning_{}", choice.index));
-                *reasoning_item_id = Some(item_id.clone());
-                let reasoning_added = ResponseItem::Reasoning {
-                    id: Some(item_id),
-                    summary: Vec::new(),
-                    content: Some(vec![
-                        codex_protocol::models::ReasoningItemContent::ReasoningText {
-                            text: String::new(),
-                        },
-                    ]),
-                    encrypted_content: None,
-                    internal_chat_message_metadata_passthrough: None,
-                };
-                let _ = tx_event
-                    .send(Ok(ResponseEvent::OutputItemAdded(reasoning_added)))
-                    .await;
-                *reasoning_item_added = true;
-            }
-            accumulated_reasoning.push_str(&reasoning_text);
-            // Reasoning is not a deliverable; do not set output_emitted here.
-            // Only assistant text or tool calls count as real output so that
-            // a reasoning-only response is retried by the turn layer.
-            let _ = tx_event
-                .send(Ok(ResponseEvent::ReasoningContentDelta {
-                    delta: reasoning_text,
-                    content_index: choice.index,
-                }))
-                .await;
+        // Reasoning is not a deliverable; `push_delta` leaves output_emitted
+        // alone so only assistant text or tool calls count as real output and a
+        // reasoning-only response is still retried by the turn layer.
+        if !reasoning_text.is_empty()
+            && !reasoning
+                .push_delta(tx_event, choice.index, &reasoning_text)
+                .await
+        {
+            return Ok(());
         }
     }
 
@@ -473,6 +427,11 @@ async fn process_chat_choice(
         if finish_reason.is_empty() {
             return Ok(());
         }
+        // Flush a still-open reasoning item before the answer and the tool
+        // calls; thinking precedes both in the model's output.
+        if !reasoning.close(tx_event).await {
+            return Ok(());
+        }
         // Emit OutputItemDone for the assistant text message if we added one.
         // This must happen BEFORE tool call events so the TUI can finalize the
         // stream_controller while it is still active, preventing duplicate rendering.
@@ -490,26 +449,6 @@ async fn process_chat_choice(
                 .send(Ok(ResponseEvent::OutputItemDone(done_item)))
                 .await;
             *text_item_done = true;
-        }
-
-        // Emit OutputItemDone for reasoning if we started one and have not
-        // already finalized it (e.g. via a previous finish_reason chunk).
-        if *reasoning_item_added && !*reasoning_item_done {
-            let reasoning_done = ResponseItem::Reasoning {
-                id: reasoning_item_id.clone(),
-                summary: vec![
-                    codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
-                        text: accumulated_reasoning.clone(),
-                    },
-                ],
-                content: None,
-                encrypted_content: None,
-                internal_chat_message_metadata_passthrough: None,
-            };
-            let _ = tx_event
-                .send(Ok(ResponseEvent::OutputItemDone(reasoning_done)))
-                .await;
-            *reasoning_item_done = true;
         }
 
         // Emit accumulated tool calls with the proper event sequence
@@ -1102,11 +1041,16 @@ mod tests {
     async fn reasoning_id_stable_across_added_and_done_when_text_intervenes() {
         // Regression: a reasoning -> assistant text -> tool call stream must
         // carry the SAME non-empty reasoning item id on OutputItemAdded and
-        // OutputItemDone. With an empty id on the done event, the turn
-        // processor can no longer inherit the active item's id (the assistant
-        // text completion consumed it first) and generates a fresh id, so
-        // codex-acp's per-item reasoning dedup (seenReasoningDeltaItemIds)
-        // misses and Zed renders the thinking a second time after the answer.
+        // OutputItemDone, and the reasoning item must be completed BEFORE the
+        // assistant message. With an empty id on the done event the turn
+        // processor cannot inherit the active item's id and generates a fresh
+        // one, so codex-acp's per-item reasoning dedup
+        // (seenReasoningDeltaItemIds) misses and Zed renders the thinking a
+        // second time. Completing reasoning after the message instead makes
+        // clients that render on item completion (mindfs and other app-server
+        // v2 consumers) show the answer ahead of the thinking, and leaves
+        // build_chat_completions_request unable to attach the reasoning to the
+        // assistant message it precedes.
         let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n";
         let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hmm\"},\"finish_reason\":null}]}\n\n";
         let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
@@ -1142,9 +1086,6 @@ mod tests {
             "reasoning OutputItemDone must reuse the OutputItemAdded id so codex-acp can dedup by item id: {events:?}"
         );
 
-        // Mirror the real ordering that broke the active-item inheritance:
-        // the reasoning done event arrives after the assistant text done and
-        // before the tool call done.
         let positions: Vec<(String, usize)> = events
             .iter()
             .enumerate()
@@ -1171,8 +1112,97 @@ mod tests {
                 .unwrap_or(usize::MAX)
         };
         assert!(
-            kind_at("text") < kind_at("reasoning") && kind_at("reasoning") < kind_at("tool"),
-            "expected text -> reasoning -> tool done ordering, got {positions:?}"
+            kind_at("reasoning") < kind_at("text") && kind_at("text") < kind_at("tool"),
+            "expected reasoning -> text -> tool done ordering, got {positions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_closes_before_assistant_message_opens() {
+        // The reasoning item must be completed before the assistant message is
+        // even added, so the turn processor never has the message active while
+        // the thinking item is finalized.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hmm\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk4 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning { .. })) => {
+                    Some("reasoning.added")
+                }
+                Ok(ResponseEvent::ReasoningContentDelta { .. }) => Some("reasoning.delta"),
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. })) => {
+                    Some("reasoning.done")
+                }
+                Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { .. })) => {
+                    Some("text.added")
+                }
+                Ok(ResponseEvent::OutputTextDelta(_)) => Some("text.delta"),
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. })) => {
+                    Some("text.done")
+                }
+                Ok(ResponseEvent::Completed { .. }) => Some("completed"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "reasoning.added",
+                "reasoning.delta",
+                "reasoning.done",
+                "text.added",
+                "text.delta",
+                "text.done",
+                "completed",
+            ],
+            "unexpected event order: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_after_text_opens_a_second_item() {
+        // Providers that interleave thinking and visible text get a separate
+        // reasoning item per segment instead of appending to a completed one.
+        let chunk1 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"before\"},\"finish_reason\":null}]}\n\n";
+        let chunk2 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let chunk3 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"after\"},\"finish_reason\":null}]}\n\n";
+        let chunk4 = b"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let chunk5 = b"data: [DONE]\n\n";
+
+        let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
+
+        let reasoning_dones: Vec<String> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                    id, summary, ..
+                })) => {
+                    let text = match summary.first() {
+                        Some(
+                            codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
+                                text,
+                            },
+                        ) => text.clone(),
+                        None => String::new(),
+                    };
+                    Some(format!("{}:{text}", id.as_deref().unwrap_or_default()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasoning_dones,
+            vec![
+                "reasoning_0:before".to_string(),
+                "reasoning_0_1:after".to_string()
+            ],
+            "each reasoning segment must be completed once with its own id: {events:?}"
         );
     }
 }
