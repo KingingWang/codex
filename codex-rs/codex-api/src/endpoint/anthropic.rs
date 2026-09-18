@@ -31,6 +31,7 @@ use codex_client::Request;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use http::HeaderMap;
@@ -329,10 +330,16 @@ async fn convert_response_to_events(
                 }
                 let done = ResponseItem::Reasoning {
                     id: Some(ResponseItemId::from_server(format!("reasoning_{idx}"))),
-                    summary: Vec::new(),
-                    content: Some(vec![ReasoningItemContent::ReasoningText {
+                    // The thinking text goes into `summary` (the Responses API
+                    // summary path) rather than `content`: clients that render
+                    // completed reasoning items read the summary channel
+                    // (mindfs, and codex-acp's dedup-covered AgentReasoning),
+                    // while the raw-content channel is not reliably deduped and
+                    // is ignored by some consumers.
+                    summary: vec![ReasoningItemReasoningSummary::SummaryText {
                         text: thinking.clone(),
-                    }]),
+                    }],
+                    content: None,
                     // Persist Anthropic's signature so build_messages can echo
                     // it on the next turn. Vertex AI rejects unsigned thinking
                     // blocks when replayed, so dropping the signature here

@@ -37,6 +37,7 @@ use codex_client::StreamResponse;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use eventsource_stream::Eventsource;
@@ -383,10 +384,16 @@ pub async fn process_anthropic_sse(
                         signature,
                     } => Some(ResponseItem::Reasoning {
                         id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
-                        summary: Vec::new(),
-                        content: Some(vec![ReasoningItemContent::ReasoningText {
+                        // The thinking text goes into `summary` (the Responses
+                        // API summary path) rather than `content`: clients that
+                        // render completed reasoning items read the summary
+                        // channel (mindfs, and codex-acp's dedup-covered
+                        // AgentReasoning), while the raw-content channel is not
+                        // reliably deduped and is ignored by some consumers.
+                        summary: vec![ReasoningItemReasoningSummary::SummaryText {
                             text: accumulated,
-                        }]),
+                        }],
+                        content: None,
                         encrypted_content: signature,
                         internal_chat_message_metadata_passthrough: None,
                     }),
@@ -445,10 +452,12 @@ pub async fn process_anthropic_sse(
                                 signature,
                             } => Some(ResponseItem::Reasoning {
                                 id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
-                                summary: Vec::new(),
-                                content: Some(vec![ReasoningItemContent::ReasoningText {
+                                // See `ContentBlockStop`: thinking text is
+                                // carried on the summary channel.
+                                summary: vec![ReasoningItemReasoningSummary::SummaryText {
                                     text: accumulated,
-                                }]),
+                                }],
+                                content: None,
                                 encrypted_content: signature,
                                 internal_chat_message_metadata_passthrough: None,
                             }),
@@ -718,5 +727,73 @@ mod tests {
             ),
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn thinking_completes_before_text_and_carries_summary() {
+        // The thinking block must be completed before the text block (Anthropic
+        // sends blocks in order and each `content_block_stop` closes its own
+        // item), and its text must ride on the `summary` channel so clients
+        // that render completed reasoning items can display it.
+        let chunks: &[&[u8]] = &[
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_6\",\"role\":\"assistant\"}}\n\n",
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think\"}}\n\n",
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-1\"}}\n\n",
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Answer\"}}\n\n",
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ];
+        let events = collect_events(chunks).await;
+
+        let done_kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. })) => {
+                    Some("reasoning")
+                }
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
+                    if role == "assistant" =>
+                {
+                    Some("text")
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            done_kinds,
+            vec!["reasoning", "text"],
+            "thinking must complete before the answer: {events:#?}"
+        );
+
+        let Some(Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+            summary,
+            content,
+            encrypted_content,
+            ..
+        }))) = events.iter().find(|ev| {
+            matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(
+                    ResponseItem::Reasoning { .. }
+                ))
+            )
+        })
+        else {
+            panic!("expected a reasoning item done event: {events:#?}");
+        };
+        assert!(
+            content.is_none(),
+            "thinking must not ride the raw-content channel: {events:#?}"
+        );
+        let summary_text: String = summary
+            .iter()
+            .map(|ReasoningItemReasoningSummary::SummaryText { text }| text.clone())
+            .collect();
+        assert_eq!(summary_text, "Let me think");
+        assert_eq!(encrypted_content.as_deref(), Some("sig-1"));
     }
 }

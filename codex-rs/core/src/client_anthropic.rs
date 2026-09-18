@@ -56,6 +56,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_tools::create_tools_json_for_chat_completions;
@@ -294,6 +295,7 @@ fn build_messages(
     for item in items {
         match item {
             ResponseItem::Reasoning {
+                summary,
                 content,
                 encrypted_content,
                 ..
@@ -309,20 +311,34 @@ fn build_messages(
                 let Some(signature) = encrypted_content.clone() else {
                     continue;
                 };
-                if let Some(content) = content {
-                    for entry in content {
-                        let text = match entry {
+                // Read the thinking text from `summary` first: the fork's
+                // anthropic provider carries it on the summary channel (like
+                // the chat-completions provider and the Responses API summary
+                // path) so clients that render completed reasoning items can
+                // see it. Fall back to `content` for reasoning items recorded
+                // by earlier builds.
+                let mut texts: Vec<String> = Vec::new();
+                for entry in summary {
+                    let ReasoningItemReasoningSummary::SummaryText { text } = entry;
+                    texts.push(text.clone());
+                }
+                if texts.iter().all(|text| text.trim().is_empty()) {
+                    texts.clear();
+                    for entry in content.iter().flatten() {
+                        match entry {
                             ReasoningItemContent::ReasoningText { text }
-                            | ReasoningItemContent::Text { text } => text,
-                        };
-                        if text.trim().is_empty() {
-                            continue;
+                            | ReasoningItemContent::Text { text } => texts.push(text.clone()),
                         }
-                        pending_thinking.push(AnthropicContentBlock::Thinking {
-                            thinking: text.clone(),
-                            signature: Some(signature.clone()),
-                        });
                     }
+                }
+                for text in texts {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    pending_thinking.push(AnthropicContentBlock::Thinking {
+                        thinking: text,
+                        signature: Some(signature.clone()),
+                    });
                 }
             }
             ResponseItem::Message { role, content, .. } => {

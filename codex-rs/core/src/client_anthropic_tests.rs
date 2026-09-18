@@ -9,6 +9,8 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_tools::JsonSchema;
@@ -360,6 +362,80 @@ fn agent_messages_are_preserved_for_anthropic_requests() {
             text: "Message Type: NEW_TASK\nPayload:\ninspect the diff".to_string(),
             cache_control: None,
         }]
+    );
+}
+
+fn reasoning_item(
+    summary: Option<&str>,
+    content: Option<&str>,
+    signature: Option<&str>,
+) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: None,
+        summary: summary
+            .map(|text| {
+                vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: text.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        content: content.map(|text| {
+            vec![ReasoningItemContent::ReasoningText {
+                text: text.to_string(),
+            }]
+        }),
+        encrypted_content: signature.map(str::to_string),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+/// Signed thinking replays from the `summary` channel, which is where the
+/// fork's anthropic provider records it so clients that render completed
+/// reasoning items can display it. Reasoning items written by earlier builds
+/// carry the text on `content` and must still replay, and an unsigned thinking
+/// block is dropped because the upstream API rejects it.
+#[test]
+fn signed_thinking_replays_from_summary_then_legacy_content() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("question"),
+        reasoning_item(Some("thought from summary"), None, Some("sig-1")),
+        assistant_message("answer one"),
+        reasoning_item(None, Some("thought from content"), Some("sig-2")),
+        assistant_message("answer two"),
+        reasoning_item(Some("unsigned thought"), None, None),
+        assistant_message("answer three"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    let thinking_blocks: Vec<(String, Option<String>)> = req
+        .messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            AnthropicMessageContent::Blocks(blocks) => Some(blocks.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            AnthropicContentBlock::Thinking {
+                thinking,
+                signature,
+            } => Some((thinking.clone(), signature.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thinking_blocks,
+        vec![
+            (
+                "thought from summary".to_string(),
+                Some("sig-1".to_string())
+            ),
+            (
+                "thought from content".to_string(),
+                Some("sig-2".to_string())
+            ),
+        ]
     );
 }
 
