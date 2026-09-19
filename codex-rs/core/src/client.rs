@@ -41,8 +41,6 @@ use codex_api::AuthProvider;
 use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
 use codex_api::ChatCompletionsRequest;
 use codex_api::ChatMessage;
-use codex_api::CompactClient as ApiCompactClient;
-use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::Compression;
 use codex_api::MemoriesClient as ApiMemoriesClient;
 use codex_api::MemorySummarizeInput as ApiMemorySummarizeInput;
@@ -980,7 +978,6 @@ impl ModelClient {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
-        let mut input = prompt.get_formatted_input_for_request(model_info);
         let provider_info = self.state.provider.info();
         let store = codex_api::is_azure_responses_provider(
             &provider_info.name,
@@ -2822,7 +2819,7 @@ impl ModelClientSession {
         session_id: &str,
     ) -> Result<ChatCompletionsRequest> {
         let instructions = &prompt.base_instructions.text;
-        let input = prompt.get_formatted_input_for_request(false);
+        let input = prompt.get_formatted_input_for_request(model_info);
 
         // Convert instructions to a system message
         let mut messages = Vec::new();
