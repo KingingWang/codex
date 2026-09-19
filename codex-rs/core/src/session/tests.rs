@@ -2579,7 +2579,7 @@ async fn record_inter_agent_communication_emits_user_message_turn_item() {
     assert!(expected_text.contains("ZEBRA task text"));
 
     session
-        .record_inter_agent_communication(&turn_context, communication)
+        .record_inter_agent_communication(&turn_context, turn_context.model_info(), communication)
         .await;
 
     let raw_response = rx.recv().await.expect("raw response item event");

@@ -418,6 +418,7 @@ fn test_merge_configured_model_providers_adds_amazon_bedrock_when_configured() {
         aws: Some(ModelProviderAwsAuthInfo {
             profile: Some("codex-bedrock".to_string()),
             region: Some("us-west-2".to_string()),
+            credential_export: None,
             auth_refresh: None,
         }),
         ..ModelProviderInfo::default()
@@ -590,6 +591,7 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
         .aws = Some(ModelProviderAwsAuthInfo {
         profile: None,
         region: None,
+        credential_export: None,
         auth_refresh: None,
     });
 

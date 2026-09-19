@@ -102,6 +102,7 @@ async fn retries_on_early_close() {
     server.shutdown().await;
 }
 
+#[ignore = "fork: transport-level infinite retry loop in endpoint session supersedes turn-level reconnect notifications"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() -> anyhow::Result<()>
 {
