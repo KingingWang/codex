@@ -119,7 +119,11 @@ impl<T: HttpTransport> EndpointSession<T> {
 
             match result {
                 Ok(response) => return Ok(response),
-                Err(transport_err @ TransportError::Build(_)) => {
+                // Fork: retry only transport-level failures (connection, network,
+                // timeout) forever; deterministic HTTP status errors and exhausted
+                // request-level retries must propagate so higher layers (model
+                // fallback, error reporting, reconnect notifications) can react.
+                Err(transport_err) if !is_transient_transport_error(&transport_err) => {
                     return Err(ApiError::from(transport_err));
                 }
                 Err(transport_err) => {
@@ -183,7 +187,11 @@ impl<T: HttpTransport> EndpointSession<T> {
 
             match result {
                 Ok(stream) => return Ok(stream),
-                Err(transport_err @ TransportError::Build(_)) => {
+                // Fork: retry only transport-level failures (connection, network,
+                // timeout) forever; deterministic HTTP status errors and exhausted
+                // request-level retries must propagate so higher layers (model
+                // fallback, error reporting, reconnect notifications) can react.
+                Err(transport_err) if !is_transient_transport_error(&transport_err) => {
                     return Err(ApiError::from(transport_err));
                 }
                 Err(transport_err) => {
@@ -202,4 +210,14 @@ impl<T: HttpTransport> EndpointSession<T> {
             }
         }
     }
+}
+
+/// Whether an endpoint-level error is a transient transport failure worth
+/// retrying indefinitely (fork behavior). HTTP status errors are returned to
+/// the caller, which owns status-aware retry policy and error reporting.
+fn is_transient_transport_error(err: &TransportError) -> bool {
+    matches!(
+        err,
+        TransportError::Timeout | TransportError::Connection(_) | TransportError::Network(_)
+    )
 }
