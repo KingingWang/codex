@@ -60,6 +60,7 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_tools::create_tools_json_for_chat_completions;
+use codex_tools::tool_arguments_to_json_object;
 use serde_json::Value;
 
 use crate::client_common::Prompt;
@@ -412,7 +413,10 @@ fn build_messages(
                 if !pending_thinking.is_empty() {
                     pending_assistant_blocks.append(&mut pending_thinking);
                 }
-                let input = parse_tool_arguments(arguments);
+                // Anthropic requires `tool_use.input` to be a JSON object and
+                // rejects the whole request otherwise, so repair anything that
+                // is not already an object.
+                let input = tool_arguments_to_json_object(name, arguments);
                 pending_assistant_blocks.push(AnthropicContentBlock::ToolUse {
                     id: call_id.clone(),
                     name: name.clone(),
@@ -430,7 +434,10 @@ fn build_messages(
                 if !pending_thinking.is_empty() {
                     pending_assistant_blocks.append(&mut pending_thinking);
                 }
-                let parsed = parse_tool_arguments(input);
+                // Freeform tools (e.g. `apply_patch`) record raw text rather
+                // than JSON, which Anthropic would reject as a non-dictionary
+                // `tool_use.input`.
+                let parsed = tool_arguments_to_json_object(name, input);
                 pending_assistant_blocks.push(AnthropicContentBlock::ToolUse {
                     id: call_id.clone(),
                     name: name.clone(),
@@ -474,13 +481,6 @@ fn build_messages(
     apply_history_cache_marker(&mut messages);
 
     Ok(messages)
-}
-
-fn parse_tool_arguments(raw: &str) -> Value {
-    if raw.trim().is_empty() {
-        return Value::Object(Default::default());
-    }
-    serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
 fn flush_assistant(messages: &mut Vec<AnthropicMessage>, blocks: &mut Vec<AnthropicContentBlock>) {

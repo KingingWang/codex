@@ -3380,37 +3380,22 @@ fn content_items_to_chat_content(
 /// Ensures that tool call `arguments` is a valid JSON object string.
 ///
 /// Some providers return empty arguments (`""`) for tools with no parameters,
-/// while legacy history can contain bare command strings. Strict Chat
+/// while legacy history and freeform tools carry bare text. Strict Chat
 /// Completions providers reject those values because function call arguments
-/// must be a JSON object string. Preserve valid JSON objects as-is, normalize
-/// empty arguments to `"{}"`, and wrap non-object values in an object.
+/// must be a JSON object string, so reuse the shared normalization that the
+/// Anthropic request builder also relies on.
 fn ensure_valid_json_arguments(name: &str, arguments: &str) -> String {
     let trimmed = arguments.trim();
-    if trimmed.is_empty() {
-        return "{}".to_string();
+    // Preserve valid JSON objects verbatim. Re-serializing would reorder keys
+    // (serde_json's default map is a BTreeMap) and waste a round-trip on the
+    // hot path; `trimmed` is already a valid JSON object string.
+    if matches!(
+        serde_json::from_str::<serde_json::Value>(trimmed),
+        Ok(serde_json::Value::Object(_))
+    ) {
+        return trimmed.to_string();
     }
-
-    match serde_json::from_str::<serde_json::Value>(trimmed) {
-        // Preserve valid JSON objects verbatim. Re-serializing would reorder
-        // keys (serde_json's default map is a BTreeMap) and waste a
-        // serialize/deserialize round-trip on the hot path; `trimmed` is
-        // already a valid JSON object string.
-        Ok(serde_json::Value::Object(_)) => trimmed.to_string(),
-        Ok(value) => wrap_non_object_tool_arguments(name, value),
-        // Non-JSON text (e.g. legacy bare command strings): wrap the trimmed
-        // text so leading/trailing whitespace is not smuggled into the value.
-        Err(_) => {
-            wrap_non_object_tool_arguments(name, serde_json::Value::String(trimmed.to_string()))
-        }
-    }
-}
-
-fn wrap_non_object_tool_arguments(name: &str, value: serde_json::Value) -> String {
-    let key = match name {
-        "exec_command" | "shell" => "cmd",
-        _ => "input",
-    };
-    serde_json::json!({ key: value }).to_string()
+    codex_tools::tool_arguments_to_json_object(name, trimmed).to_string()
 }
 
 /// Returns `(tool_content, optional_user_content)`:
