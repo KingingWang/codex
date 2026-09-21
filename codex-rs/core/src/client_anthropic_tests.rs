@@ -1056,3 +1056,89 @@ fn agents_md_lifts_only_matching_block_from_mixed_message() {
     assert!(texts.iter().any(|t| t.contains("<environment_context>")));
     assert!(texts.iter().any(|t| t.as_str() == "actual question"));
 }
+
+fn custom_tool_call(name: &str, call_id: &str, input: &str) -> ResponseItem {
+    ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: call_id.to_string(),
+        name: name.to_string(),
+        namespace: None,
+        input: input.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn first_tool_use_input(
+    req: &codex_api::AnthropicRequest,
+    message_index: usize,
+) -> &serde_json::Value {
+    let blocks = match &req.messages[message_index].content {
+        AnthropicMessageContent::Blocks(blocks) => blocks,
+        AnthropicMessageContent::Text(text) => panic!("expected blocks, got text {text:?}"),
+    };
+    match &blocks[0] {
+        AnthropicContentBlock::ToolUse { input, .. } => input,
+        other => panic!("expected ToolUse, got {other:?}"),
+    }
+}
+
+/// Anthropic rejects the entire request with
+/// `tool_use.input: Input should be a valid dictionary` when `input` is not a
+/// JSON object, so freeform patch text must be wrapped in an object.
+#[test]
+fn freeform_tool_input_is_sent_as_object() {
+    let patch = "*** Begin Patch\n*** End Patch";
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("patch it"),
+        custom_tool_call("apply_patch", "toolu_patch", patch),
+    ];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(
+        first_tool_use_input(&req, 1),
+        &json!({ "input": patch }),
+        "freeform input must be an object"
+    );
+}
+
+#[test]
+fn non_object_function_arguments_are_sent_as_object() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("run ls"),
+        function_call("shell", "toolu_1", "ls -l"),
+    ];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(first_tool_use_input(&req, 1), &json!({ "cmd": "ls -l" }));
+}
+
+#[test]
+fn empty_function_arguments_are_sent_as_empty_object() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![user_message("go"), function_call("shell", "toolu_1", "")];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(first_tool_use_input(&req, 1), &json!({}));
+}
+
+#[test]
+fn object_function_arguments_are_preserved() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("run ls"),
+        function_call("shell", "toolu_1", r#"{"cmd":["ls","-l"]}"#),
+    ];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(
+        first_tool_use_input(&req, 1),
+        &json!({ "cmd": ["ls", "-l"] })
+    );
+}
