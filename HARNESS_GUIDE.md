@@ -35,7 +35,7 @@ Codex CLI 是 OpenAI 开源的终端 AI 编程助手。它是一个用 Rust 编�
 **本仓库的特殊之处**：基于官方仓库修改，专为企业内部部署设计：
 - 所有外部数据上报（Sentry, 遥测, 更新检查等）已禁用
 - 认证端点已清空，支持本地模型（Ollama, LM Studio）
-- User-Agent 已伪装为 `RooCode/3.51.1`
+- User-Agent / originator 沿用官方逻辑，未做伪装（如需自定义可用 provider 的 `http_headers`）
 - 可通过 `base_url` 指向企业内部 LLM 服务
 
 **核心能力**：

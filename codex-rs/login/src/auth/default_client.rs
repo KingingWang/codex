@@ -11,6 +11,7 @@ use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 pub use codex_http_client::RequestBuilder as CodexRequestBuilder;
+use codex_terminal_detection::user_agent;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::header::USER_AGENT;
@@ -36,7 +37,7 @@ use crate::outbound_proxy::AuthRouteConfig;
 /// The full user agent string is returned from the mcp initialize response.
 /// Parenthesis will be added by Codex. This should only specify what goes inside of the parenthesis.
 pub static USER_AGENT_SUFFIX: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
-pub const DEFAULT_ORIGINATOR: &str = "RooCode/3.51.1";
+pub const DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
 pub const CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
 pub use codex_model_provider_info::RESIDENCY_HEADER_NAME;
 pub use codex_model_provider_info::ResidencyRequirement;
@@ -139,7 +140,7 @@ pub fn is_first_party_originator(originator_value: &str) -> bool {
     originator_value == DEFAULT_ORIGINATOR
         || originator_value == "codex-tui"
         || originator_value == "codex_vscode"
-        || originator_value == "codex_cli_rs"
+        || originator_value.starts_with("Codex ")
 }
 
 pub fn is_first_party_chat_originator(originator_value: &str) -> bool {
@@ -147,7 +148,29 @@ pub fn is_first_party_chat_originator(originator_value: &str) -> bool {
 }
 
 pub fn get_codex_user_agent() -> String {
-    DEFAULT_ORIGINATOR.to_string()
+    let build_version = env!("CARGO_PKG_VERSION");
+    let os_info = os_info::get();
+    let originator = originator();
+    let prefix = format!(
+        "{}/{build_version} ({} {}; {}) {}",
+        originator.value.as_str(),
+        os_info.os_type(),
+        os_info.version(),
+        os_info.architecture().unwrap_or("unknown"),
+        user_agent()
+    );
+    let suffix = USER_AGENT_SUFFIX
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    let suffix = suffix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(String::new, |value| format!(" ({value})"));
+
+    let candidate = format!("{prefix}{suffix}");
+    sanitize_user_agent(candidate, &prefix)
 }
 
 /// Sanitize the user agent string.
@@ -155,7 +178,6 @@ pub fn get_codex_user_agent() -> String {
 /// Invalid characters are replaced with an underscore.
 ///
 /// If the user agent fails to parse, it falls back to fallback and then to ORIGINATOR.
-#[allow(dead_code)]
 fn sanitize_user_agent(candidate: String, fallback: &str) -> String {
     if HeaderValue::from_str(candidate.as_str()).is_ok() {
         return candidate;
