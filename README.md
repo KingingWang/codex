@@ -21,9 +21,26 @@
 | 内置 OpenAI/Bedrock 提供商 | 已移除，仅保留 Ollama 和 LM Studio（本地） |
 | OpenTelemetry Statsig 导出 | 已硬编码映射为 None |
 
-### User-Agent 伪装
+### User-Agent
 
-HTTP 请求的 User-Agent 已修改为 `RooCode/3.51.1`，不再暴露 Codex 版本号、操作系统架构等信息。
+User-Agent 与 originator 完全沿用官方仓库逻辑，不做任何伪装或改写：默认为
+`codex_cli_rs/<版本号> (<OS 类型> <OS 版本>; <架构>) <终端信息>`。
+
+保留官方行为是为了与 ChatGPT 桌面端等服务端版本协商逻辑兼容——桌面端会从
+`initialize` 返回的 `userAgent` 里解析版本号来决定协议分支，伪装成第三方版本号会导致
+鉴权后的后端请求被拒绝。
+
+如果确实需要为某个模型服务自定义 UA，用 provider 级别的请求头即可，只影响该 provider
+的模型请求，不影响 Codex 自身的鉴权与后端请求：
+
+```toml
+[model_providers.my-provider]
+# ...
+http_headers = { "User-Agent" = "my-custom-agent/1.0" }
+```
+
+另有两个官方环境变量可微调：`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`（替换 UA 首段的
+originator）、`USER_AGENT_SUFFIX`（在 UA 末尾追加括号后缀）。
 
 ### 安全边界
 
