@@ -446,7 +446,9 @@ fn data_url_image_becomes_base64_source() {
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {
-            image_url: "data:image/png;base64,iVBORw0K".to_string(),
+            image: codex_protocol::models::ImageReference::Inline {
+                image_url: "data:image/png;base64,iVBORw0K".to_string(),
+            },
             detail: None,
         }],
         phase: None,

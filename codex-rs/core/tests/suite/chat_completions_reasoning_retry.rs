@@ -103,10 +103,12 @@ async fn reasoning_only_chat_completions_response_is_retried_until_success() {
     let provider = ModelProviderInfo {
         name: "mock-chat-completions".into(),
         base_url: Some(format!("{}/v1", server.uri())),
+        model_catalog_url: None,
         env_key: Some("PATH".into()),
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
+        gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Chat,
         chat_stream: true,

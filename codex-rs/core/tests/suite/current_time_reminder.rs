@@ -22,6 +22,7 @@ use codex_features::CurrentTimeReminderDeliveryMode;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;

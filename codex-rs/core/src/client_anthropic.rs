@@ -519,7 +519,12 @@ fn content_items_to_blocks(items: &[ContentItem]) -> Vec<AnthropicContentBlock> 
                     })
                 }
             }
-            ContentItem::InputImage { image_url, .. } => Some(image_to_block(image_url)),
+            ContentItem::InputImage { image, .. } => match image {
+                codex_protocol::models::ImageReference::Inline { image_url } => {
+                    Some(image_to_block(image_url))
+                }
+                codex_protocol::models::ImageReference::File { .. } => None,
+            },
             // TypeWise: this fork does not surface audio inputs in Anthropic
             // requests; drop audio items rather than erroring.
             ContentItem::InputAudio { .. } => None,
@@ -573,9 +578,12 @@ fn function_output_to_tool_result_blocks(
                             cache_control: None,
                         })
                     }
-                    FunctionCallOutputContentItem::InputImage { image_url, .. } => {
-                        Some(image_to_block(image_url))
-                    }
+                    FunctionCallOutputContentItem::InputImage { image, .. } => match image {
+                        codex_protocol::models::ImageReference::Inline { image_url } => {
+                            Some(image_to_block(image_url))
+                        }
+                        codex_protocol::models::ImageReference::File { .. } => None,
+                    },
                     FunctionCallOutputContentItem::InputAudio { .. } => {
                         // Audio tool outputs are not supported in Anthropic tool
                         // result blocks; drop audio items rather than erroring.

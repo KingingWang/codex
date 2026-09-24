@@ -1634,7 +1634,7 @@ async fn append_dynamic_context(
 
     #[allow(deprecated)]
     let cwd: std::path::PathBuf = turn_context
-        .environments
+        .initial_environments
         .primary()
         .map(|env| env.cwd().to_path_buf())
         .unwrap_or_else(|| turn_context.cwd.to_path_buf());

@@ -24,6 +24,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;

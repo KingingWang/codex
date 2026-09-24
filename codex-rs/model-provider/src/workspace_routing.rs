@@ -21,6 +21,21 @@ pub struct WorkspaceRoutingContext {
     pub(crate) session: Option<Arc<WorkspaceRoutingSession>>,
 }
 
+impl Clone for WorkspaceRoutingContext {
+    fn clone(&self) -> Self {
+        Self {
+            chatgpt_base_url: self.chatgpt_base_url.clone(),
+            previously_routed: Mutex::new(
+                self.previously_routed
+                    .try_lock()
+                    .map(|guard| *guard)
+                    .unwrap_or_default(),
+            ),
+            session: self.session.clone(),
+        }
+    }
+}
+
 impl WorkspaceRoutingContext {
     pub fn new(chatgpt_base_url: String) -> Self {
         Self {

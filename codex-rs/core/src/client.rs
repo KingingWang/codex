@@ -322,6 +322,9 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::Transport(TransportError::Network(_)) => "network error".to_string(),
         ApiError::Transport(TransportError::Build(_)) => "request build error".to_string(),
         ApiError::Transport(TransportError::RetryLimit) => "retry limit".to_string(),
+        ApiError::Transport(TransportError::ResponseTooLarge { .. }) => {
+            "response too large".to_string()
+        }
         ApiError::Api { status, .. } => format!("HTTP {status}"),
         ApiError::Stream(_) => "stream error".to_string(),
         ApiError::ContextWindowExceeded => "context window exceeded".to_string(),
@@ -332,6 +335,7 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::InvalidRequest { .. } => "invalid request".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
+        ApiError::BioPolicy { .. } => "bio policy violation".to_string(),
         ApiError::ServerOverloaded => "HTTP 529 server overloaded".to_string(),
         ApiError::RateLimitExceeded { .. } => "HTTP 429 rate limit exceeded".to_string(),
     }
@@ -695,12 +699,15 @@ impl ModelClient {
                 agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
                 content_item_kinds_enabled: self.state.content_item_kinds_enabled,
+                workspace_routing: self.state.workspace_routing.clone(),
+                reasoning_effort_override_enabled: self.state.reasoning_effort_override_enabled,
             }),
             agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
-            free_guardian_enabled: self.free_guardian_enabled,
+            codex_responses_headers: self.codex_responses_headers.clone(),
             event_sender: self.event_sender.clone(),
             http_client_factory: self.http_client_factory.clone(),
+            restored_history: self.restored_history,
         }
     }
 
@@ -978,6 +985,7 @@ impl ModelClient {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
+        let mut input = prompt.get_formatted_input_for_request(model_info);
         let provider_info = self.state.provider.info();
         let store = codex_api::is_azure_responses_provider(
             &provider_info.name,
@@ -1553,7 +1561,6 @@ impl ModelClientSession {
             notifier.notify(message, additional_details, http_status_code);
         }
     }
-
 
     #[allow(clippy::too_many_arguments)]
     /// Builds shared Responses API transport options and request-body options.
@@ -2473,10 +2480,15 @@ impl ModelClientSession {
         let base_delay = Duration::from_secs(5);
         let max_delay = Duration::from_secs(600); // 10 minutes
         loop {
-            let client_setup = self.client.current_client_setup().await?;
-            let transport = self
+            let client_setup = self
                 .client
-                .build_api_transport(&client_setup.api_provider, "/chat/completions")?;
+                .current_client_setup(ClientRouting::Workspace)
+                .await?;
+            let transport = self.client.build_api_transport(
+                &client_setup.api_provider,
+                "/chat/completions",
+                client_setup.redirect_policy,
+            )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2668,10 +2680,15 @@ impl ModelClientSession {
         let base_delay = Duration::from_secs(5);
         let max_delay = Duration::from_secs(600);
         loop {
-            let client_setup = self.client.current_client_setup().await?;
-            let transport = self
+            let client_setup = self
                 .client
-                .build_api_transport(&client_setup.api_provider, "/v1/messages")?;
+                .current_client_setup(ClientRouting::Workspace)
+                .await?;
+            let transport = self.client.build_api_transport(
+                &client_setup.api_provider,
+                "/v1/messages",
+                client_setup.redirect_policy,
+            )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -3496,12 +3513,17 @@ fn content_items_to_chat_content(
                 text_parts.push(text.clone());
                 multipart_parts.push(serde_json::json!({"type": "text", "text": text.clone()}));
             }
-            codex_protocol::models::ContentItem::InputImage { image_url, detail } => {
+            codex_protocol::models::ContentItem::InputImage { image, detail } => {
                 if is_assistant {
                     // Assistant messages in the Chat Completions API only support text
                     // content parts; drop image items rather than erroring.
                     continue;
                 }
+                let codex_protocol::models::ImageReference::Inline { image_url } = image else {
+                    // File references cannot be represented as Chat Completions image
+                    // URLs; drop them rather than erroring.
+                    continue;
+                };
                 has_image = true;
                 let mut image_url_obj = serde_json::json!({"url": image_url});
                 if let Some(detail) = detail {
@@ -3602,7 +3624,13 @@ fn split_tool_output_into_tool_and_user_content(
                     FunctionCallOutputContentItem::InputText { text } => {
                         text_parts.push(text.clone());
                     }
-                    FunctionCallOutputContentItem::InputImage { image_url, detail } => {
+                    FunctionCallOutputContentItem::InputImage { image, detail } => {
+                        let codex_protocol::models::ImageReference::Inline { image_url } = image
+                        else {
+                            // File references cannot be represented as Chat Completions
+                            // image URLs; drop them rather than erroring.
+                            continue;
+                        };
                         let mut image_url_obj = serde_json::json!({"url": image_url});
                         if let Some(detail) = detail {
                             image_url_obj["detail"] = serde_json::Value::String(
@@ -3761,6 +3789,7 @@ mod chat_completions_request_tests {
             /*originator*/ "test_originator".to_string(),
             /*model_verbosity*/ None,
             /*content_item_kinds_enabled*/ false,
+            /*reasoning_effort_override_enabled*/ false,
             /*enable_request_compression*/ false,
             /*include_timing_metrics*/ false,
             /*beta_features_header*/ None,
@@ -3768,6 +3797,9 @@ mod chat_completions_request_tests {
             /*attestation_provider*/ None,
             /*http_client_factory*/
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            codex_model_provider::WorkspaceRoutingContext::new(
+                "https://chatgpt.com/backend-api".into(),
+            ),
         )
     }
 
@@ -4016,7 +4048,9 @@ mod chat_completions_request_tests {
                     text: text.to_string(),
                 },
                 FunctionCallOutputContentItem::InputImage {
-                    image_url: image_url.to_string(),
+                    image: codex_protocol::models::ImageReference::Inline {
+                        image_url: image_url.to_string(),
+                    },
                     detail: Some(ImageDetail::Original),
                 },
             ]),
@@ -4723,7 +4757,9 @@ mod chat_completions_request_tests {
                     text: "Describe this image".to_string(),
                 },
                 ContentItem::InputImage {
-                    image_url: "data:image/png;base64,abc".to_string(),
+                    image: codex_protocol::models::ImageReference::Inline {
+                        image_url: "data:image/png;base64,abc".to_string(),
+                    },
                     detail: Some(ImageDetail::High),
                 },
             ],
@@ -4786,7 +4822,9 @@ mod chat_completions_request_tests {
                     text: "Here is the result".to_string(),
                 },
                 ContentItem::InputImage {
-                    image_url: "data:image/png;base64,abc".to_string(),
+                    image: codex_protocol::models::ImageReference::Inline {
+                        image_url: "data:image/png;base64,abc".to_string(),
+                    },
                     detail: Some(ImageDetail::High),
                 },
             ],
@@ -4812,7 +4850,9 @@ mod chat_completions_request_tests {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputImage {
-                image_url: "data:image/png;base64,xyz".to_string(),
+                image: codex_protocol::models::ImageReference::Inline {
+                    image_url: "data:image/png;base64,xyz".to_string(),
+                },
                 detail: Some(ImageDetail::High),
             }],
             phase: None,
@@ -4840,7 +4880,9 @@ mod chat_completions_request_tests {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputImage {
-                image_url: "data:image/png;base64,test".to_string(),
+                image: codex_protocol::models::ImageReference::Inline {
+                    image_url: "data:image/png;base64,test".to_string(),
+                },
                 detail: None,
             }],
             phase: None,
@@ -4869,11 +4911,15 @@ mod chat_completions_request_tests {
                     text: "Compare these".to_string(),
                 },
                 ContentItem::InputImage {
-                    image_url: "data:image/png;base64,aaa".to_string(),
+                    image: codex_protocol::models::ImageReference::Inline {
+                        image_url: "data:image/png;base64,aaa".to_string(),
+                    },
                     detail: Some(ImageDetail::High),
                 },
                 ContentItem::InputImage {
-                    image_url: "data:image/jpeg;base64,bbb".to_string(),
+                    image: codex_protocol::models::ImageReference::Inline {
+                        image_url: "data:image/jpeg;base64,bbb".to_string(),
+                    },
                     detail: Some(ImageDetail::Original),
                 },
             ],
