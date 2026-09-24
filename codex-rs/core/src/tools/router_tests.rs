@@ -270,6 +270,31 @@ async fn build_custom_tool_call_uses_namespace_for_registry_name() -> anyhow::Re
 }
 
 #[test]
+fn direct_collaboration_messages_are_plaintext_unless_arguments_are_encrypted() {
+    let base_call = |encrypted_function_args| ToolCall {
+        tool_name: ToolName::namespaced("collaboration", "spawn_agent"),
+        call_id: "call-message".to_string(),
+        payload: ToolPayload::Function {
+            arguments: r#"{"message":"task"}"#.to_string(),
+        },
+        encrypted_function_args,
+    };
+
+    assert_eq!(
+        base_call(None).direct_source(),
+        ToolCallSource::DirectPlaintextMessage
+    );
+    assert_eq!(
+        base_call(Some(Vec::new())).direct_source(),
+        ToolCallSource::DirectPlaintextMessage
+    );
+    assert_eq!(
+        base_call(Some(vec!["message".to_string()])).direct_source(),
+        ToolCallSource::Direct
+    );
+}
+
+#[test]
 fn build_tool_call_normalizes_default_function_and_custom_namespaces() -> anyhow::Result<()> {
     for namespace in [None, Some(""), Some(DEFAULT_FUNCTION_NAMESPACE)] {
         let function_call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {

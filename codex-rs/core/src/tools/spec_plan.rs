@@ -1000,7 +1000,13 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
 }
 
 fn standalone_web_search_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+    let provider = turn_context.provider.info();
+    let provider_supports_standalone_web_search = provider.is_openai()
+        || provider.uses_openai_actor_authorization()
+        || provider.supports_standalone_web_search;
+
     namespace_tools_enabled(turn_context)
+        && provider_supports_standalone_web_search
         && turn_context.provider.capabilities().web_search
         && (model_info.use_responses_lite
             || turn_context

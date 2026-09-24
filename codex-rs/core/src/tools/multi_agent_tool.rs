@@ -1,5 +1,5 @@
 //! Applies captured Multi-Agent V2 catalog overrides and namespaces to tool specifications.
-//! Parameter schemas retain harness-owned encryption annotations; execution is unchanged.
+//! Cross-agent task messages are plaintext-compatible, so catalog schemas cannot force model-side encryption.
 
 use crate::session::session::Session;
 use crate::tools::context::ToolInvocation;
@@ -33,18 +33,18 @@ pub(super) fn multi_agent_v2_handler(
         }
         let mut parameters: JsonSchema = serde_json::from_value(parameters)
             .map_err(|_| "schema uses unsupported JSON Schema structures")?;
-        if let ToolSpec::Function(tool) = handler.spec()
-            && let Some(properties) = tool.parameters.properties
-        {
-            // Argument transport requires these markers even without server encryption config.
-            for (name, schema) in properties {
-                if schema.encrypted == Some(true) {
-                    let property = parameters
-                        .properties
-                        .as_mut()
-                        .and_then(|properties| properties.get_mut(&name))
-                        .ok_or("schema omits an encrypted parameter")?;
-                    property.encrypted = Some(true);
+        if let ToolSpec::Function(tool) = handler.spec() {
+            for (name, schema) in tool.parameters.properties.unwrap_or_default().into_iter() {
+                if let Some(property) = parameters
+                    .properties
+                    .as_mut()
+                    .and_then(|properties| properties.get_mut(&name))
+                {
+                    property.encrypted = if name == "message" {
+                        None
+                    } else {
+                        schema.encrypted
+                    };
                 }
             }
         }
