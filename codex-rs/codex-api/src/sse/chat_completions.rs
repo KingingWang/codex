@@ -211,9 +211,9 @@ pub async fn process_chat_completions_sse(
             // since those flushes may produce output not tracked during streaming.
             //
             // Retry semantics (see codex-core/src/responses_retry.rs):
-            //   - max retries: `stream_max_retries()` (default 5, hard cap 100).
+            //   - max retries: `stream_max_retries()` (default 5, as configured).
             //   - backoff is applied BEFORE each retry (sleep, then resend):
-            //     delay = 200ms * 2^(n-1) * jitter(0.9..1.1), no upper bound.
+            //     delay = 200ms * 2^(n-1) * jitter(0.9..1.1), capped at 60s.
             //   - after max retries exhausted (and no transport fallback), the
             //     error is surfaced to the turn layer and the turn ends.
             // A reasoning-only response falls into this branch, so a provider

@@ -17,6 +17,7 @@ use codex_protocol::protocol::MisalignmentErrorDetails;
 use http::HeaderMap;
 use serde::Deserialize;
 use serde_json::Value;
+use std::time::Duration;
 
 pub fn map_api_error(err: ApiError) -> CodexErr {
     match err {
@@ -191,10 +192,17 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                         }
                     }
 
-                    CodexErr::RetryLimit(RetryLimitReachedError {
+                    // Fork: a plain 429 (no usage-limit or quota body) is a transient
+                    // provider-side rate limit, so keep it retryable by the turn layer
+                    // instead of ending the turn, and prefer server retry advice.
+                    let error = CodexErr::RetryLimit(RetryLimitReachedError {
                         status,
                         request_id: extract_request_tracking_id(headers.as_ref()),
-                    })
+                    });
+                    match retry_after_delay(headers.as_ref()) {
+                        Some(delay) => error.with_retry_delay(delay),
+                        None => error,
+                    }
                 } else {
                     CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,
@@ -229,6 +237,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
 }
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";
+const RETRY_AFTER_HEADER: &str = "retry-after";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const OAI_REQUEST_ID_HEADER: &str = "x-oai-request-id";
 const CF_RAY_HEADER: &str = "cf-ray";
@@ -267,6 +276,21 @@ fn api_error_user_message(status: http::StatusCode, body: &str) -> Option<String
 fn extract_request_id(headers: Option<&HeaderMap>) -> Option<String> {
     extract_header(headers, REQUEST_ID_HEADER)
         .or_else(|| extract_header(headers, OAI_REQUEST_ID_HEADER))
+}
+
+/// Parses a `Retry-After` header into a delay, accepting both delta-seconds and HTTP-date forms.
+fn retry_after_delay(headers: Option<&HeaderMap>) -> Option<Duration> {
+    let value = extract_header(headers, RETRY_AFTER_HEADER)?;
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        date.signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 fn extract_header(headers: Option<&HeaderMap>, name: &str) -> Option<String> {

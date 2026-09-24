@@ -294,6 +294,113 @@ async fn responses_http_uses_local_backoff_despite_retry_after() -> Result<()> {
     Ok(())
 }
 
+/// Fork: an HTTP 429 without a usage-limit body is retried by the turn layer using the
+/// server-advised delay instead of ending the turn.
+#[tokio::test(flavor = "current_thread")]
+async fn responses_http_rate_limit_uses_server_advised_retry_delay() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let mut telemetry = RetryTelemetryCapture::install();
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "1")
+                .set_body_json(json!({ "error": { "message": "Too many requests" } })),
+            responses::sse_response(responses::sse(vec![
+                responses::ev_response_created("recovered"),
+                responses::ev_completed("recovered"),
+            ])),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    submit_user_input(&test, "retry the upstream rate limit").await?;
+    let retry = telemetry.next_retry().await;
+    assert_eq!(
+        retry,
+        RetryTelemetryEvent {
+            attempt: 1,
+            delay: Duration::from_secs(1),
+            layer: "stream".into(),
+            operation: "sampling".into(),
+        }
+    );
+    assert!(wait_for_retry(&mut telemetry, &retry).await >= Duration::from_secs(1));
+    wait_for_turn_completion(&test).await;
+
+    assert_eq!(response_mock.requests().len(), 2);
+    assert_eq!(
+        telemetry.events.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    );
+    Ok(())
+}
+
+/// Fork: rate-limit retries still stop at `stream_max_retries` and surface one terminal error.
+#[tokio::test(flavor = "current_thread")]
+async fn responses_http_rate_limit_exhausts_stream_retries() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let rate_limited =
+        || ResponseTemplate::new(429).set_body_json(json!({ "error": { "message": "slow down" } }));
+    let response_mock = responses::mount_response_sequence(
+        &server,
+        /*responses*/ vec![rate_limited(), rate_limited()],
+    )
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    submit_user_input(&test, "exhaust the rate-limit retry budget").await?;
+
+    let mut error_events = 0;
+    let mut stream_error_events = 0;
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::Error(error) => {
+                error_events += 1;
+                assert_eq!(
+                    error.codex_error_info,
+                    Some(CodexErrorInfo::ResponseTooManyFailedAttempts {
+                        http_status_code: Some(429),
+                    })
+                );
+            }
+            EventMsg::StreamError(_) => stream_error_events += 1,
+            EventMsg::TurnComplete(event) => {
+                assert_eq!(
+                    event.error.and_then(|error| error.codex_error_info),
+                    Some(CodexErrorInfo::ResponseTooManyFailedAttempts {
+                        http_status_code: Some(429),
+                    })
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(error_events, 1);
+    assert_eq!(stream_error_events, 1, "the first retry should be reported");
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
 /// Check backoff without a live server or tracing events coordinating the retry loop.
 #[tokio::test(start_paused = true)]
 async fn http_retry_backoff_exhausts_attempts() {
@@ -1474,6 +1581,7 @@ async fn websocket_connection_limit_retries_with_local_backoff() -> Result<()> {
 
 // TODO(anp) respect Retry-After
 /// Nested websocket retry headers are currently ignored, leaving rate-limit errors terminal.
+#[ignore = "fork: plain HTTP 429 is intentionally stream-retryable, conflicting with this upstream test's terminal-rate-limit premise"]
 #[tokio::test(flavor = "current_thread")]
 async fn websocket_rate_limit_with_nested_retry_after_is_terminal() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1547,6 +1655,7 @@ async fn websocket_rate_limit_with_nested_retry_after_is_terminal() -> Result<()
 }
 
 /// Headerless websocket rate limits complete with the same terminal error as nested headers.
+#[ignore = "fork: plain HTTP 429 is intentionally stream-retryable, conflicting with this upstream test's terminal-rate-limit premise"]
 #[tokio::test(flavor = "current_thread")]
 async fn websocket_rate_limit_without_retry_after_is_terminal() -> Result<()> {
     skip_if_no_network!(Ok(()));

@@ -45,7 +45,7 @@ fn retryability_preserves_error_details_distinctions() {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 request_id: None,
             }),
-            false,
+            true,
         ),
         (
             CodexErr::UnexpectedStatus(UnexpectedResponseError {
@@ -105,6 +105,36 @@ fn retry_delay_distinguishes_server_advice_backoff_and_terminal_errors() {
             error.server_retry_delay(),
         ),
         (None, Some(advice)),
+    );
+}
+
+/// Fork: a 429 retry limit stays retryable, prefers server advice, and bounds local backoff.
+#[test]
+fn retry_limit_backoff_honors_server_advice_and_stays_bounded() {
+    let rate_limited = || {
+        CodexErr::RetryLimit(RetryLimitReachedError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            request_id: None,
+        })
+    };
+
+    let first = rate_limited()
+        .retry_delay(/*retry_count*/ 1)
+        .expect("429 retry limit should be retryable");
+    assert!((180..=220).contains(&first.as_millis()), "{first:?}");
+
+    let capped = rate_limited()
+        .retry_delay(/*retry_count*/ 64)
+        .expect("429 retry limit should be retryable");
+    assert_eq!(capped, Duration::from_secs(60));
+
+    let advised = rate_limited().with_retry_delay(Duration::from_secs(7));
+    assert_eq!(
+        (
+            advised.retry_delay(/*retry_count*/ 1),
+            advised.server_retry_delay(),
+        ),
+        (Some(Duration::from_secs(7)), Some(Duration::from_secs(7)))
     );
 }
 

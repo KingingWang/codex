@@ -34,6 +34,13 @@ pub type Result<T> = std::result::Result<T, CodexErr>;
 /// Limit UI error messages to a reasonable size while keeping useful context.
 const ERROR_MESSAGE_UI_MAX_BYTES: usize = 2 * 1024;
 
+/// Upper bound for locally computed retry delays.
+///
+/// Retry budgets are user configurable and uncapped, so exponential backoff must be bounded;
+/// otherwise a large `stream_max_retries` would sleep for effectively forever between attempts.
+/// Server-advised delays are honored as-is and are not subject to this bound.
+const MAX_LOCAL_RETRY_DELAY: Duration = Duration::from_secs(60);
+
 #[derive(Error, Debug)]
 pub enum SandboxErr {
     /// Error from sandbox execution
@@ -375,7 +382,8 @@ impl CodexErr {
     /// Returns the delay before the given retry attempt, or `None` for a terminal error.
     ///
     /// The first retry is attempt one. Retryable errors use server advice when available and
-    /// otherwise use exponential backoff with jitter. Callers enforce their own retry budgets.
+    /// otherwise use exponential backoff with jitter, capped at 60 seconds.
+    /// Callers enforce their own retry budgets.
     pub fn retry_delay(&self, retry_count: u64) -> Option<Duration> {
         match self.details() {
             CodexErrorDetails::TurnAborted
@@ -392,7 +400,6 @@ impl CodexErr {
             | CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::Sandbox(_)
             | CodexErrorDetails::LandlockSandboxExecutableNotProvided
-            | CodexErrorDetails::RetryLimit(_)
             | CodexErrorDetails::ContextWindowExceeded
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. }
@@ -405,6 +412,7 @@ impl CodexErr {
             CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::Stream(..)
             | CodexErrorDetails::RateLimitExceeded(_)
+            | CodexErrorDetails::RetryLimit(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
             | CodexErrorDetails::UnexpectedStatus(_)
@@ -416,7 +424,7 @@ impl CodexErr {
             | CodexErrorDetails::Json(_)
             | CodexErrorDetails::TokioJoin(_) => Some(
                 self.server_retry_delay
-                    .unwrap_or_else(|| backoff(retry_count)),
+                    .unwrap_or_else(|| backoff(retry_count).min(MAX_LOCAL_RETRY_DELAY)),
             ),
             #[cfg(target_os = "linux")]
             CodexErrorDetails::LandlockRuleset(_) | CodexErrorDetails::LandlockPathFd(_) => None,

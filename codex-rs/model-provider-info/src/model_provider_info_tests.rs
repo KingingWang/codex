@@ -852,3 +852,27 @@ model_catalog_url = "https://gateway.example/codex/catalog?token=catalog-secret"
         "https://gateway.example/v1"
     );
 }
+
+/// Fork: configured retry budgets are honored as-is instead of being clamped to 100.
+#[test]
+fn retry_budgets_honor_configured_values() {
+    let info = ModelProviderInfo {
+        request_max_retries: Some(1000),
+        stream_max_retries: Some(200),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        (info.request_max_retries(), info.stream_max_retries()),
+        (1000, 200)
+    );
+
+    let defaults = ModelProviderInfo::default();
+    assert_eq!(
+        (
+            defaults.request_max_retries(),
+            defaults.stream_max_retries()
+        ),
+        (4, 5)
+    );
+}
