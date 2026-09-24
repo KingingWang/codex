@@ -41,7 +41,7 @@ pub(super) fn multi_agent_v2_handler(
                     .and_then(|properties| properties.get_mut(&name))
                 {
                     property.encrypted = if name == "message" {
-                        None
+                        Some(false)
                     } else {
                         schema.encrypted
                     };

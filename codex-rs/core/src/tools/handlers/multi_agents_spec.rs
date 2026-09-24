@@ -192,9 +192,7 @@ pub fn create_send_message_tool() -> ToolSpec {
         ),
         (
             "message".to_string(),
-            JsonSchema::string(Some(
-                "Message text to queue on the target agent.".to_string(),
-            )),
+            plaintext_agent_message_schema(Some("Message text to queue on the target agent.")),
         ),
     ]);
 
@@ -224,9 +222,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
         ),
         (
             "message".to_string(),
-            JsonSchema::string(Some(
-                "Message text to send to the target agent.".to_string(),
-            )),
+            plaintext_agent_message_schema(Some("Message text to send to the target agent.")),
         ),
     ]);
 
@@ -629,8 +625,8 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
     BTreeMap::from([
         (
             "message".to_string(),
-            JsonSchema::string(Some(
-                "Initial plain-text task for the new agent.".to_string(),
+            plaintext_agent_message_schema(Some(
+                "Initial plain-text task for the new agent.",
             )),
         ),
         (
@@ -660,6 +656,12 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
     ])
+}
+
+fn plaintext_agent_message_schema(description: Option<&str>) -> JsonSchema {
+    let mut schema = JsonSchema::string(description.map(str::to_owned));
+    schema.encrypted = Some(false);
+    schema
 }
 
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {

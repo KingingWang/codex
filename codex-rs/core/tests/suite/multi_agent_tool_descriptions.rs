@@ -29,7 +29,7 @@ const CATALOG_PARAMETERS: &str = r#"{
     "title": "Catalog parameters",
     "properties": {
         "catalog_limit": {"type": "integer", "description": "Catalog limit."},
-        "message": {"type": "string", "description": "Catalog message."}
+        "message": {"type": "string", "description": "Catalog message.", "encrypted": false}
     },
     "required": ["catalog_limit"],
     "additionalProperties": false,
@@ -41,7 +41,7 @@ const EXPECTED_CATALOG_PARAMETERS: &str = r#"{
     "type": "object",
     "properties": {
         "catalog_limit": {"type": "integer", "description": "Catalog limit."},
-        "message": {"type": "string", "description": "Catalog message."}
+        "message": {"type": "string", "description": "Catalog message.", "encrypted": false}
     },
     "required": ["catalog_limit"],
     "additionalProperties": false,
@@ -200,6 +200,13 @@ async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
                 .iter_mut()
                 .find(|tool| tool["name"] == name)
                 .expect(name);
+            if matches!(name, "spawn_agent" | "send_message" | "followup_task") {
+                assert_eq!(
+                    expected_tool.pointer("/parameters/properties/message/encrypted"),
+                    Some(&serde_json::json!(false)),
+                    "wire schema for {name} must explicitly opt out of encryption"
+                );
+            }
             let actual_tool = actual_tools
                 .iter()
                 .find(|tool| tool["name"] == name)

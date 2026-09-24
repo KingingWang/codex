@@ -2929,7 +2929,7 @@ async fn multi_agent_v2_message_schemas_are_plaintext() {
             properties
                 .get("message")
                 .and_then(|schema| schema.encrypted),
-            None
+            Some(false)
         );
     }
 }
@@ -2991,7 +2991,7 @@ async fn multi_agent_v2_catalog_overrides_cannot_encrypt_messages() {
             .as_ref()
             .and_then(|properties| properties.get("message"))
             .and_then(|schema| schema.encrypted),
-        None
+        Some(false)
     );
 }
 
