@@ -8,13 +8,11 @@
 //! codex-core's `responses_retry` retries the sampling request up to
 //! `stream_max_retries` before failing the turn.
 //!
-//! Environment note: this fork no longer registers a built-in `openai` model
-//! provider, and `test_codex().build()` resolves the default provider via
+//! Environment note: `test_codex().build()` resolves the default provider via
 //! `built_in_model_providers()["openai"]`, so this test (like
 //! `stream_error_allows_next_turn` and others that rely on the default
 //! provider template) can only run where a network-disabled sandbox override
-//! is present (CI). The assertion logic itself is exercised end-to-end once
-//! the fork restores the `openai` provider or switches the builder default.
+//! is present (CI).
 
 use codex_core::TurnInputRequest;
 use codex_model_provider_info::ModelProviderInfo;
@@ -54,38 +52,16 @@ fn assistant_text_sse_body() -> Vec<u8> {
     body.into_bytes()
 }
 
-// NOTE: This integration test is `#[ignore]` because the current fork removed
-// the built-in `openai` provider from `built_in_model_providers` (only OSS
-// providers remain), while `core/src/config/mod.rs` still defaults
-// `model_provider_id` to `"openai"`. That mismatch makes `load_default_config_for_test`
-// fail with "Model provider `openai` not found" before the test body runs,
-// affecting every `test_codex().build()`-based suite test in this fork
-// (including the pre-existing `stream_error_allows_next_turn`). The test logic
-// is correct and runs in environments where the provider catalog includes an
-// `openai` entry; remove the `#[ignore]` once the fork restores the provider
-// or makes the default `model_provider_id` catalog-agnostic.
-#[ignore = "fork: built-in `openai` provider removed; test harness cannot build config"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reasoning_only_chat_completions_response_is_retried_until_success() {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
 
-    // Wire mocks in reverse order of evaluation: the success mock is mounted
-    // first so the reasoning-only mock (mounted later) is evaluated first and
-    // consumes the first two attempts. The third attempt then falls through to
-    // the success mock.
-    let ok = ResponseTemplate::new(200)
-        .insert_header("content-type", "text/event-stream")
-        .set_body_raw(assistant_text_sse_body(), "text/event-stream");
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .and(body_string_contains("please reply"))
-        .respond_with(ok)
-        .expect(1)
-        .mount(&server)
-        .await;
-
+    // wiremock matches mounted mocks in mount order, and a mock stops matching
+    // once it has served `up_to_n_times` requests. Mount the reasoning-only mock
+    // first so it consumes the first two attempts, then fall through to the
+    // success mock on the third.
     let reasoning_only = ResponseTemplate::new(200)
         .insert_header("content-type", "text/event-stream")
         .set_body_raw(reasoning_only_sse_body(), "text/event-stream");
@@ -94,6 +70,17 @@ async fn reasoning_only_chat_completions_response_is_retried_until_success() {
         .and(body_string_contains("please reply"))
         .respond_with(reasoning_only)
         .up_to_n_times(2)
+        .mount(&server)
+        .await;
+
+    let ok = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_raw(assistant_text_sse_body(), "text/event-stream");
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("please reply"))
+        .respond_with(ok)
+        .expect(1)
         .mount(&server)
         .await;
 

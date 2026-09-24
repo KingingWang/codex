@@ -181,45 +181,35 @@ supports_websockets = true
 }
 
 #[test]
-fn test_personal_access_token_requires_explicit_base_url() {
-    // DISABLED: Internal deployment - removed external OpenAI/ChatGPT defaults.
-    // Without an explicit `base_url`, a chatgpt/pat provider must NOT fall
-    // back to the implicit ChatGPT Codex base URL; it must error out.
-    let result = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
-        .to_api_provider(Some(AuthMode::PersonalAccessToken));
-    assert!(
-        result.is_err(),
-        "personal-access-token provider must require an explicit base_url (external defaults disabled)"
-    );
+fn test_personal_access_token_uses_chatgpt_codex_base_url() {
+    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        .to_api_provider(Some(AuthMode::PersonalAccessToken))
+        .expect("OpenAI provider should build API provider");
 
-    // When an explicit base_url is configured, it is preserved verbatim and
-    // must NOT be silently rewritten to the upstream ChatGPT Codex URL.
+    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+}
+
+#[test]
+fn test_explicit_base_url_is_preserved_verbatim() {
     let api_provider = ModelProviderInfo::create_openai_provider(Some(
         "https://configured.example.com/codex".to_string(),
     ))
     .to_api_provider(Some(AuthMode::PersonalAccessToken))
     .expect("OpenAI provider with explicit base_url should build API provider");
-    assert_ne!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+
+    assert_eq!(
+        api_provider.base_url,
+        "https://configured.example.com/codex".to_string()
+    );
 }
 
 #[test]
-fn test_header_auth_requires_explicit_base_url() {
-    // DISABLED: Internal deployment - removed external OpenAI/ChatGPT defaults.
-    // Header-auth providers must likewise require an explicit `base_url`
-    // instead of falling back to the implicit ChatGPT Codex base URL.
-    let result = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
-        .to_api_provider(Some(AuthMode::Headers));
-    assert!(
-        result.is_err(),
-        "header-auth provider must require an explicit base_url (external defaults disabled)"
-    );
+fn test_header_auth_uses_chatgpt_codex_base_url() {
+    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        .to_api_provider(Some(AuthMode::Headers))
+        .expect("OpenAI provider should build API provider");
 
-    let api_provider = ModelProviderInfo::create_openai_provider(Some(
-        "https://configured.example.com/codex".to_string(),
-    ))
-    .to_api_provider(Some(AuthMode::Headers))
-    .expect("OpenAI provider with explicit base_url should build API provider");
-    assert_ne!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
 }
 
 #[test]
@@ -426,21 +416,45 @@ fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
 }
 
 #[test]
-fn test_built_in_model_providers_exclude_external_providers() {
-    // Internal deployment: OpenAI and Amazon Bedrock built-in defaults are
-    // disabled. Users must configure their own model_providers in config.toml.
+fn test_built_in_model_providers_include_openai_and_exclude_bedrock() {
     let providers = built_in_model_providers(/*openai_base_url*/ None);
 
     for provider_id in [
         OPENAI_PROVIDER_ID,
+        OLLAMA_OSS_PROVIDER_ID,
+        LMSTUDIO_OSS_PROVIDER_ID,
+    ] {
+        assert!(
+            providers.contains_key(provider_id),
+            "{provider_id} must be a built-in provider"
+        );
+    }
+
+    // Internal deployment: the Amazon Bedrock built-ins stay disabled, so a
+    // configured Bedrock entry is merged as a custom provider instead.
+    for provider_id in [
         AMAZON_BEDROCK_PROVIDER_ID,
         AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
     ] {
         assert!(
-            providers.get(provider_id).is_none(),
+            !providers.contains_key(provider_id),
             "{provider_id} must not be a built-in provider in internal deployment"
         );
     }
+}
+
+#[test]
+fn test_built_in_model_providers_honor_openai_base_url_override() {
+    let providers = built_in_model_providers(Some("https://codex.example.test/v1".to_string()));
+
+    assert_eq!(
+        providers
+            .get(OPENAI_PROVIDER_ID)
+            .expect("openai provider should be built in")
+            .base_url
+            .as_deref(),
+        Some("https://codex.example.test/v1")
+    );
 }
 
 #[test]

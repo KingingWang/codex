@@ -421,13 +421,25 @@ other non-default provider fields are not supported"
     }
 
     /// Builds an API provider with managed residency taking precedence over configured headers.
-    pub fn to_api_provider(&self, _auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
-        // DISABLED: Internal deployment - removed external OpenAI/ChatGPT defaults
-        // Users must configure their own model_providers in config.toml
+    pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
+        let default_base_url = if matches!(
+            auth_mode,
+            Some(
+                AuthMode::Chatgpt
+                    | AuthMode::ChatgptAuthTokens
+                    | AuthMode::Headers
+                    | AuthMode::AgentIdentity
+                    | AuthMode::PersonalAccessToken
+            )
+        ) {
+            CHATGPT_CODEX_BASE_URL
+        } else {
+            "https://api.openai.com/v1"
+        };
         let base_url = self
             .base_url
             .clone()
-            .ok_or_else(|| CodexErr::InvalidRequest("No base_url configured for provider. Please set base_url in your model_providers config.".to_string()))?;
+            .unwrap_or_else(|| default_base_url.to_string());
 
         let mut headers = self.build_header_map()?;
         if let Some(requirement) = read_managed_residency_requirement() {
@@ -646,12 +658,19 @@ pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers(
-    _openai_base_url: Option<String>,
+    openai_base_url: Option<String>,
 ) -> HashMap<String, ModelProviderInfo> {
-    // DISABLED: Internal deployment - removed OpenAI and Amazon Bedrock providers
-    // Users must configure their own model_providers in config.toml
-    // Only OSS providers are kept as they connect to localhost by default
+    use ModelProviderInfo as P;
+    let openai_provider = P::create_openai_provider(openai_base_url);
+
+    // DISABLED: Internal deployment - the Amazon Bedrock built-ins stay removed,
+    // so a configured Bedrock entry is merged as a custom provider instead.
+    // We do not want to be in the business of adjudicating which third-party
+    // providers are bundled with Codex CLI, so we only include the OpenAI and
+    // open source ("oss") providers by default. Users are encouraged to add to
+    // `model_providers` in config.toml to add their own providers.
     [
+        (OPENAI_PROVIDER_ID, openai_provider),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
@@ -703,11 +722,13 @@ pub fn merge_configured_model_providers(
                 // Built-in Amazon Bedrock provider is not present (e.g. internal
                 // deployment with built-in defaults disabled): treat a configured
                 // Bedrock entry as a custom provider so it is not dropped.
-                let mut custom = ModelProviderInfo::default();
-                custom.base_url = base_url_override;
-                custom.auth = auth_override;
-                custom.aws = aws_override;
-                custom.http_headers = http_headers_override;
+                let custom = ModelProviderInfo {
+                    base_url: base_url_override,
+                    auth: auth_override,
+                    aws: aws_override,
+                    http_headers: http_headers_override,
+                    ..ModelProviderInfo::default()
+                };
                 model_providers.insert(key, custom);
             }
         } else {
