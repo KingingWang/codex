@@ -2,6 +2,7 @@ use super::*;
 use crate::ModelsManagerConfig;
 use codex_prompts::render_model_instructions;
 use codex_protocol::config_types::Personality;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ApprovalMessages;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::CollaborationModeMessages;
@@ -17,6 +18,19 @@ use codex_protocol::openai_models::PermissionMessages;
 use codex_protocol::openai_models::ToolMessage;
 use codex_protocol::openai_models::ToolMessages;
 use pretty_assertions::assert_eq;
+
+#[test]
+fn apply_patch_tool_type_override_sets_model_info() {
+    let config = ModelsManagerConfig {
+        model_apply_patch_tool_type: Some(ApplyPatchToolType::Function),
+        ..Default::default()
+    };
+    let model = with_config_overrides(model_info_from_slug("unknown-model"), &config);
+    assert_eq!(
+        model.apply_patch_tool_type,
+        Some(ApplyPatchToolType::Function)
+    );
+}
 
 fn config_with_personality(personality: Option<Personality>) -> ModelsManagerConfig {
     ModelsManagerConfig {

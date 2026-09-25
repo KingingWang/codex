@@ -47,6 +47,7 @@ mod approvals;
 mod audio_truncation;
 mod auto_review;
 mod catalog_permission_messages;
+mod chat_completions_apply_patch;
 mod chat_completions_reasoning_effort;
 mod chat_completions_reasoning_item_order;
 mod chat_completions_reasoning_retry;

@@ -1,4 +1,5 @@
 use codex_protocol::config_types::Personality;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ModelsResponse;
 
 #[derive(Debug, Clone, Default)]
@@ -9,4 +10,5 @@ pub struct ModelsManagerConfig {
     pub base_instructions: Option<String>,
     pub personality: Option<Personality>,
     pub model_catalog: Option<ModelsResponse>,
+    pub model_apply_patch_tool_type: Option<ApplyPatchToolType>,
 }

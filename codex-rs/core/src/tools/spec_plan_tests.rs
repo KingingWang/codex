@@ -519,6 +519,24 @@ fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
 }
 
 #[tokio::test]
+async fn apply_patch_function_tool_type_produces_function_spec() {
+    let plan = probe(|turn| {
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
+                Some(ApplyPatchToolType::Function);
+        });
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    let ToolSpec::Function(tool) = plan.visible_spec("apply_patch") else {
+        panic!("apply_patch should be a function tool");
+    };
+    assert_eq!(tool.name, "apply_patch");
+    assert!(has_parameter(plan.visible_spec("apply_patch"), "input"));
+}
+
+#[tokio::test]
 async fn allowed_tools_filter_sources_before_code_mode_and_discovery() {
     use crate::tools::registry::ToolRegistry;
     use codex_extension_api::ToolPolicy;

@@ -20,6 +20,28 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+#[test]
+fn build_tools_passes_function_apply_patch_and_skips_freeform() {
+    let (tools, _) = build_tools(&[
+        crate::tools::handlers::apply_patch_spec::create_apply_patch_json_tool(
+            /*include_environment_id*/ false,
+        ),
+        crate::tools::handlers::apply_patch_spec::create_apply_patch_freeform_tool(
+            /*include_environment_id*/ false,
+        ),
+    ])
+    .expect("build tools");
+
+    // Anthropic tools carry JSON-schema inputs like Chat Completions function
+    // tools, so only the function-shaped apply_patch survives.
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "apply_patch");
+    assert!(
+        tools[0].input_schema["properties"]["input"].is_object(),
+        "apply_patch should expose an `input` string parameter"
+    );
+}
+
 fn test_model_info() -> ModelInfo {
     serde_json::from_value(json!({
         "slug": "claude-3-7-sonnet",

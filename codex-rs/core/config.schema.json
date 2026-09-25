@@ -242,6 +242,13 @@
       "description": "Tool settings for a single app.",
       "type": "object"
     },
+    "ApplyPatchToolType": {
+      "enum": [
+        "freeform",
+        "function"
+      ],
+      "type": "string"
+    },
     "ApprovalsReviewer": {
       "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
       "enum": [
@@ -7210,6 +7217,14 @@
     "model": {
       "description": "Optional override of model selection.",
       "type": "string"
+    },
+    "model_apply_patch_tool_type": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ApplyPatchToolType"
+        }
+      ],
+      "description": "Forces the `apply_patch` tool shape for the selected model. Use `\"function\"` for providers on the Chat Completions or Anthropic wire protocols, which do not support freeform custom tools. When omitted, the model metadata from the provider catalog decides."
     },
     "model_auto_compact_token_limit": {
       "description": "Token usage threshold triggering auto-compaction of conversation history.",

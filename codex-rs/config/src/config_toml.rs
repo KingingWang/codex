@@ -51,6 +51,7 @@ use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -165,6 +166,12 @@ pub struct ConfigToml {
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
+
+    /// Forces the `apply_patch` tool shape for the selected model. Use
+    /// `"function"` for providers on the Chat Completions or Anthropic wire
+    /// protocols, which do not support freeform custom tools. When omitted,
+    /// the model metadata from the provider catalog decides.
+    pub model_apply_patch_tool_type: Option<ApplyPatchToolType>,
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,

@@ -13,6 +13,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
@@ -184,6 +185,7 @@ pub(crate) struct ModelInfoOverrides {
     pub(crate) auto_compact_token_limit: Option<i64>,
     pub(crate) tool_output_token_limit: Option<usize>,
     pub(crate) base_instructions: Option<String>,
+    pub(crate) apply_patch_tool_type: Option<ApplyPatchToolType>,
 }
 
 impl From<ModelsManagerConfig> for ModelInfoOverrides {
@@ -193,6 +195,7 @@ impl From<ModelsManagerConfig> for ModelInfoOverrides {
             auto_compact_token_limit: config.model_auto_compact_token_limit,
             tool_output_token_limit: config.tool_output_token_limit,
             base_instructions: config.base_instructions,
+            apply_patch_tool_type: config.model_apply_patch_tool_type,
         }
     }
 }
@@ -210,6 +213,7 @@ impl ModelInfoOverrides {
             personality,
             // The models manager already owns its catalog.
             model_catalog: None,
+            model_apply_patch_tool_type: self.apply_patch_tool_type.clone(),
         }
     }
 }

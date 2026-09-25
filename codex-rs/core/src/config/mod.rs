@@ -116,6 +116,7 @@ use codex_protocol::models::PermissionProfile;
 pub use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ProfileWorkspaceRoot;
 use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::DenyReadValidator;
@@ -630,6 +631,10 @@ pub struct Config {
     /// Controls whether `model_auto_compact_token_limit` applies to the full
     /// active context or only tokens after the carried compaction-window prefix.
     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
+
+    /// Forces the `apply_patch` tool shape for the selected model, overriding
+    /// the provider catalog metadata.
+    pub model_apply_patch_tool_type: Option<ApplyPatchToolType>,
 
     /// Percentage of the usable context window that triggers turn-end compaction.
     /// Zero disables turn-end compaction.
@@ -1650,6 +1655,7 @@ impl Config {
             }),
             personality: self.personality,
             model_catalog: self.model_catalog.clone(),
+            model_apply_patch_tool_type: self.model_apply_patch_tool_type.clone(),
         }
     }
 
@@ -4194,6 +4200,7 @@ impl Config {
             service_tier,
             review_model,
             model_context_window: cfg.model_context_window,
+            model_apply_patch_tool_type: cfg.model_apply_patch_tool_type.clone(),
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg
                 .model_auto_compact_token_limit_scope

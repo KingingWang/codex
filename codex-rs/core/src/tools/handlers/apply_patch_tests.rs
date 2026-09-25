@@ -95,6 +95,61 @@ async fn pre_tool_use_payload_uses_freeform_patch_input() {
 }
 
 #[tokio::test]
+async fn pre_tool_use_payload_parses_function_arguments() {
+    let patch = sample_patch();
+    let payload = ToolPayload::Function {
+        arguments: serde_json::to_string(&ApplyPatchToolArgs {
+            input: patch.to_string(),
+        })
+        .expect("serialize args"),
+    };
+    let invocation = invocation_for_payload(payload).await;
+    let handler = ApplyPatchHandler::new(
+        ApplyPatchToolType::Function,
+        /*multi_environment*/ false,
+    );
+
+    assert_eq!(
+        handler.pre_tool_use_payload(&invocation),
+        Some(PreToolUsePayload {
+            tool_name: HookToolName::apply_patch(),
+            tool_input: json!({ "command": patch }),
+        })
+    );
+}
+
+#[test]
+fn handler_matches_only_the_payload_kind_of_its_tool_type() {
+    let function_handler = ApplyPatchHandler::new(
+        ApplyPatchToolType::Function,
+        /*multi_environment*/ false,
+    );
+    assert!(function_handler.matches_kind(&ToolPayload::Function {
+        arguments: "{}".to_string(),
+    }));
+    assert!(!function_handler.matches_kind(&ToolPayload::Custom {
+        input: "*** Begin Patch".to_string(),
+    }));
+
+    let freeform_handler = ApplyPatchHandler::default();
+    assert!(freeform_handler.matches_kind(&ToolPayload::Custom {
+        input: "*** Begin Patch".to_string(),
+    }));
+    assert!(!freeform_handler.matches_kind(&ToolPayload::Function {
+        arguments: "{}".to_string(),
+    }));
+}
+
+#[test]
+fn function_tool_type_produces_function_spec() {
+    let handler = ApplyPatchHandler::new(
+        ApplyPatchToolType::Function,
+        /*multi_environment*/ false,
+    );
+    assert!(matches!(handler.spec(), ToolSpec::Function(_)));
+}
+
+#[tokio::test]
 async fn post_tool_use_payload_uses_patch_input_and_tool_output() {
     let patch = sample_patch();
     let payload = ToolPayload::Custom {
