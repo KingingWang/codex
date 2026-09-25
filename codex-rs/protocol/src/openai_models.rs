@@ -601,6 +601,7 @@ pub struct ToolMessage {
     /// Uses the harness's supported schema subset; unrecognized keywords are ignored.
     /// Missing, null, invalid or unsupported structures, or a root without `type: "object"`
     /// retains the harness parameters. Schema semantics must remain API-compatible.
+    /// Overrides must declare harness-encrypted properties so their annotations can be retained.
     /// Argument handling is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<String>,

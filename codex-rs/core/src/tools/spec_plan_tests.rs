@@ -21,10 +21,6 @@ use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelMessages;
-use codex_protocol::openai_models::MultiAgentToolMessages;
-use codex_protocol::openai_models::ToolMessage;
-use codex_protocol::openai_models::ToolMessages;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -54,7 +50,6 @@ use crate::responses_metadata::TurnToolSource;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::mcp_config_for_test;
-use crate::session::tests::update_selected_settings_for_test;
 use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::McpHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -2921,7 +2916,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_plaintext() {
+async fn multi_agent_v2_message_schemas_are_encrypted() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
@@ -2947,70 +2942,9 @@ async fn multi_agent_v2_message_schemas_are_plaintext() {
             properties
                 .get("message")
                 .and_then(|schema| schema.encrypted),
-            Some(false)
+            Some(true)
         );
     }
-}
-
-#[tokio::test]
-async fn multi_agent_v2_catalog_overrides_cannot_encrypt_messages() {
-    let mut model = codex_models_manager::model_info::model_info_from_slug("gpt-5.4");
-    model.multi_agent_version = Some(MultiAgentVersion::V2);
-    model.model_messages = Some(ModelMessages {
-        tools: Some(ToolMessages {
-            multi_agent: Some(MultiAgentToolMessages {
-                send_message: Some(ToolMessage {
-                    parameters: Some(
-                        json!({
-                            "type": "object",
-                            "properties": {
-                                "message": {
-                                    "type": "string",
-                                    "encrypted": true
-                                }
-                            }
-                        })
-                        .to_string(),
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    });
-    let plan = probe_with(
-        |turn| {
-            set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
-            update_turn_settings_for_test(turn, |settings| {
-                update_selected_settings_for_test(settings, |selected| {
-                    selected.collaboration_mode.settings.model = model.slug.clone();
-                });
-                settings.model_info = Arc::new(model);
-            });
-        },
-        ToolPlanInputs::default(),
-    )
-    .await;
-    let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
-        panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
-    };
-    let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace
-        .tools
-        .iter()
-        .find(|tool| matches!(tool, ResponsesApiNamespaceTool::Function(tool) if tool.name == "send_message"))
-    else {
-        panic!("expected send_message in {MULTI_AGENT_V2_NAMESPACE} namespace");
-    };
-    assert_eq!(
-        tool.parameters
-            .properties
-            .as_ref()
-            .and_then(|properties| properties.get("message"))
-            .and_then(|schema| schema.encrypted),
-        Some(false)
-    );
 }
 
 #[tokio::test]
