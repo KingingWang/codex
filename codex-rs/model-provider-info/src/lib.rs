@@ -66,10 +66,6 @@ const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 const DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_AWS_AUTH_REFRESH_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
-/// Hard cap for user-configured `stream_max_retries`.
-const MAX_STREAM_MAX_RETRIES: u64 = 100;
-/// Hard cap for user-configured `request_max_retries`.
-const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
@@ -81,20 +77,21 @@ const AMAZON_BEDROCK_RUNTIME_PROVIDER_NAME: &str = "Amazon Bedrock Runtime";
 pub const AMAZON_BEDROCK_RUNTIME_PROVIDER_ID: &str = "amazon-bedrock-runtime";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
 pub const AMAZON_BEDROCK_GPT_5_4_MODEL_ID: &str = "openai.gpt-5.4";
+// DISABLED: Internal deployment - external Bedrock default URL emptied.
+// Upstream 5.6 model IDs retained because they are referenced by the catalog;
+// they are inert string constants and do not enable external access by themselves.
 pub const AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID: &str = "openai.gpt-5.6-sol";
 pub const AMAZON_BEDROCK_GPT_6_SOL_MODEL_ID: &str = "openai.gpt-6-sol";
 pub const AMAZON_BEDROCK_GPT_6_LUNA_MODEL_ID: &str = "openai.gpt-6-luna";
 pub const AMAZON_BEDROCK_GPT_6_ASTRA_MODEL_ID: &str = "openai.gpt-6-astra";
 pub const AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID: &str = "openai.gpt-5.6-terra";
-pub const AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID: &str = "openai.gpt-5.6-luna";
 pub const AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_TERRA_MODEL_ID: &str =
     "global.openai.gpt-5.6-terra";
 pub const AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_ID: &str = "global.openai.gpt-5.6-luna";
-pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str =
-    "https://bedrock-mantle.us-east-1.api.aws/openai/v1";
+pub const AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID: &str = "openai.gpt-5.6-luna";
+pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str = "";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER: &str = "x-amzn-mantle-client-agent";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
-const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -105,12 +102,18 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// The Chat Completions API exposed by OpenAI at `/v1/chat/completions`.
+    Chat,
+    /// The Messages API exposed by Anthropic at `/v1/messages`.
+    Anthropic,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::Chat => "chat",
+            Self::Anthropic => "anthropic",
         };
         f.write_str(value)
     }
@@ -124,8 +127,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
-            "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            "chat" => Ok(Self::Chat),
+            "anthropic" => Ok(Self::Anthropic),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "chat", "anthropic"],
+            )),
         }
     }
 }
@@ -161,6 +168,10 @@ pub struct ModelProviderInfo {
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
+    /// Whether to use SSE streaming for Chat Completions API requests.
+    /// Defaults to `false` (non-streaming). Only applicable when `wire_api = "chat"`.
+    #[serde(default)]
+    pub chat_stream: bool,
     /// Optional query parameters to append to the base URL.
     pub query_params: Option<HashMap<String, RedactedString>>,
     /// Additional HTTP headers to include in requests to this provider where
@@ -484,17 +495,21 @@ other non-default provider fields are not supported"
     }
 
     /// Effective maximum number of request retries for this provider.
+    ///
+    /// The configured value is honored as-is; retry delays are capped by the retry
+    /// layers, so large values only extend how long we keep retrying.
     pub fn request_max_retries(&self) -> u64 {
         self.request_max_retries
             .unwrap_or(DEFAULT_REQUEST_MAX_RETRIES)
-            .min(MAX_REQUEST_MAX_RETRIES)
     }
 
     /// Effective maximum number of stream reconnection attempts for this provider.
+    ///
+    /// The configured value is honored as-is; retry delays are capped by the retry
+    /// layers, so large values only extend how long we keep retrying.
     pub fn stream_max_retries(&self) -> u64 {
         self.stream_max_retries
             .unwrap_or(DEFAULT_STREAM_MAX_RETRIES)
-            .min(MAX_STREAM_MAX_RETRIES)
     }
 
     /// Effective idle timeout for streaming responses.
@@ -523,6 +538,7 @@ other non-default provider fields are not supported"
             gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            chat_stream: false,
             query_params: None,
             http_headers: Some(
                 [("version".to_string(), env!("CARGO_PKG_VERSION").into())]
@@ -573,6 +589,7 @@ other non-default provider fields are not supported"
                 auth_refresh: None,
             })),
             wire_api: WireApi::Responses,
+            chat_stream: false,
             query_params: None,
             http_headers: Some(HashMap::from([(
                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string(),
@@ -647,21 +664,15 @@ pub fn built_in_model_providers(
 ) -> HashMap<String, ModelProviderInfo> {
     use ModelProviderInfo as P;
     let openai_provider = P::create_openai_provider(openai_base_url);
-    let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
-    let amazon_bedrock_runtime_provider =
-        P::create_amazon_bedrock_runtime_provider(/*aws*/ None);
 
-    // We do not want to be in the business of adjucating which third-party
+    // DISABLED: Internal deployment - the Amazon Bedrock built-ins stay removed,
+    // so a configured Bedrock entry is merged as a custom provider instead.
+    // We do not want to be in the business of adjudicating which third-party
     // providers are bundled with Codex CLI, so we only include the OpenAI and
     // open source ("oss") providers by default. Users are encouraged to add to
     // `model_providers` in config.toml to add their own providers.
     [
         (OPENAI_PROVIDER_ID, openai_provider),
-        (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
-        (
-            AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
-            amazon_bedrock_runtime_provider,
-        ),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
@@ -709,6 +720,18 @@ pub fn merge_configured_model_providers(
                         .get_or_insert_default()
                         .extend(http_headers_override);
                 }
+            } else {
+                // Built-in Amazon Bedrock provider is not present (e.g. internal
+                // deployment with built-in defaults disabled): treat a configured
+                // Bedrock entry as a custom provider so it is not dropped.
+                let custom = ModelProviderInfo {
+                    base_url: base_url_override,
+                    auth: auth_override,
+                    aws: aws_override,
+                    http_headers: http_headers_override,
+                    ..ModelProviderInfo::default()
+                };
+                model_providers.insert(key, custom);
             }
         } else {
             model_providers.entry(key).or_insert(provider);
@@ -749,6 +772,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         gateway_oauth: None,
         aws: None,
         wire_api,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,

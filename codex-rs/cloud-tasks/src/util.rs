@@ -30,7 +30,11 @@ pub fn append_error_log(message: impl AsRef<str>) {
 /// Normalize the configured base URL to a canonical form used by the backend client.
 /// - trims trailing '/'
 /// - appends '/backend-api' for ChatGPT hosts when missing
+/// - Returns empty string if input is empty (internal deployment: no default external URL)
 pub fn normalize_base_url(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
     let mut base_url = input.to_string();
     while base_url.ends_with('/') {
         base_url.pop();
@@ -46,6 +50,7 @@ pub fn normalize_base_url(input: &str) -> String {
 
 /// Validate the destination before loading saved ChatGPT credentials, including in mock mode:
 /// environment discovery still makes authenticated HTTP requests when the task backend is mocked.
+#[allow(dead_code)]
 pub(crate) fn validate_chatgpt_base_url(input: &str) -> anyhow::Result<String> {
     let invalid_url = || {
         anyhow::anyhow!(

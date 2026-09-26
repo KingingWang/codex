@@ -199,6 +199,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         model_auto_compact_token_limit: None,
         model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope::Total,
         model_post_turn_compact_threshold_percent: 0,
+        model_apply_patch_tool_type: None,
         model_provider_id,
         model_provider,
         personality: None,
@@ -332,6 +333,8 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         feedback_enabled: false,
         tool_suggest: ToolSuggestConfig::default(),
         otel: OtelConfig::default(),
+        dynamic_context_script: None,
+        dynamic_context_script_timeout: std::time::Duration::from_secs(5),
     };
     config
         .features

@@ -4,7 +4,6 @@ use codex_core::TurnInputRequest;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
@@ -183,7 +182,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
     let manager = codex_core::test_support::models_manager_with_provider(
         codex_home.path().to_path_buf(),
@@ -593,6 +592,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         tool_mode: None,
         multi_agent_version: None,
         multi_agent_reasoning_effort: None,
+        provider: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -868,6 +868,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
         tool_mode: None,
         multi_agent_version: None,
         multi_agent_reasoning_effort: None,
+        provider: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -1046,7 +1047,7 @@ async fn remote_models_do_not_append_removed_builtin_presets() -> Result<()> {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
     let manager = codex_core::test_support::models_manager_with_provider(
         codex_home.path().to_path_buf(),
@@ -1112,7 +1113,7 @@ async fn remote_models_merge_adds_new_high_priority_first() -> Result<()> {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
     let manager = codex_core::test_support::models_manager_with_provider(
         codex_home.path().to_path_buf(),
@@ -1164,7 +1165,7 @@ async fn remote_models_merge_replaces_overlapping_model() -> Result<()> {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
     let manager = codex_core::test_support::models_manager_with_provider(
         codex_home.path().to_path_buf(),
@@ -1213,7 +1214,7 @@ async fn remote_models_merge_preserves_bundled_models_on_empty_response() -> Res
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
     let manager = codex_core::test_support::models_manager_with_provider(
         codex_home.path().to_path_buf(),
@@ -1260,7 +1261,7 @@ async fn remote_models_request_times_out_after_5s() -> Result<()> {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
     let manager = codex_core::test_support::models_manager_with_provider(
         codex_home.path().to_path_buf(),
@@ -1335,7 +1336,7 @@ async fn remote_models_hide_picker_only_models() -> Result<()> {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
     let manager = codex_core::test_support::models_manager_with_provider(
         codex_home.path().to_path_buf(),
@@ -1456,6 +1457,7 @@ fn test_remote_model_with_policy(
         tool_mode: None,
         multi_agent_version: None,
         multi_agent_reasoning_effort: None,
+        provider: None,
         priority,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
