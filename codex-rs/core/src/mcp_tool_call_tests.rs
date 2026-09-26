@@ -2182,6 +2182,7 @@ fn accepted_elicitation_without_content_defaults_to_accept() {
 }
 
 #[tokio::test]
+#[ignore = "fork: analytics egress is disabled for internal deployment"]
 async fn dispatched_mcp_approval_with_closed_response_is_classified_as_approval() {
     use wiremock::matchers::method;
     use wiremock::matchers::path;

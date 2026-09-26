@@ -242,6 +242,13 @@
       "description": "Tool settings for a single app.",
       "type": "object"
     },
+    "ApplyPatchToolType": {
+      "enum": [
+        "freeform",
+        "function"
+      ],
+      "type": "string"
+    },
     "ApprovalsReviewer": {
       "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
       "enum": [
@@ -2552,6 +2559,11 @@
         "base_url": {
           "description": "Base URL for the provider's OpenAI-compatible API.",
           "type": "string"
+        },
+        "chat_stream": {
+          "default": false,
+          "description": "Whether to use SSE streaming for Chat Completions API requests. Defaults to `false` (non-streaming). Only applicable when `wire_api = \"chat\"`.",
+          "type": "boolean"
         },
         "env_http_headers": {
           "additionalProperties": {
@@ -6381,6 +6393,20 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "The Chat Completions API exposed by OpenAI at `/v1/chat/completions`.",
+          "enum": [
+            "chat"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The Messages API exposed by Anthropic at `/v1/messages`.",
+          "enum": [
+            "anthropic"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -6412,7 +6438,7 @@
           "$ref": "#/definitions/AnalyticsConfigToml"
         }
       ],
-      "description": "When `false`, disables analytics across Codex product surfaces in this machine. Defaults to `true`."
+      "description": "When `false`, disables analytics across Codex product surfaces in this machine. Defaults to `false` for internal deployments."
     },
     "approval_policy": {
       "allOf": [
@@ -6475,7 +6501,7 @@
       "type": "string"
     },
     "check_for_update_on_startup": {
-      "description": "When `true`, checks for Codex updates on startup and surfaces update prompts. Set to `false` only if your Codex updates are centrally managed. Defaults to `true`.",
+      "description": "When `true`, checks for Codex updates on startup and surfaces update prompts. Set to `false` only if your Codex updates are centrally managed. Defaults to `false` for internal deployments.",
       "type": "boolean"
     },
     "cli_auth_credentials_store": {
@@ -6520,6 +6546,16 @@
     "disable_paste_burst": {
       "description": "Legacy fallback for `tui.disable_paste_burst`. Prefer the setting under `[tui]`.",
       "type": "boolean"
+    },
+    "dynamic_context_script": {
+      "description": "Optional path to a script whose output is dynamically appended to the end of each request input. The script runs fresh for every sampling request and its output is never persisted to conversation history.",
+      "type": "string"
+    },
+    "dynamic_context_script_timeout_secs": {
+      "description": "Timeout in seconds for `dynamic_context_script` execution. Defaults to 5 seconds if not specified.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
     },
     "experimental_compact_prompt_file": {
       "$ref": "#/definitions/AbsolutePathBuf"
@@ -7066,7 +7102,7 @@
           "$ref": "#/definitions/FeedbackConfigToml"
         }
       ],
-      "description": "When `false`, disables feedback collection across Codex product surfaces. Defaults to `true`."
+      "description": "When `false`, disables feedback collection across Codex product surfaces. Defaults to `false` for internal deployments."
     },
     "file_opener": {
       "allOf": [
@@ -7225,6 +7261,14 @@
     "model": {
       "description": "Optional override of model selection.",
       "type": "string"
+    },
+    "model_apply_patch_tool_type": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ApplyPatchToolType"
+        }
+      ],
+      "description": "Forces the `apply_patch` tool shape for the selected model. Use `\"function\"` for providers on the Chat Completions or Anthropic wire protocols, which do not support freeform custom tools. When omitted, the model metadata from the provider catalog decides."
     },
     "model_auto_compact_token_limit": {
       "description": "Token usage threshold triggering auto-compaction of conversation history.",

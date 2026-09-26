@@ -219,6 +219,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
 }
 
 #[tokio::test]
+#[ignore = "fork: analytics egress is disabled for internal deployment"]
 async fn delegate_start_analytics_honors_child_opt_out_with_enabled_parent() {
     use codex_analytics::AnalyticsEventsClient;
     use codex_login::CodexAuth;
