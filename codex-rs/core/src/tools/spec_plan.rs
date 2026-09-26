@@ -816,6 +816,17 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
                 .is_some_and(AuthManager::current_auth_uses_codex_backend))
 }
 
+/// `view_image` is only useful when the model can consume images, so hide it
+/// from models whose catalog entry lacks the image input modality.
+fn view_image_available(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+    turn_context
+        .config
+        .features
+        .get()
+        .enabled(Feature::ViewImage)
+        && model_info.input_modalities.contains(&InputModality::Image)
+}
+
 fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOptions {
     if multi_agent_v2_enabled(turn_context) {
         return WaitAgentTimeoutOptions {
@@ -1196,8 +1207,19 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
     add_collaboration_tools(context, registry);
 }
 
+fn namespace_tools_enabled(turn_context: &TurnContext) -> bool {
+    turn_context.provider.capabilities().namespace_tools
+}
+
 fn standalone_web_search_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
-    turn_context.provider.capabilities().web_search
+    let provider = turn_context.provider.info();
+    let provider_supports_standalone_web_search = provider.is_openai()
+        || provider.uses_openai_actor_authorization()
+        || provider.supports_standalone_web_search;
+
+    namespace_tools_enabled(turn_context)
+        && provider_supports_standalone_web_search
+        && turn_context.provider.capabilities().web_search
         && (model_info.use_responses_lite
             || turn_context
                 .config
@@ -1429,9 +1451,14 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         ));
     }
 
-    if advertise_environment_tools && context.model_info.apply_patch_tool_type.is_some() {
+    if advertise_environment_tools
+        && let Some(apply_patch_tool_type) = &context.model_info.apply_patch_tool_type
+    {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
-        registry.add(ApplyPatchHandler::new(include_environment_id));
+        registry.add(ApplyPatchHandler::new(
+            apply_patch_tool_type.clone(),
+            include_environment_id,
+        ));
     }
 
     if context
@@ -1443,7 +1470,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(TestSyncHandler);
     }
 
-    if advertise_environment_tools && features.enabled(Feature::ViewImage) {
+    if advertise_environment_tools && view_image_available(turn_context, context.model_info) {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         registry.add(ViewImageHandler::new(ViewImageToolOptions {
             can_request_original_image_detail: can_request_original_image_detail(

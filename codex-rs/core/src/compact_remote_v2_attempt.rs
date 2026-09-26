@@ -136,9 +136,19 @@ pub(super) async fn run_remote_compact_v2_attempt(
             sess.services
                 .executed_tool_calls
                 .attach_to_compaction_prompt(&mut input);
-            let client_session = client_session.unwrap_or_else(|| {
-                owned_client_session.insert(sess.services.model_client.new_session())
-            });
+            let client_session = match client_session {
+                // Reuse the caller's session only when it targets the same provider.
+                // A standalone compaction or a compaction step running under another
+                // model's per-model provider override must not stream over the wrong
+                // provider's connection.
+                Some(client_session)
+                    if client_session.has_same_provider(&turn_context.provider) =>
+                {
+                    client_session
+                }
+                _ => owned_client_session
+                    .insert(sess.model_client_for_turn(turn_context).new_session()),
+            };
             (
                 model_info,
                 input_goal_ids,
