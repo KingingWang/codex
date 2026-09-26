@@ -1,0 +1,176 @@
+name: rust-release-simple
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 构建矩阵（musl 静态编译：x86_64 + aarch64）─────────
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 1200
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    strategy:
+      matrix:
+        include:
+          # ── musl 静态编译 ──
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            label: x86_64-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            label: aarch64-musl
+      fail-fast: false   # 一个失败不影响其他
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # 不指定版本，由 rust-toolchain.toml 控制实际使用的 Rust 版本
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── musl 专用步骤（与官方 rust-release.yml 一致）──
+      - name: Use hermetic Cargo home (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig (musl)
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy (musl)
+        shell: bash
+        run: |
+          # aws-lc-sys jitter entropy fails under musl on GitHub runners.
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+
+      # 下载官方预编译的 rusty_v8 musl 静态库
+      # denoland 官方 releases 没有 musl 版本，需要从 OpenAI 的 releases 下载
+      - name: Setup rusty_v8 artifacts (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # 从 Cargo.lock 读取 v8 版本
+          v8_version="$(grep -A 1 '^name = "v8"$' Cargo.lock | grep '^version = ' | sed 's/version = "\([^"]*\)"/\1/')"
+          echo "V8 version: ${v8_version}"
+          
+          target="${{ matrix.target }}"
+          release_tag="rusty-v8-v${v8_version}"
+          base_url="https://github.com/openai/codex/releases/download/${release_tag}"
+          binding_dir="${RUNNER_TEMP}/rusty_v8"
+          
+          mkdir -p "${binding_dir}"
+          
+          archive_path="${binding_dir}/librusty_v8_release_${target}.a.gz"
+          binding_path="${binding_dir}/src_binding_release_${target}.rs"
+          
+          echo "Downloading rusty_v8 artifacts from ${base_url}..."
+          curl -fsSL "${base_url}/librusty_v8_release_${target}.a.gz" -o "${archive_path}"
+          curl -fsSL "${base_url}/src_binding_release_${target}.rs" -o "${binding_path}"
+          
+          echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
+          echo "✅ rusty_v8 artifacts downloaded"
+
+      # ── 构建 ──
+      - name: Build release binary (musl)
+        env:
+          # workspace profile.release 默认 lto="fat" + codegen-units=4，是 OOM 元凶。
+          # fat LTO 把整个 workspace bitcode 全载入内存做全程序优化，峰值 >10GB，
+          # 在 16GB runner 上编到大型 crate（如 codex-core/tui）的 LTO 链接阶段
+          # 就吃光内存被 OOM killer 杀掉（exit 143 = SIGTERM）。改用 thin LTO +
+          # 16 codegen-units 降低单次内存峰值。
+          CARGO_PROFILE_RELEASE_LTO: "thin"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        # 与 macOS/release 对齐：只发布 `codex` CLI 二进制，
+        # 避免构建示例 crate（如 codex-thread-manager-sample），后者的
+        # tracing::instrument 异步块会触发 rustc 深度查询溢出
+        # ("queries overflow the depth limit")。
+        run: cargo build --release --target ${{ matrix.target }} --bin codex -j 1 --timings
+
+      # 将二进制重命名为带 OS 标识的名字
+      - name: Prepare release artifact
+        run: |
+          mkdir -p dist
+          BINARY_DIR="target/${{ matrix.target }}/release"
+          BINARY_NAME="codex-linux-${{ matrix.label }}"
+          cp "${BINARY_DIR}/codex" "dist/${BINARY_NAME}"
+          echo "binary=${BINARY_NAME}" >> "$GITHUB_ENV"
+
+      # 上传 artifact 供后续 Release Job 使用
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-${{ matrix.label }}
+          path: codex-rs/dist
+
+  # ── 发布（只跑一次，收集所有构建产物）─────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: codex-*
+          merge-multiple: true
+
+      # tag 从 commit 时间推导（而不是当前时间）：三个平台的 release workflow
+      # 对同一 commit 算出同一个 tag，共享同一个 Release，从而实现
+      # releases/latest/download/<asset> 固定链接。
+      - name: Set release version (commit-based)
+        id: version
+        run: |
+          COMMIT_TS="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          VERSION="$(date -u -d "@${COMMIT_TS}" '+%Y%m%d-%H%M%S')"
+          echo "version=codex-${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # create-if-missing + upload --clobber：三个平台的 release job 完成
+      # 顺序不定，谁先到谁创建 Release，后面到的向同一 Release 追加资产。
+      - name: Create or append to shared GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            for attempt in 1 2 3 4 5; do
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                --title "$TAG" --notes "Commit ${GITHUB_SHA}" && break
+              gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break
+              echo "release create raced; retrying (${attempt}/5)..."
+              sleep $((attempt * 5))
+            done
+          fi
+          gh release upload "$TAG" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"

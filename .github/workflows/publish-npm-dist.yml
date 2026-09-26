@@ -1,0 +1,227 @@
+name: Publish npm dist package
+
+on:
+  workflow_run:
+    workflows:
+      - rust-release-simple
+      - rust-release-simple-macos
+      - rust-release-simple-windows
+    types:
+      - completed
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: "Commit SHA to publish (defaults to the default branch HEAD)"
+        required: false
+        type: string
+      dist_tag:
+        description: "npm distribution tag"
+        required: false
+        default: latest
+        type: string
+      dry_run:
+        description: "Validate packages without publishing"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: publish-npm-dist
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    name: Publish @kingingwang/codex
+    # Automatic publication is opt-in with CODEX_NPM_PUBLISH=true. Manual runs
+    # remain available for controlled first-time publishing and retries.
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        vars.CODEX_NPM_PUBLISH == 'true'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      head_sha: ${{ steps.metadata.outputs.head_sha }}
+      version: ${{ steps.version.outputs.version }}
+      ready: ${{ steps.release_runs.outputs.ready }}
+    env:
+      HEAD_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.head_sha || github.sha }}
+    steps:
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="${HEAD_SHA}"
+          if [[ ! "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid commit SHA: ${head_sha}"
+            exit 1
+          fi
+
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.metadata.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js for npm publishing
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          scope: "@kingingwang"
+          package-manager-cache: false
+
+      - name: Find successful release workflow runs
+        id: release_runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.metadata.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          workflows=(
+            rust-release-simple
+            rust-release-simple-macos
+            rust-release-simple-windows
+          )
+          ready=true
+          {
+            echo "run_map<<RELEASE_RUN_MAP"
+            for workflow in "${workflows[@]}"; do
+              run_json="$(gh run list \
+                --repo "${GITHUB_REPOSITORY}" \
+                --workflow "${workflow}" \
+                --commit "${HEAD_SHA}" \
+                --limit 1 \
+                --json databaseId,status,conclusion)"
+              run_id="$(jq -r 'if length == 1 then .[0].databaseId else "" end' <<<"${run_json}")"
+              status="$(jq -r 'if length == 1 then .[0].status else "" end' <<<"${run_json}")"
+              conclusion="$(jq -r 'if length == 1 then .[0].conclusion else "" end' <<<"${run_json}")"
+
+              if [[ -z "${run_id}" || "${status}" != "completed" || "${conclusion}" != "success" ]]; then
+                echo "Waiting for successful ${workflow}@${HEAD_SHA}"
+                ready=false
+                continue
+              fi
+
+              echo "${workflow}=${run_id}"
+            done
+            echo "RELEASE_RUN_MAP"
+          } >> "$GITHUB_OUTPUT"
+          echo "ready=${ready}" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when release runs are not ready
+        if: ${{ steps.release_runs.outputs.ready != 'true' }}
+        shell: bash
+        run: echo "Skipping npm publish; all three release workflows must succeed for $HEAD_SHA."
+
+      - name: Download matching release artifacts
+        if: ${{ steps.release_runs.outputs.ready == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_MAP: ${{ steps.release_runs.outputs.run_map }}
+        run: |
+          set -euo pipefail
+          declare -A runs_by_workflow
+          while IFS='=' read -r workflow run_id; do
+            runs_by_workflow["${workflow}"]="${run_id}"
+          done <<<"${RUN_MAP}"
+
+          download() {
+            local workflow="$1"
+            local artifact="$2"
+            gh run download "${runs_by_workflow["${workflow}"]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --name "${artifact}" \
+              --dir "release-assets/${artifact}"
+          }
+
+          download rust-release-simple codex-x86_64-musl
+          download rust-release-simple codex-aarch64-musl
+          download rust-release-simple-macos codex-macos-x86_64
+          download rust-release-simple-macos codex-macos-aarch64
+          download rust-release-simple-windows codex-windows-x86_64
+          download rust-release-simple-windows codex-windows-aarch64
+
+      - name: Derive deterministic fork version
+        id: version
+        if: ${{ steps.release_runs.outputs.ready == 'true' }}
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.metadata.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          base_version="$(grep -m1 '^version' codex-rs/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          commit_timestamp="$(git show -s --format=%ct "${HEAD_SHA}")"
+          stamp="$(date -u -d "@${commit_timestamp}" '+%Y%m%d%H%M%S')"
+          echo "version=${base_version}-fork.${stamp}" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble npm packages
+        if: ${{ steps.release_runs.outputs.ready == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${HEAD_SHA}")" \
+            node npm-dist/scripts/assemble.mjs \
+              --artifacts-dir release-assets \
+              --out npm-dist/publish \
+              --version "${{ steps.version.outputs.version }}"
+
+      - name: Smoke test Linux x64 binary
+        if: ${{ steps.release_runs.outputs.ready == 'true' }}
+        shell: bash
+        run: npm-dist/publish/codex-linux-x64/bin/codex --version
+
+      - name: Publish npm packages
+        if: >-
+          ${{
+            steps.release_runs.outputs.ready == 'true' &&
+            (github.event_name == 'workflow_run' || inputs.dry_run != true)
+          }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          node npm-dist/scripts/publish.mjs \
+            --publish-dir npm-dist/publish \
+            --dist-tag "${{ inputs.dist_tag || 'latest' }}"
+
+      - name: Dry run npm publish
+        if: >-
+          ${{
+            steps.release_runs.outputs.ready == 'true' &&
+            (github.event_name == 'workflow_dispatch' && inputs.dry_run == true)
+          }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node npm-dist/scripts/publish.mjs \
+            --publish-dir npm-dist/publish \
+            --dist-tag "${{ inputs.dist_tag || 'latest' }}" \
+            --dry-run
+
+      - name: Summarize
+        if: ${{ always() }}
+        shell: bash
+        env:
+          READY: ${{ steps.release_runs.outputs.ready }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [[ "${READY}" == "true" ]]; then
+            echo "Processed ${HEAD_SHA} as ${VERSION}"
+          else
+            echo "No npm packages were published for ${HEAD_SHA}."
+          fi
