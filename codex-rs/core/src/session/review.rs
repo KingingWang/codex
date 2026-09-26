@@ -1,5 +1,6 @@
 use super::step_settings::ResolvedStepSettings;
 use super::*;
+use codex_model_provider::create_model_provider;
 
 /// Spawn a review thread using the given prompt.
 pub(super) async fn spawn_review_thread(
@@ -40,6 +41,7 @@ pub(super) async fn spawn_review_thread(
     );
 
     let review_prompt = resolved.prompt.clone();
+    let auth_manager = parent_turn_context.auth_manager.clone();
     let model_info = review_model_info.clone();
     let mut selected = parent_turn_context.initial_settings.selected().clone();
     let mut reasoning_effort = selected.collaboration_mode.reasoning_effort();
@@ -73,6 +75,22 @@ pub(super) async fn spawn_review_thread(
         );
     }
 
+    // If the review model specifies a provider, use it instead of the parent's provider.
+    let provider_for_context = if let Some(provider_id) =
+        model_info.provider.as_deref().filter(|s| !s.is_empty())
+    {
+        if let Some(provider_info) = per_turn_config.model_providers.get(provider_id) {
+            create_model_provider(provider_info.clone(), auth_manager.clone())
+        } else {
+            tracing::warn!(
+                provider_id,
+                "Review model specifies a provider not found in model_providers, falling back to default"
+            );
+            parent_turn_context.provider.clone()
+        }
+    } else {
+        parent_turn_context.provider.clone()
+    };
     let session_source = parent_turn_context.session_source.clone();
     let (forked_from_thread_id, thread_source, service_tier) = {
         let state = sess.state.lock().await;
@@ -137,7 +155,7 @@ pub(super) async fn spawn_review_thread(
         &model_info,
     ));
 
-    let review_turn_context = parent_turn_context.for_review(
+    let mut review_turn_context = parent_turn_context.for_review(
         review_turn_id,
         per_turn_config,
         step_settings,
@@ -145,6 +163,9 @@ pub(super) async fn spawn_review_thread(
         unified_exec_shell_mode,
         turn_metadata_state,
     );
+    // Fork: honor the review model's catalog-specified provider instead of
+    // always inheriting the parent provider inside `for_review`.
+    review_turn_context.provider = provider_for_context;
 
     // Seed the child task with the review prompt as the initial user message.
     let input = vec![TurnInput::UserInput {
