@@ -5,6 +5,12 @@ use rand::Rng;
 use std::future::Future;
 use std::time::Duration;
 
+/// Upper bound for transport-level retry delays.
+///
+/// `max_attempts` comes from user configuration and is uncapped, so exponential backoff must be
+/// bounded to keep a large `request_max_retries` from sleeping for effectively forever.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     pub max_attempts: u64,
@@ -103,7 +109,9 @@ where
                 let retry_after = err.retry_after();
                 let delay = retry_after
                     .map(RetryAfter::remaining_delay)
-                    .unwrap_or_else(|| backoff(policy.base_delay, retry_attempt));
+                    .unwrap_or_else(|| {
+                        backoff(policy.base_delay, retry_attempt).min(MAX_RETRY_DELAY)
+                    });
                 crate::record_retry!(retry_attempt, delay, RetryOperation::HttpRequest);
                 if let Some(retry_after) = retry_after {
                     tokio::time::sleep_until(retry_after.deadline()).await;

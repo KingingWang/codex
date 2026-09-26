@@ -514,6 +514,24 @@ fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
 }
 
 #[tokio::test]
+async fn apply_patch_function_tool_type_produces_function_spec() {
+    let plan = probe(|turn| {
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
+                Some(ApplyPatchToolType::Function);
+        });
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    let ToolSpec::Function(tool) = plan.visible_spec("apply_patch") else {
+        panic!("apply_patch should be a function tool");
+    };
+    assert_eq!(tool.name, "apply_patch");
+    assert!(has_parameter(plan.visible_spec("apply_patch"), "input"));
+}
+
+#[tokio::test]
 async fn allowed_tools_filter_sources_before_code_mode_and_discovery() {
     use crate::tools::registry::ToolRegistry;
     use codex_extension_api::ToolPolicy;
@@ -787,6 +805,27 @@ async fn reviewer_tool_policy_require_managed_secondary_environments() {
             expected_tools
         );
     }
+}
+
+#[tokio::test]
+async fn view_image_follows_model_image_input_support() {
+    // Baseline: image-capable models keep `view_image` when the feature is enabled.
+    let image_capable = probe(|turn| {
+        set_feature(turn, Feature::ViewImage, /*enabled*/ true);
+    })
+    .await;
+    image_capable.assert_visible_contains(&["view_image"]);
+
+    // Text-only models never see the tool, even with the feature enabled.
+    let text_only = probe(|turn| {
+        set_feature(turn, Feature::ViewImage, /*enabled*/ true);
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).input_modalities = vec![InputModality::Text];
+        });
+    })
+    .await;
+    text_only.assert_registered_lacks(&["view_image"]);
+    text_only.assert_visible_lacks(&["view_image"]);
 }
 
 #[tokio::test]
@@ -3408,4 +3447,22 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
     bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
+
+    let bedrock_with_injected_web_run = probe_with(
+        |turn| {
+            set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
+            set_web_search_mode(turn, WebSearchMode::Live);
+            use_bedrock_provider(turn);
+        },
+        ToolPlanInputs {
+            extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                namespace: "web",
+                tool_name: "run",
+            })],
+            ..Default::default()
+        },
+    )
+    .await;
+    bedrock_with_injected_web_run.assert_visible_lacks(&["web"]);
+    bedrock_with_injected_web_run.assert_visible_contains(&["web_search"]);
 }

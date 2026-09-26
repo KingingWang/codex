@@ -116,6 +116,7 @@ use codex_protocol::models::PermissionProfile;
 pub use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ProfileWorkspaceRoot;
 use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::DenyReadValidator;
@@ -637,6 +638,10 @@ pub struct Config {
     /// active context or only tokens after the carried compaction-window prefix.
     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
 
+    /// Forces the `apply_patch` tool shape for the selected model, overriding
+    /// the provider catalog metadata.
+    pub model_apply_patch_tool_type: Option<ApplyPatchToolType>,
+
     /// Percentage of the usable context window that triggers turn-end compaction.
     /// Zero disables turn-end compaction.
     pub model_post_turn_compact_threshold_percent: u8,
@@ -1137,6 +1142,15 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+
+    /// Optional path to a script whose output is dynamically appended to the
+    /// end of each request input. The script runs fresh for every sampling
+    /// request and its output is never persisted to conversation history.
+    pub dynamic_context_script: Option<String>,
+
+    /// Timeout for `dynamic_context_script` execution.
+    /// Defaults to 5 seconds.
+    pub dynamic_context_script_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -1666,6 +1680,7 @@ impl Config {
             }),
             personality: self.personality,
             model_catalog: self.model_catalog.clone(),
+            model_apply_patch_tool_type: self.model_apply_patch_tool_type.clone(),
         }
     }
 
@@ -4049,7 +4064,7 @@ impl Config {
 
         let review_model = override_review_model.or(cfg.review_model);
 
-        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
+        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(false);
         let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
 
         let log_dir = cfg
@@ -4257,6 +4272,7 @@ impl Config {
             service_tier,
             review_model,
             model_context_window: cfg.model_context_window,
+            model_apply_patch_tool_type: cfg.model_apply_patch_tool_type.clone(),
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg
                 .model_auto_compact_token_limit_scope
@@ -4455,7 +4471,7 @@ impl Config {
                 .feedback
                 .as_ref()
                 .and_then(|feedback| feedback.enabled)
-                .unwrap_or(true),
+                .unwrap_or(false),
             tool_suggest,
             tui_notifications: cfg
                 .tui
@@ -4534,6 +4550,10 @@ impl Config {
                 .map(|t| t.keymap.clone())
                 .unwrap_or_default(),
             otel,
+            dynamic_context_script: cfg.dynamic_context_script.clone(),
+            dynamic_context_script_timeout: std::time::Duration::from_secs(
+                cfg.dynamic_context_script_timeout_secs.unwrap_or(5),
+            ),
         };
         Ok(config)
         })

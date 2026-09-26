@@ -389,6 +389,11 @@ async fn schedule_startup_prewarm_inner(session: Arc<Session>) -> CodexResult<Mo
     let responses_metadata = session
         .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Prewarm)
         .await;
+    // Honor per-model provider overrides from the model catalog so the
+    // prewarm request targets the same provider as the upcoming turn.
+    let mut client_session = session
+        .model_client_for_turn(&startup_turn_context)
+        .new_session();
     let websocket_warmup_started_at = Instant::now();
     // Prewarm establishes the request baseline before the first turn can change effort.
     client_session

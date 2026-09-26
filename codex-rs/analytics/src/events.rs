@@ -61,6 +61,7 @@ pub enum AppServerRpcTransport {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub(crate) struct TrackEventsRequest {
     pub(crate) events: Vec<TrackEventRequest>,
 }
@@ -159,10 +160,12 @@ pub(crate) fn codex_artifact_operation_event_request(
 }
 
 impl TrackEventRequest {
+    #[allow(dead_code)]
     pub(crate) fn should_send_in_isolated_request(&self) -> bool {
         matches!(self, Self::AcceptedLineFingerprints(_))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn can_send_with_api_key_auth(&self) -> bool {
         match self {
             Self::PluginUsed(event) => event.event_params.plugin.plugin_id.is_some(),
