@@ -40,7 +40,6 @@ use crate::now_unix_millis;
 use crate::product_attribution::MAX_THREAD_PRODUCTS;
 use crate::product_attribution::ThreadProductUpdate;
 use crate::product_attribution::ThreadProducts;
-use crate::product_attribution::product_event_batches;
 use crate::reducer::AnalyticsReducer;
 use crate::reducer::MAX_PLUGIN_MEASUREMENTS_PER_BATCH;
 use crate::reducer::tracked_tool_item_id;
@@ -957,58 +956,18 @@ fn analytics_turn(turn_id: &str, status: TurnStatus) -> Turn {
 }
 
 async fn send_track_events(
-    auth_manager: &AuthManager,
-    destination: &AnalyticsEventsDestination,
-    mut events: Vec<TrackEventRequest>,
-    thread_products: &ThreadProducts,
+    _auth_manager: &AuthManager,
+    _destination: &AnalyticsEventsDestination,
+    _events: Vec<TrackEventRequest>,
+    _thread_products: &ThreadProducts,
 ) {
-    if events.is_empty() {
-        return;
-    }
-
-    let Some((auth, http_client_factory)) = auth_manager.auth_with_http_client_factory().await
-    else {
-        return;
-    };
-    if auth.is_api_key_auth() {
-        events.retain(TrackEventRequest::can_send_with_api_key_auth);
-    } else if !auth.uses_codex_backend() {
-        return;
-    }
-    if events.is_empty() {
-        return;
-    }
-
-    // Product streams are capped by product_event_batches. Parallel streams add no
-    // timeout waves to the existing sequential isolated-event request splitting.
-    let mut requests = tokio::task::JoinSet::new();
-    for (product_sku, events) in product_event_batches(events, thread_products) {
-        let (auth, destination, factory) = (
-            auth.clone(),
-            destination.clone(),
-            http_client_factory.clone(),
-        );
-        let product_sku = product_sku.map(str::to_string);
-        requests.spawn(async move {
-            for events in track_event_request_batches(events) {
-                send_track_events_request(
-                    &auth,
-                    &destination,
-                    events,
-                    &factory,
-                    product_sku.as_deref(),
-                )
-                .await;
-            }
-        });
-    }
-    while let Some(result) = requests.join_next().await {
-        if let Err(error) = result {
-            tracing::warn!(%error, "analytics product stream failed");
-        }
-    }
+    // DISABLED: Internal deployment - never send analytics externally.
+    // This fork intentionally short-circuits the analytics pipeline so no
+    // tracking payloads leave the host. Re-enable by restoring the upstream
+    // body if you need full analytics behavior again.
 }
 
+#[allow(dead_code)]
 fn track_event_request_batches(events: Vec<TrackEventRequest>) -> Vec<Vec<TrackEventRequest>> {
     let mut batches = Vec::new();
     let mut current_batch = Vec::new();
@@ -1032,6 +991,7 @@ fn track_event_request_batches(events: Vec<TrackEventRequest>) -> Vec<Vec<TrackE
     batches
 }
 
+#[allow(dead_code)]
 async fn send_track_events_request(
     auth: &CodexAuth,
     destination: &AnalyticsEventsDestination,
@@ -1101,6 +1061,7 @@ async fn send_track_events_request(
 }
 
 #[cfg(debug_assertions)]
+#[allow(dead_code)]
 fn capture_track_events_request(
     destination: &AnalyticsEventsDestination,
     payload: &TrackEventsRequest,
