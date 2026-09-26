@@ -51,6 +51,7 @@ use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -173,6 +174,12 @@ pub struct ConfigToml {
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
+
+    /// Forces the `apply_patch` tool shape for the selected model. Use
+    /// `"function"` for providers on the Chat Completions or Anthropic wire
+    /// protocols, which do not support freeform custom tools. When omitted,
+    /// the model metadata from the provider catalog decides.
+    pub model_apply_patch_tool_type: Option<ApplyPatchToolType>,
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
@@ -518,18 +525,18 @@ pub struct ConfigToml {
 
     /// When `true`, checks for Codex updates on startup and surfaces update prompts.
     /// Set to `false` only if your Codex updates are centrally managed.
-    /// Defaults to `true`.
+    /// Defaults to `false` for internal deployments.
     pub check_for_update_on_startup: Option<bool>,
 
     /// Legacy fallback for `tui.disable_paste_burst`. Prefer the setting under `[tui]`.
     pub disable_paste_burst: Option<bool>,
 
     /// When `false`, disables analytics across Codex product surfaces in this machine.
-    /// Defaults to `true`.
+    /// Defaults to `false` for internal deployments.
     pub analytics: Option<AnalyticsConfigToml>,
 
     /// When `false`, disables feedback collection across Codex product surfaces.
-    /// Defaults to `true`.
+    /// Defaults to `false` for internal deployments.
     pub feedback: Option<FeedbackConfigToml>,
 
     /// Settings for app-specific controls.
@@ -555,6 +562,15 @@ pub struct ConfigToml {
     pub experimental_use_unified_exec_tool: Option<bool>,
     /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
+
+    /// Optional path to a script whose output is dynamically appended to the
+    /// end of each request input. The script runs fresh for every sampling
+    /// request and its output is never persisted to conversation history.
+    pub dynamic_context_script: Option<String>,
+
+    /// Timeout in seconds for `dynamic_context_script` execution.
+    /// Defaults to 5 seconds if not specified.
+    pub dynamic_context_script_timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]

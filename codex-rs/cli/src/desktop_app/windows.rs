@@ -3,9 +3,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use tokio::process::Command;
 
-const CODEX_WINDOWS_INSTALLER_URL: &str =
-    "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
-const CODEX_MICROSOFT_STORE_WEB_URL: &str = "https://apps.microsoft.com/detail/9plm9xgg6vks";
+const CODEX_WINDOWS_INSTALLER_URL: &str = "";
+const CODEX_MICROSOFT_STORE_WEB_URL: &str = "";
 
 pub async fn run_windows_app_open_or_install(
     workspace: PathBuf,

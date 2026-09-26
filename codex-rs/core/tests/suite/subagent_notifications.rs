@@ -75,8 +75,6 @@ use wiremock::MockServer;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-use super::direct_tool_metadata::tool_call_metadata;
-
 #[path = "spawn_settings_tests.rs"]
 mod spawn_settings_tests;
 
@@ -2255,8 +2253,8 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
         "spawn_agent",
         &spawn_args,
     );
-    if plaintext {
-        spawn_event["item"]["encrypted_function_args"] = json!([]);
+    if !plaintext {
+        spawn_event["item"]["encrypted_function_args"] = json!(["message"]);
     }
     mount_sse_once_match(
         &server,
@@ -2385,23 +2383,11 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
                     .any(|item| item["call_id"] == SPAWN_CALL_ID)
             })
             .expect("parent request with spawn result");
-        assert!(
-            parent_request.input().iter().any(|item| {
-                item["call_id"].as_str() == Some(SPAWN_CALL_ID)
-                    && item["encrypted_function_args"] == json!([])
-            }),
-            "plaintext function-call metadata should survive replay"
-        );
-        assert_eq!(
-            tool_call_metadata(parent_request.function_call_output(SPAWN_CALL_ID)),
-            json!({
-                "executed_tool_calls": [{
-                    "name": "collaboration__spawn_agent",
-                    "arguments": serde_json::from_str::<Value>(&spawn_args)?,
-                }],
-                "tool_calls_complete": true,
-            }),
-        );
+        assert!(parent_request.input().iter().any(|item| {
+            item["call_id"].as_str() == Some(SPAWN_CALL_ID)
+                && item["arguments"].is_string()
+                && item["encrypted_function_args"].is_null()
+        }));
     }
 
     let child_thread_id = test

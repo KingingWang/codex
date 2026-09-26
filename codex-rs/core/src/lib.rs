@@ -8,6 +8,7 @@
 mod apply_patch;
 mod apps;
 mod client;
+mod client_anthropic;
 mod client_common;
 mod model_request;
 mod realtime_context;
