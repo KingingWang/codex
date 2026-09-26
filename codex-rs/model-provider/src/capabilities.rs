@@ -12,6 +12,7 @@ use codex_model_provider_info::RemoteCompactionSupport;
 pub struct ProviderCapabilities {
     /// Whether requests may include the Responses API `reasoning.summary` parameter.
     pub reasoning_summaries: bool,
+    pub namespace_tools: bool,
     pub image_generation: bool,
     pub web_search: bool,
     pub external_web_access: bool,
@@ -22,6 +23,7 @@ impl Default for ProviderCapabilities {
     fn default() -> Self {
         Self {
             reasoning_summaries: true,
+            namespace_tools: true,
             image_generation: true,
             web_search: true,
             external_web_access: true,

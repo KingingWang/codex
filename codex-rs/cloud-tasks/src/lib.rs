@@ -7,6 +7,10 @@ mod ui;
 pub(crate) mod util;
 pub use cli::Cli;
 
+// Internal deployment: external cloud-tasks endpoint is disabled. `init_backend`
+// reads CODEX_CLOUD_TASKS_BASE_URL from the environment and bails if it is empty, so
+// no outbound cloud-tasks URL is ever constructed without an explicit opt-in.
+
 use anyhow::anyhow;
 use chrono::Utc;
 use codex_cloud_tasks_client::TaskStatus;
@@ -51,9 +55,15 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
         std::env::var("CODEX_CLOUD_TASKS_MODE").ok().as_deref(),
         Some("mock") | Some("MOCK")
     );
-    let base_url = std::env::var("CODEX_CLOUD_TASKS_BASE_URL")
-        .unwrap_or_else(|_| "https://chatgpt.com/backend-api".to_string());
-    let base_url = util::validate_chatgpt_base_url(&base_url)?;
+    let base_url = std::env::var("CODEX_CLOUD_TASKS_BASE_URL").unwrap_or_else(|_| String::new());
+
+    // DISABLED: Internal deployment - cloud tasks require explicit base URL
+    if base_url.is_empty() {
+        anyhow::bail!(
+            "Cloud tasks are disabled for internal deployments. \
+             Set CODEX_CLOUD_TASKS_BASE_URL to enable."
+        );
+    }
 
     set_user_agent_suffix(user_agent_suffix);
 
@@ -860,7 +870,6 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
     }
     // Fetch environment list in parallel so the header can show friendly names quickly.
     spawn_environment_load(tx.clone(), base_url.clone(), environment_http.clone());
-
     // Try to auto-detect a likely environment id on startup and refresh if found.
     // Do this concurrently so the initial list shows quickly; on success we refetch with filter.
     {
@@ -1109,8 +1118,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                         tx.clone(),
                                         base_url.clone(),
                                         environment_http.clone(),
-                                    );
-                                    let _ = frame_tx.send(Instant::now());
+                                    );                                    let _ = frame_tx.send(Instant::now());
                                 }
                             }
                             // on Err, silently continue with All
@@ -1489,8 +1497,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                     tx.clone(),
                                     base_url.clone(),
                                     environment_http.clone(),
-                                );
-                            }
+                                );                            }
                             // Render after opening env modal to show it instantly.
                             render_if_needed(&mut terminal, &mut app, &mut needs_redraw)?;
                             continue;
@@ -1673,8 +1680,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                             tx.clone(),
                                             base_url.clone(),
                                             environment_http.clone(),
-                                        );
-                                    }
+                                        );                                    }
                                 }
                                 KeyCode::Left => {
                                     if let Some(ov) = &mut app.diff_overlay {
@@ -1847,8 +1853,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                             tx.clone(),
                                             base_url.clone(),
                                             environment_http.clone(),
-                                        );
-                                    }
+                                        );                                    }
                                 }
                                 KeyCode::Char('n') => {
                                     let env_opt = app.env_filter.clone();
