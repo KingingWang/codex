@@ -77,10 +77,11 @@ async fn map_api_error_preserves_retry_delay() {
 #[test]
 fn map_api_error_distinguishes_capacity_from_slow_down() {
     for (code, expected, retryable) in [
+        // fork: ServerOverloaded is intentionally stream-retryable (5af298019e).
         (
             "server_is_overloaded",
             CodexErrorInfo::ServerOverloaded,
-            false,
+            true,
         ),
         ("slow_down", CodexErrorInfo::RateLimitExceeded, true),
         (
@@ -443,6 +444,53 @@ fn map_api_error_keeps_other_400_errors_generic() {
         };
         assert_eq!(message, &body);
     }
+}
+
+/// Fork: a plain 429 keeps its retry-limit identity but stays retryable, preferring Retry-After.
+#[test]
+fn map_api_error_keeps_plain_429_retryable_with_server_advice() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("retry-after", http::HeaderValue::from_static("7"));
+    let advised = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        retry_after: None,
+        url: None,
+        headers: Some(headers),
+        body: Some(r#"{"error":{"message":"Too many requests"}}"#.to_string()),
+    }));
+
+    assert!(matches!(
+        advised.details(),
+        CodexErrorDetails::RetryLimit(error)
+            if error.status == http::StatusCode::TOO_MANY_REQUESTS
+    ));
+    assert_eq!(
+        advised.to_codex_protocol_error(),
+        CodexErrorInfo::ResponseTooManyFailedAttempts {
+            http_status_code: Some(429),
+        }
+    );
+    // Server advice is captured as a deadline, so the remaining delay is
+    // at most the advised 7 seconds and shrinks as time passes.
+    for delay in [
+        advised.server_retry_delay().expect("server advice"),
+        advised.retry_delay(/*retry_count*/ 1).expect("retryable"),
+    ] {
+        assert!(
+            (6..=7).contains(&delay.as_secs()),
+            "advised delay should be about 7 seconds, got {delay:?}"
+        );
+    }
+
+    let unadvised = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        retry_after: None,
+        url: None,
+        headers: None,
+        body: Some("too many requests".to_string()),
+    }));
+    assert_eq!(unadvised.server_retry_delay(), None);
+    assert!(unadvised.retry_delay(/*retry_count*/ 1).is_some());
 }
 
 #[test]

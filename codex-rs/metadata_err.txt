@@ -1,0 +1,12 @@
+    Updating git repository `https://github.com/openai-oss-forks/crossterm`
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded objc2-local-authentication v0.3.2
+  Downloaded coreaudio-rs v0.14.2
+  Downloaded objc2-core-audio-types v0.3.2
+  Downloaded objc2-core-audio v0.3.2
+  Downloaded mach2 v0.6.0
+  Downloaded ndk v0.9.0
+  Downloaded objc2-avf-audio v0.3.2
+  Downloaded ndk-sys v0.6.0+11769913
+  Downloaded objc2-audio-toolbox v0.3.2
