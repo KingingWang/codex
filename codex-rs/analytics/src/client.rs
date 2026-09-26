@@ -40,7 +40,6 @@ use crate::now_unix_millis;
 use crate::product_attribution::MAX_THREAD_PRODUCTS;
 use crate::product_attribution::ThreadProductUpdate;
 use crate::product_attribution::ThreadProducts;
-use crate::product_attribution::product_event_batches;
 use crate::reducer::AnalyticsReducer;
 use crate::reducer::MAX_PLUGIN_MEASUREMENTS_PER_BATCH;
 use crate::reducer::tracked_tool_item_id;
@@ -85,6 +84,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 const ANALYTICS_EVENTS_QUEUE_SIZE: usize = 256;
+#[allow(dead_code)]
 const ANALYTICS_EVENTS_TIMEOUT: Duration = Duration::from_secs(10);
 // Covers two sequential POSTs plus queue/barrier scheduling; additional queued sends remain best-effort.
 const ANALYTICS_EVENTS_FLUSH_TIMEOUT: Duration = Duration::from_secs(25);
@@ -931,126 +931,16 @@ fn analytics_turn(turn_id: &str, status: TurnStatus) -> Turn {
 }
 
 async fn send_track_events(
-    auth_manager: &AuthManager,
-    destination: &AnalyticsEventsDestination,
-    mut events: Vec<TrackEventRequest>,
-    thread_products: &ThreadProducts,
+    _auth_manager: &AuthManager,
+    _destination: &AnalyticsEventsDestination,
+    _events: Vec<TrackEventRequest>,
+    _thread_products: &ThreadProducts,
 ) {
-    if events.is_empty() {
-        return;
-    }
-
-    let Some((auth, http_client_factory)) = auth_manager.auth_with_http_client_factory().await
-    else {
-        return;
-    };
-    if auth.is_api_key_auth() {
-        events.retain(TrackEventRequest::can_send_with_api_key_auth);
-    } else if !auth.uses_codex_backend() {
-        return;
-    }
-    if events.is_empty() {
-        return;
-    }
-
-    // Product streams are capped by product_event_batches. Parallel streams add no
-    // timeout waves to the existing sequential isolated-event request splitting.
-    let mut requests = tokio::task::JoinSet::new();
-    for (product_sku, events) in product_event_batches(events, thread_products) {
-        let (auth, destination, factory) = (
-            auth.clone(),
-            destination.clone(),
-            http_client_factory.clone(),
-        );
-        let product_sku = product_sku.map(str::to_string);
-        requests.spawn(async move {
-            for events in track_event_request_batches(events) {
-                send_track_events_request(
-                    &auth,
-                    &destination,
-                    events,
-                    &factory,
-                    product_sku.as_deref(),
-                )
-                .await;
-            }
-        });
-    }
-    while let Some(result) = requests.join_next().await {
-        if let Err(error) = result {
-            tracing::warn!(%error, "analytics product stream failed");
-        }
-    }
-}
-
-fn track_event_request_batches(events: Vec<TrackEventRequest>) -> Vec<Vec<TrackEventRequest>> {
-    let mut batches = Vec::new();
-    let mut current_batch = Vec::new();
-
-    for event in events {
-        if event.should_send_in_isolated_request() {
-            if !current_batch.is_empty() {
-                batches.push(current_batch);
-                current_batch = Vec::new();
-            }
-            batches.push(vec![event]);
-        } else {
-            current_batch.push(event);
-        }
-    }
-
-    if !current_batch.is_empty() {
-        batches.push(current_batch);
-    }
-
-    batches
-}
-
-async fn send_track_events_request(
-    auth: &CodexAuth,
-    destination: &AnalyticsEventsDestination,
-    events: Vec<TrackEventRequest>,
-    http_client_factory: &codex_http_client::HttpClientFactory,
-    product_sku: Option<&str>,
-) {
-    if events.is_empty() {
-        return;
-    }
-
-    let payload = TrackEventsRequest { events };
-
-    #[cfg(debug_assertions)]
-    if capture_track_events_request(destination, &payload) {
-        return;
-    }
-
-    let url = match destination {
-        AnalyticsEventsDestination::Http { url } => url,
-        #[cfg(debug_assertions)]
-        AnalyticsEventsDestination::CaptureFile { .. } => return,
-    };
-    let client = match codex_login::default_client::create_client_for_route_async(
-        http_client_factory.clone(),
-        url.clone(),
-        codex_http_client::ClientRouteClass::Api,
-        codex_login::default_client::ClientRedirectPolicy::Default,
-    )
-    .await
-    {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::warn!(%error, "failed to build events client");
-            return;
-        }
-    };
-    let mut request = client
-        .post(url)
-        .timeout(ANALYTICS_EVENTS_TIMEOUT)
-        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
-        .header("Content-Type", "application/json")
-        .json(&payload);
-    if let Some(product_sku) = product_sku {
-        request = request.header("X-OpenAI-Product-Sku", product_sku);
+    // DISABLED: Internal deployment - never send analytics externally.
+    // This fork intentionally short-circuits the analytics pipeline so no
+    // tracking payloads leave the host. Re-enable by restoring the upstream
+    // body if you need full analytics behavior again.
+}duct-Sku", product_sku);
     }
     let response = request.send().await;
 
@@ -1068,6 +958,7 @@ async fn send_track_events_request(
 }
 
 #[cfg(debug_assertions)]
+#[allow(dead_code)]
 fn capture_track_events_request(
     destination: &AnalyticsEventsDestination,
     payload: &TrackEventsRequest,

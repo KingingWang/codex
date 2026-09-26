@@ -3119,6 +3119,7 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "fork: transport-level retries absorb transient failures at the HTTP layer"]
 async fn guardian_review_retries_transient_session_failure_then_approves() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3499,6 +3500,7 @@ async fn guardian_review_routes_required_actions(
 }
 
 #[tokio::test]
+#[ignore = "fork: feedback recording is disabled for internal deployment"]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
     const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;

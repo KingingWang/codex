@@ -51,7 +51,7 @@ impl ToolCall {
             && self
                 .encrypted_function_args
                 .as_ref()
-                .is_some_and(Vec::is_empty)
+                .is_none_or(Vec::is_empty)
         {
             ToolCallSource::DirectPlaintextMessage
         } else {
