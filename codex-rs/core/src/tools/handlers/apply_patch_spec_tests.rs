@@ -35,3 +35,38 @@ fn create_apply_patch_freeform_tool_includes_environment_id_when_requested() {
             .contains("\"*** Environment ID: \" filename LF")
     );
 }
+
+#[test]
+fn create_apply_patch_json_tool_matches_expected_spec() {
+    assert_eq!(
+        create_apply_patch_json_tool(/*include_environment_id*/ false),
+        ToolSpec::Function(ResponsesApiTool {
+            name: "apply_patch".to_string(),
+            description: APPLY_PATCH_JSON_TOOL_DESCRIPTION.to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                BTreeMap::from([(
+                    "input".to_string(),
+                    JsonSchema::string(Some(
+                        "The entire contents of the apply_patch command".to_string(),
+                    )),
+                )]),
+                Some(vec!["input".to_string()]),
+                Some(false.into()),
+            ),
+            output_schema: None,
+        })
+    );
+}
+
+#[test]
+fn create_apply_patch_json_tool_includes_environment_instruction_when_requested() {
+    let ToolSpec::Function(tool) =
+        create_apply_patch_json_tool(/*include_environment_id*/ true)
+    else {
+        panic!("expected function tool");
+    };
+
+    assert!(tool.description.contains("*** Environment ID:"));
+}
