@@ -2,32 +2,46 @@
 //! Messages API, with cache-control markers placed for maximum prompt-caching
 //! hit-rate on subsequent turns.
 //!
-//! Cache strategy (matches the Claude Code reference client exactly):
-//! - The **last system block** carries `cache_control: ephemeral`.
+//! Cache strategy (matches the Claude Code reference client):
+//! - The `system` field is tiered into stable blocks: block 0 holds the base
+//!   instructions and blocks 1..n hold the lifted AGENTS.md fragments (one
+//!   block per fragment, so block boundaries survive instead of being
+//!   lossily concatenated). The **first and last system blocks** carry
+//!   `cache_control: ephemeral`, so even when a lifted fragment changes
+//!   mid-session the base-instructions cache entry still hits.
 //! - **Tool definitions carry NO `cache_control` markers.** The system-block
 //!   marker alone is sufficient for Anthropic to auto-discover the tools
 //!   prefix. Adding a tool-level marker shifts the hashed bytes on every
 //!   turn, fighting the gateway's auto-discovery and reducing hit rate.
-//! - **The last `user`-role message carries `cache_control` on its
-//!   final block.** Single message-level marker, matching the Anthropic
-//!   prompt-caching reference's multi-turn example. The gateway
-//!   auto-discovers the longest cached prefix on subsequent turns
-//!   without needing us to re-assert markers at older offsets.
+//! - **The last stable user-origin block carries the message-level
+//!   `cache_control` marker**, matching the Anthropic prompt-caching
+//!   reference's multi-turn example. The gateway auto-discovers the longest
+//!   cached prefix on subsequent turns without needing us to re-assert
+//!   markers at older offsets.
+//!
+//!   `developer`/`system`-role messages have no Anthropic equivalent. Rather
+//!   than dropping them, their content is re-routed into the user stream and
+//!   tagged `ReroutedSystem`. Those blocks never receive the marker and are
+//!   skipped when placing it: `dynamic_context_script` output is re-appended
+//!   to (and can drift on) every sampling request, so anchoring the marker
+//!   before any re-routed tail keeps the cached prefix byte-stable.
 //!
 //!   Note: Anthropic's wire format buckets `tool_result` deliveries as
 //!   user-role messages, so a trailing tool-result naturally falls into
 //!   this slot too.
-//! - We use 2 of Anthropic's 4 allowed breakpoints (system tail +
-//!   last user message).
+//! - We use at most 3 of Anthropic's 4 allowed breakpoints (system base +
+//!   system tail + last stable user block).
 //! - **Adaptive thinking** is enabled for models that support reasoning,
 //!   matching Claude Code's `thinking: {type: "adaptive"}`.
 //!
 //! Cache-hit invariants we preserve:
 //! - Tool order is canonicalized (sorted by name) so adjacent turns produce a
 //!   byte-identical tool prefix.
-//! - System content is rendered as a single `text` block with stable text
-//!   ordering, so the cached prefix never shifts.
+//! - System blocks are emitted in a stable order (base first, lifted
+//!   fragments in history order), so the cached prefix never shifts.
 //! - Messages are converted append-only — we never re-order earlier turns.
+//! - Re-routed developer/system content is deterministic per history item,
+//!   and the message-level marker never covers drifting per-request bytes.
 //!
 //! Cross-format mapping notes:
 //! - Anthropic carries tool results inside a `user` message as `tool_result`
@@ -137,7 +151,10 @@ pub(crate) fn build_anthropic_request_with_agent_path(
 /// `<environment_context>` or the actual user prompt) is preserved in the
 /// returned input. Items with no remaining content are dropped.
 fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<ResponseItem>) {
-    const START_MARKER: &str = "# AGENTS.md instructions for ";
+    // Canonical markers emitted by `context::user_instructions`. The ` for
+    // <dir>` suffix is optional (host-provided instructions carry no
+    // directory), so match on the bare header.
+    const START_MARKER: &str = "# AGENTS.md instructions";
     const END_MARKER: &str = "</INSTRUCTIONS>";
 
     let mut lifted: Vec<String> = Vec::new();
@@ -190,23 +207,42 @@ fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<Respo
     (lifted, remaining)
 }
 
+/// Assemble the `system` field as ordered text blocks:
+/// - block 0: base instructions (session-stable) — carries `cache_control`,
+/// - blocks 1..n: one block per lifted AGENTS.md fragment, boundaries
+///   preserved (no lossy `"\n\n"` concatenation) — the tail block carries
+///   `cache_control`.
+///
+/// Two system breakpoints (Claude Code's tiered pattern) mean a mid-session
+/// change to the lifted fragments still hits the base-instructions cache
+/// entry. With no lifted fragments the output is byte-identical to the
+/// single-block form, so sessions without AGENTS.md keep their exact cached
+/// prefix. Worst case stays within Anthropic's 4-breakpoint budget (2 system
+/// + 1 message-level marker).
 fn build_system(instructions: &str, lifted_blocks: &[String]) -> Option<Vec<AnthropicSystemBlock>> {
-    let mut combined = String::new();
+    let mut texts: Vec<&str> = Vec::with_capacity(lifted_blocks.len() + 1);
     if !instructions.is_empty() {
-        combined.push_str(instructions);
+        texts.push(instructions);
     }
-    for block in lifted_blocks {
-        if !combined.is_empty() {
-            combined.push_str("\n\n");
-        }
-        combined.push_str(block);
-    }
-    if combined.is_empty() {
+    texts.extend(lifted_blocks.iter().map(String::as_str));
+    if texts.is_empty() {
         return None;
     }
-    Some(vec![
-        AnthropicSystemBlock::text(combined).with_cache(AnthropicCacheControl::ephemeral()),
-    ])
+    let last = texts.len() - 1;
+    Some(
+        texts
+            .into_iter()
+            .enumerate()
+            .map(|(idx, text)| {
+                let block = AnthropicSystemBlock::text(text);
+                if idx == 0 || idx == last {
+                    block.with_cache(AnthropicCacheControl::ephemeral())
+                } else {
+                    block
+                }
+            })
+            .collect(),
+    )
 }
 
 fn build_tools(
@@ -280,6 +316,23 @@ fn build_tool_namespace_map(tools: &[codex_tools::ToolSpec]) -> HashMap<String, 
     map
 }
 
+/// Where a user-role content block came from.
+///
+/// Anthropic has no `developer`/`system` message role, so turn-level system
+/// content is re-routed into the user stream. Those blocks can drift between
+/// requests (`dynamic_context_script` output is re-appended to every sampling
+/// request and regenerated each time), so they must never carry — nor sit
+/// before — the message-level cache marker.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UserBlockOrigin {
+    /// Genuine user content, tool results, or peer-agent messages: stable
+    /// once recorded, safe to anchor the cache marker on.
+    User,
+    /// Content re-routed from a `developer`/`system`-role message. May be
+    /// re-generated per request; excluded from cache-marker placement.
+    ReroutedSystem,
+}
+
 /// Convert codex `ResponseItem`s into Anthropic-shape messages while merging
 /// consecutive items that belong to the same logical turn. Anthropic strictly
 /// alternates user/assistant; we coalesce as needed.
@@ -288,10 +341,18 @@ fn build_messages(
     own_agent_path: &str,
 ) -> CodexResult<Vec<AnthropicMessage>> {
     let mut messages: Vec<AnthropicMessage> = Vec::new();
+    // Per-block provenance for every flushed user-role message, parallel to
+    // the user messages in `messages` (in flush order). Drives cache-marker
+    // placement in `apply_history_cache_marker`.
+    let mut user_origins: Vec<Vec<UserBlockOrigin>> = Vec::new();
     let mut pending_assistant_blocks: Vec<AnthropicContentBlock> = Vec::new();
-    let mut pending_user_blocks: Vec<AnthropicContentBlock> = Vec::new();
+    let mut pending_user_blocks: Vec<(AnthropicContentBlock, UserBlockOrigin)> = Vec::new();
     // Reasoning is always attached to the next assistant message in order.
     let mut pending_thinking: Vec<AnthropicContentBlock> = Vec::new();
+    // Degradation counters: content this converter had to re-route or drop.
+    // Surfaced as a single debug log so silent fidelity loss is diagnosable.
+    let mut rerouted_system_messages = 0usize;
+    let mut dropped_unsigned_reasoning = 0usize;
 
     for item in items {
         match item {
@@ -310,6 +371,7 @@ fn build_messages(
                 // block entirely instead of sending an invalid one — replaying
                 // an unsigned thinking block fails validation upstream.
                 let Some(signature) = encrypted_content.clone() else {
+                    dropped_unsigned_reasoning += 1;
                     continue;
                 };
                 // Read the thinking text from `summary` first: the fork's
@@ -348,14 +410,8 @@ fn build_messages(
                     "assistant" => "assistant",
                     _ => "user",
                 };
-                if mapped_role == "system" {
-                    // Anthropic carries system content out-of-band; turn-level
-                    // system messages from prior turns are skipped.
-                    continue;
-                }
-
                 if mapped_role == "assistant" {
-                    flush_user(&mut messages, &mut pending_user_blocks);
+                    flush_user(&mut messages, &mut user_origins, &mut pending_user_blocks);
                     if !pending_thinking.is_empty() {
                         pending_assistant_blocks.append(&mut pending_thinking);
                     }
@@ -363,10 +419,33 @@ fn build_messages(
                         pending_assistant_blocks.push(block);
                     }
                 } else {
+                    // Anthropic has no developer/system message role. Instead
+                    // of dropping turn-level system content (subagent spawn
+                    // instructions, `dynamic_context_script` output, guardian
+                    // annotations), re-route it into the user stream tagged as
+                    // `ReroutedSystem` so the message-level cache marker never
+                    // anchors on bytes that can drift between requests.
+                    let origin = if mapped_role == "system" {
+                        UserBlockOrigin::ReroutedSystem
+                    } else {
+                        UserBlockOrigin::User
+                    };
                     flush_assistant(&mut messages, &mut pending_assistant_blocks);
-                    pending_thinking.clear();
-                    for block in content_items_to_blocks(content) {
-                        pending_user_blocks.push(block);
+                    if origin == UserBlockOrigin::User {
+                        // Genuine user input closes the previous assistant
+                        // turn: any thinking still queued will never be
+                        // attached, so drop it. Re-routed system content does
+                        // not close the assistant turn (e.g. guardian warnings
+                        // recorded mid tool-loop), so pending thinking is kept
+                        // for the next assistant message.
+                        pending_thinking.clear();
+                    }
+                    let blocks = content_items_to_blocks(content);
+                    if origin == UserBlockOrigin::ReroutedSystem && !blocks.is_empty() {
+                        rerouted_system_messages += 1;
+                    }
+                    for block in blocks {
+                        pending_user_blocks.push((block, origin));
                     }
                 }
             }
@@ -386,7 +465,7 @@ fn build_messages(
                     continue;
                 }
                 if author == own_agent_path {
-                    flush_user(&mut messages, &mut pending_user_blocks);
+                    flush_user(&mut messages, &mut user_origins, &mut pending_user_blocks);
                     if !pending_thinking.is_empty() {
                         pending_assistant_blocks.append(&mut pending_thinking);
                     }
@@ -397,10 +476,13 @@ fn build_messages(
                 } else {
                     flush_assistant(&mut messages, &mut pending_assistant_blocks);
                     pending_thinking.clear();
-                    pending_user_blocks.push(AnthropicContentBlock::Text {
-                        text,
-                        cache_control: None,
-                    });
+                    pending_user_blocks.push((
+                        AnthropicContentBlock::Text {
+                            text,
+                            cache_control: None,
+                        },
+                        UserBlockOrigin::User,
+                    ));
                 }
             }
             ResponseItem::FunctionCall {
@@ -409,7 +491,7 @@ fn build_messages(
                 call_id,
                 ..
             } => {
-                flush_user(&mut messages, &mut pending_user_blocks);
+                flush_user(&mut messages, &mut user_origins, &mut pending_user_blocks);
                 if !pending_thinking.is_empty() {
                     pending_assistant_blocks.append(&mut pending_thinking);
                 }
@@ -430,7 +512,7 @@ fn build_messages(
                 call_id,
                 ..
             } => {
-                flush_user(&mut messages, &mut pending_user_blocks);
+                flush_user(&mut messages, &mut user_origins, &mut pending_user_blocks);
                 if !pending_thinking.is_empty() {
                     pending_assistant_blocks.append(&mut pending_thinking);
                 }
@@ -454,7 +536,11 @@ fn build_messages(
                     call_id.as_deref().unwrap_or_default(),
                     &output.body,
                 );
-                pending_user_blocks.extend(blocks);
+                pending_user_blocks.extend(
+                    blocks
+                        .into_iter()
+                        .map(|block| (block, UserBlockOrigin::User)),
+                );
             }
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
@@ -462,13 +548,17 @@ fn build_messages(
                 flush_assistant(&mut messages, &mut pending_assistant_blocks);
                 pending_thinking.clear();
                 let blocks = function_output_to_tool_result_blocks(call_id, &output.body);
-                pending_user_blocks.extend(blocks);
+                pending_user_blocks.extend(
+                    blocks
+                        .into_iter()
+                        .map(|block| (block, UserBlockOrigin::User)),
+                );
             }
             _ => {
                 // Unknown items: flush pending state but otherwise ignore so
                 // we never leak a half-formed message into the stream.
                 flush_assistant(&mut messages, &mut pending_assistant_blocks);
-                flush_user(&mut messages, &mut pending_user_blocks);
+                flush_user(&mut messages, &mut user_origins, &mut pending_user_blocks);
                 pending_thinking.clear();
             }
         }
@@ -476,9 +566,17 @@ fn build_messages(
 
     // Final flush so trailing pending blocks are not lost.
     flush_assistant(&mut messages, &mut pending_assistant_blocks);
-    flush_user(&mut messages, &mut pending_user_blocks);
+    flush_user(&mut messages, &mut user_origins, &mut pending_user_blocks);
 
-    apply_history_cache_marker(&mut messages);
+    apply_history_cache_marker(&mut messages, &user_origins);
+
+    if rerouted_system_messages > 0 || dropped_unsigned_reasoning > 0 {
+        tracing::debug!(
+            rerouted_system_messages,
+            dropped_unsigned_reasoning,
+            "anthropic request conversion re-routed/dropped non-representable items"
+        );
+    }
 
     Ok(messages)
 }
@@ -494,14 +592,21 @@ fn flush_assistant(messages: &mut Vec<AnthropicMessage>, blocks: &mut Vec<Anthro
     });
 }
 
-fn flush_user(messages: &mut Vec<AnthropicMessage>, blocks: &mut Vec<AnthropicContentBlock>) {
+fn flush_user(
+    messages: &mut Vec<AnthropicMessage>,
+    user_origins: &mut Vec<Vec<UserBlockOrigin>>,
+    blocks: &mut Vec<(AnthropicContentBlock, UserBlockOrigin)>,
+) {
     if blocks.is_empty() {
         return;
     }
     let drained = std::mem::take(blocks);
+    user_origins.push(drained.iter().map(|(_, origin)| *origin).collect());
     messages.push(AnthropicMessage {
         role: "user".to_string(),
-        content: AnthropicMessageContent::Blocks(drained),
+        content: AnthropicMessageContent::Blocks(
+            drained.into_iter().map(|(block, _)| block).collect(),
+        ),
     });
 }
 
@@ -609,27 +714,55 @@ fn function_output_to_tool_result_blocks(
     }]
 }
 
-/// Place a single message-level cache marker on the **last `user`-role
-/// message** of the request. This matches the Anthropic prompt-caching
-/// reference (`docs.anthropic.com/en/docs/build-with-claude/prompt-caching`)
-/// multi-turn example, which uses one `cache_control` on the trailing user
-/// turn and lets the gateway auto-discover the longest cached prefix.
+/// Place the single message-level cache marker on the **last stable
+/// user-origin block** of the request. This matches the Anthropic
+/// prompt-caching reference
+/// (`docs.anthropic.com/en/docs/build-with-claude/prompt-caching`) multi-turn
+/// example, which uses one `cache_control` on the trailing user turn and lets
+/// the gateway auto-discover the longest cached prefix.
 ///
 /// Anthropic's wire format buckets `tool_result` deliveries as user-role
 /// messages, so a trailing tool-result (mid-tool-loop) lands here too.
 ///
-/// Combined with the system-block marker placed in `build_system`, the
-/// request consumes 2 of Anthropic's 4 allowed breakpoints — matching
-/// the Claude Code reference client exactly.
-fn apply_history_cache_marker(messages: &mut [AnthropicMessage]) {
-    let Some(idx) = messages.iter().rposition(|m| m.role == "user") else {
+/// Re-routed `developer`/`system` blocks are skipped: a trailing
+/// dynamic-context payload rides *after* the marker, so the cached prefix
+/// (everything up to the marker) stays byte-identical across requests even
+/// while the re-routed tail drifts. A user message composed entirely of
+/// re-routed content is skipped too, walking the marker back to the previous
+/// stable user block.
+///
+/// Combined with the two system-block markers placed in `build_system`, the
+/// request consumes at most 3 of Anthropic's 4 allowed breakpoints.
+fn apply_history_cache_marker(
+    messages: &mut [AnthropicMessage],
+    user_origins: &[Vec<UserBlockOrigin>],
+) {
+    // `user_origins` entries are parallel to the user-role messages in
+    // `messages`, in flush order; walk both from the newest end.
+    let mut origins_idx = user_origins.len();
+    for message in messages.iter_mut().rev() {
+        if message.role != "user" {
+            continue;
+        }
+        if origins_idx == 0 {
+            // Unreachable: `flush_user` records origins for every user
+            // message it pushes.
+            break;
+        }
+        origins_idx -= 1;
+        let AnthropicMessageContent::Blocks(blocks) = &mut message.content else {
+            continue;
+        };
+        debug_assert_eq!(blocks.len(), user_origins[origins_idx].len());
+        let Some(idx) = user_origins[origins_idx]
+            .iter()
+            .rposition(|origin| *origin == UserBlockOrigin::User)
+        else {
+            // Entirely re-routed content — anchor on an older, stable block.
+            continue;
+        };
+        set_block_cache(&mut blocks[idx]);
         return;
-    };
-    let AnthropicMessageContent::Blocks(blocks) = &mut messages[idx].content else {
-        return;
-    };
-    if let Some(last_block) = blocks.last_mut() {
-        set_block_cache(last_block);
     }
 }
 
