@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -21,65 +22,41 @@ const templatesDir = join(distRoot, "templates");
 export const platforms = [
   {
     packageName: "codex-linux-x64",
-    artifactName: "codex-x86_64-musl",
-    artifactFile: "codex-linux-x86_64-musl",
+    target: "x86_64-unknown-linux-musl",
     os: ["linux"],
     cpu: ["x64"],
-    format: "elf",
-    compressed: false,
   },
   {
     packageName: "codex-linux-arm64",
-    artifactName: "codex-aarch64-musl",
-    artifactFile: "codex-linux-aarch64-musl",
+    target: "aarch64-unknown-linux-musl",
     os: ["linux"],
     cpu: ["arm64"],
-    format: "elf",
-    compressed: false,
   },
   {
     packageName: "codex-darwin-x64",
-    artifactName: "codex-macos-x86_64",
-    artifactFile: "codex-macos-x86_64.zst",
+    target: "x86_64-apple-darwin",
     os: ["darwin"],
     cpu: ["x64"],
-    format: "mach-o",
-    compressed: true,
   },
   {
     packageName: "codex-darwin-arm64",
-    artifactName: "codex-macos-aarch64",
-    artifactFile: "codex-macos-aarch64.zst",
+    target: "aarch64-apple-darwin",
     os: ["darwin"],
     cpu: ["arm64"],
-    format: "mach-o",
-    compressed: true,
   },
   {
     packageName: "codex-win32-x64",
-    artifactName: "codex-windows-x86_64",
-    artifactFile: "codex-windows-x86_64.exe",
+    target: "x86_64-pc-windows-msvc",
     os: ["win32"],
     cpu: ["x64"],
-    format: "pe",
-    compressed: false,
   },
   {
     packageName: "codex-win32-arm64",
-    artifactName: "codex-windows-aarch64",
-    artifactFile: "codex-windows-aarch64.exe",
+    target: "aarch64-pc-windows-msvc",
     os: ["win32"],
     cpu: ["arm64"],
-    format: "pe",
-    compressed: false,
   },
 ];
-
-const binaryMagics = {
-  elf: [0x7f, 0x45, 0x4c, 0x46],
-  pe: [0x4d, 0x5a],
-};
-const machOStarts = new Set(["cffaedfe", "feedface", "feedfacf", "cafebabe"]);
 
 function parseArgs(argv) {
   const args = {
@@ -121,7 +98,8 @@ function usage() {
   return `Usage: node npm-dist/scripts/assemble.mjs [options]
 
 Options:
-  --artifacts-dir <dir>  Directory containing per-artifact subdirectories
+  --artifacts-dir <dir>  Directory containing per-artifact subdirectories with
+                         codex-package-<target>.tar.gz archives
   --out <dir>            Output directory (default: npm-dist/publish)
   --version <version>    Exact npm version; defaults to Cargo version plus -fork.<timestamp>
   --scope <scope>        npm scope (default: @kingingwang)
@@ -203,42 +181,69 @@ function run(command, args, options = {}) {
   return result;
 }
 
-function validateBinaryFormat(binaryPath, format) {
-  const file = readFileSync(binaryPath);
-  if (file.length < 4) {
-    throw new Error(`Binary is too small: ${binaryPath}`);
-  }
-  const headerHex = file.subarray(0, 4).toString("hex");
-  const valid =
-    format === "mach-o"
-      ? machOStarts.has(headerHex)
-      : binaryMagics[format].every((byte, index) => file[index] === byte);
-  if (!valid) {
-    throw new Error(
-      `Unexpected ${format} binary header in ${binaryPath}: ${headerHex}`,
+// The file list mirrors the daemon seeding validation in
+// codex-rs/app-server-daemon/src/prepare_install.rs (validate_package). A
+// bare CLI binary is not enough: first daemon start copies this layout into
+// CODEX_HOME and refuses packages missing any of these entries.
+function requiredPackageFiles(platform) {
+  const isWindows = platform.os[0] === "win32";
+  const exe = isWindows ? ".exe" : "";
+  const files = [
+    "codex-package.json",
+    `bin/codex${exe}`,
+    `bin/codex-code-mode-host${exe}`,
+    `codex-path/rg${exe}`,
+  ];
+  if (isWindows) {
+    files.push(
+      "codex-resources/codex-command-runner.exe",
+      "codex-resources/codex-windows-sandbox-setup.exe",
     );
+  } else if (platform.os[0] === "linux") {
+    files.push("codex-resources/bwrap");
   }
+  return files;
 }
 
-function stageBinary(platform, packageDir, artifactsDir) {
-  const artifactDir = resolve(artifactsDir, platform.artifactName);
-  const artifactPath = join(artifactDir, platform.artifactFile);
-  if (!existsSync(artifactPath)) {
-    throw new Error(`Missing artifact: ${artifactPath}`);
+// Unpack a canonical Codex package archive (built by
+// scripts/build_codex_package.py in the release workflows) into the platform
+// package root. tar preserves the executable bits recorded by the builder,
+// which the daemon requires for every packaged helper.
+function stagePackage(platform, packageDir, artifactsDir) {
+  const artifactName = `codex-package-${platform.target}`;
+  const archivePath = join(artifactsDir, artifactName, `${artifactName}.tar.gz`);
+  if (!existsSync(archivePath)) {
+    throw new Error(`Missing package archive: ${archivePath}`);
+  }
+  run("tar", ["-xzf", archivePath, "-C", packageDir]);
+
+  const manifestPath = join(packageDir, "codex-package.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const expectedEntrypoint =
+    platform.os[0] === "win32" ? "bin/codex.exe" : "bin/codex";
+  if (
+    manifest.target !== platform.target ||
+    manifest.entrypoint !== expectedEntrypoint
+  ) {
+    throw new Error(
+      `Package manifest mismatch in ${archivePath}: ` +
+        `target=${manifest.target} entrypoint=${manifest.entrypoint}`,
+    );
   }
 
-  const binaryName = platform.os[0] === "win32" ? "codex.exe" : "codex";
-  const destination = join(packageDir, "bin", binaryName);
-  mkdirSync(dirname(destination), { recursive: true });
-
-  if (platform.compressed) {
-    run("zstd", ["-q", "-f", "-d", artifactPath, "-o", destination]);
-  } else {
-    copyFileSync(artifactPath, destination);
+  for (const name of requiredPackageFiles(platform)) {
+    const path = join(packageDir, name);
+    if (!existsSync(path)) {
+      throw new Error(`Package ${platform.packageName} is missing ${name}`);
+    }
+    if (platform.os[0] !== "win32" && name !== "codex-package.json") {
+      if ((statSync(path).mode & 0o111) === 0) {
+        throw new Error(
+          `Package ${platform.packageName} file is not executable: ${name}`,
+        );
+      }
+    }
   }
-  if (platform.os[0] !== "win32") chmodSync(destination, 0o755);
-  validateBinaryFormat(destination, platform.format);
-  return destination;
 }
 
 function replaceTemplate(templatePath, replacements) {
@@ -294,8 +299,8 @@ function assemble(args) {
     optionalDependencies[packageName] = version;
 
     const packageDir = join(outDir, platform.packageName);
-    mkdirSync(join(packageDir, "bin"), { recursive: true });
-    stageBinary(platform, packageDir, artifactsDir);
+    mkdirSync(packageDir, { recursive: true });
+    stagePackage(platform, packageDir, artifactsDir);
 
     const platformJson = replaceTemplate(
       join(templatesDir, "platform-package.json.tmpl"),
