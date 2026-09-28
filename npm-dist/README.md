@@ -3,9 +3,25 @@
 This directory builds a personal npm distribution of the Codex CLI:
 
 - `@kingingwang/codex`: the main package and `codex` launcher
-- `@kingingwang/codex-<platform>`: the native binary for one supported platform
+- `@kingingwang/codex-<platform>`: the canonical Codex package for one supported platform
 
 The main package uses `optionalDependencies`, so npm normally installs only the binary package matching the current operating system and architecture.
+
+Each platform package embeds the canonical Codex package layout produced by
+`scripts/build_codex_package.py`:
+
+```text
+codex-package.json
+bin/codex
+bin/codex-code-mode-host
+codex-resources/   # bwrap on Linux, sandbox helpers on Windows, zsh on Unix
+codex-path/rg
+```
+
+The full layout matters: the app-server daemon validates it on first start and
+seeds its managed installation from it. A bare `codex` binary fails with
+"this CLI has no complete local package". The release workflows attach the
+same archives (`codex-package-<target>.tar.gz`) to the GitHub release as well.
 
 ## Packages
 
@@ -26,12 +42,12 @@ Create a directory with one subdirectory per Actions artifact:
 
 ```text
 release-assets/
-  codex-x86_64-musl/codex-linux-x86_64-musl
-  codex-aarch64-musl/codex-linux-aarch64-musl
-  codex-macos-x86_64/codex-macos-x86_64.zst
-  codex-macos-aarch64/codex-macos-aarch64.zst
-  codex-windows-x86_64/codex-windows-x86_64.exe
-  codex-windows-aarch64/codex-windows-aarch64.exe
+  codex-package-x86_64-unknown-linux-musl/codex-package-x86_64-unknown-linux-musl.tar.gz
+  codex-package-aarch64-unknown-linux-musl/codex-package-aarch64-unknown-linux-musl.tar.gz
+  codex-package-x86_64-apple-darwin/codex-package-x86_64-apple-darwin.tar.gz
+  codex-package-aarch64-apple-darwin/codex-package-aarch64-apple-darwin.tar.gz
+  codex-package-x86_64-pc-windows-msvc/codex-package-x86_64-pc-windows-msvc.tar.gz
+  codex-package-aarch64-pc-windows-msvc/codex-package-aarch64-pc-windows-msvc.tar.gz
 ```
 
 Then assemble and validate the seven packages:
