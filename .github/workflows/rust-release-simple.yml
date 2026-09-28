@@ -130,6 +130,32 @@ jobs:
           name: codex-${{ matrix.label }}
           path: codex-rs/dist
 
+      # ── 组装 canonical package ──
+      # daemon 首次启动要求完整包布局（codex-package.json +
+      # bin/codex-code-mode-host + codex-path/rg + codex-resources/bwrap），
+      # 裸二进制会报 "this CLI has no complete local package"。
+      # --entrypoint-bin 复用上面编好的 codex，只增量构建 helper crate，
+      # 并从公开 DotSlash 清单下载 rg / zsh。musl 链接器配置由前面的
+      # install-musl-build-tools.sh 写入 GITHUB_ENV，自动传递到这一步。
+      - name: Assemble canonical Codex package
+        env:
+          CODEX_REPO_ROOT: ${{ github.workspace }}
+          CARGO_PROFILE_RELEASE_LTO: "thin"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: |
+          set -euo pipefail
+          python3 ../scripts/build_codex_package.py \
+            --target "${{ matrix.target }}" \
+            --cargo-profile release \
+            --entrypoint-bin "target/${{ matrix.target }}/release/codex" \
+            --package-dir dist/package \
+            --archive-output "dist/codex-package-${{ matrix.target }}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-package-${{ matrix.target }}
+          path: codex-rs/dist/codex-package-${{ matrix.target }}.tar.gz
+
   # ── 发布（只跑一次，收集所有构建产物）─────────
   release:
     needs: build
@@ -145,6 +171,18 @@ jobs:
           path: release-assets
           pattern: codex-*
           merge-multiple: true
+
+      # 为 canonical package 归档生成 sha256 sidecar，便于下载方校验。
+      - name: Generate SHA256 sidecars for package archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          for archive in codex-package-*.tar.gz; do
+            [ -e "$archive" ] || continue
+            sha256sum "$archive" > "$archive.sha256"
+          done
+          ls -la
 
       # tag 从 commit 时间推导（而不是当前时间）：三个平台的 release workflow
       # 对同一 commit 算出同一个 tag，共享同一个 Release，从而实现
