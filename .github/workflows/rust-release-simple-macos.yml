@@ -112,16 +112,35 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/codex" "dist/codex-macos-${{ matrix.label }}"
-          # 顺带压缩一份：.zst 留给 npm 发布链路（npm-dist assemble 消费它），
-          # 用 -k 保留裸二进制，release job 会把裸二进制挂到 Release 上
-          # （安装脚本的目标机是 macOS，默认没有 zstd）。
-          zstd -T0 -19 -k -f "dist/codex-macos-${{ matrix.label }}" || true
           ls -la dist/
 
       - uses: actions/upload-artifact@v4
         with:
           name: codex-macos-${{ matrix.label }}
           path: codex-rs/dist/*
+
+      # ── 组装 canonical package ──
+      # daemon 首次启动要求完整包布局（codex-package.json +
+      # bin/codex-code-mode-host + codex-path/rg + codex-resources/zsh），
+      # 裸二进制会报 "this CLI has no complete local package"。
+      # --entrypoint-bin 复用上面编好的 codex，只增量构建 helper crate，
+      # 并从公开 DotSlash 清单下载 rg / zsh。
+      - name: Assemble canonical Codex package
+        env:
+          CODEX_REPO_ROOT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          python3 ../scripts/build_codex_package.py \
+            --target "${{ matrix.target }}" \
+            --cargo-profile release \
+            --entrypoint-bin "target/${{ matrix.target }}/release/codex" \
+            --package-dir dist/package \
+            --archive-output "dist/codex-package-${{ matrix.target }}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-package-${{ matrix.target }}
+          path: codex-rs/dist/codex-package-${{ matrix.target }}.tar.gz
 
   # ── 发布（收集所有 macOS 产物）─────────────────
   release:
@@ -139,6 +158,15 @@ jobs:
           pattern: codex-macos-*
           merge-multiple: true
 
+      # canonical package artifact 名字（codex-package-<target>）不匹配上面的
+      # codex-macos-* pattern，单独下载。
+      - name: Download canonical package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: codex-package-*
+          merge-multiple: true
+
       # tag 从 commit 时间推导（而不是当前时间）：三个平台的 release workflow
       # 对同一 commit 算出同一个 tag，共享同一个 Release，从而实现
       # releases/latest/download/<asset> 固定链接。
@@ -149,13 +177,17 @@ jobs:
           VERSION="$(date -u -d "@${COMMIT_TS}" '+%Y%m%d-%H%M%S')"
           echo "version=codex-${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Strip zstd archives from release assets
+      # 为 canonical package 归档生成 sha256 sidecar，便于下载方校验。
+      - name: Generate SHA256 sidecars for package archives
         shell: bash
         run: |
-          # npm 发布链路从 Actions artifacts 里读 .zst，不从 Release 取；
-          # Release 只挂裸二进制，避免安装脚本依赖 zstd。
-          rm -f release-assets/*.zst
-          ls -la release-assets/
+          set -euo pipefail
+          cd release-assets
+          for archive in codex-package-*.tar.gz; do
+            [ -e "$archive" ] || continue
+            sha256sum "$archive" > "$archive.sha256"
+          done
+          ls -la
 
       # create-if-missing + upload --clobber：三个平台的 release job 完成
       # 顺序不定，谁先到谁创建 Release，后面到的向同一 Release 追加资产。
