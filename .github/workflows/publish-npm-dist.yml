@@ -82,6 +82,9 @@ jobs:
           scope: "@kingingwang"
           package-manager-cache: false
 
+      - name: Test npm-dist scripts
+        run: node --test npm-dist/tests/assemble.test.mjs
+
       - name: Find successful release workflow runs
         id: release_runs
         shell: bash
@@ -148,12 +151,14 @@ jobs:
               --dir "release-assets/${artifact}"
           }
 
-          download rust-release-simple codex-x86_64-musl
-          download rust-release-simple codex-aarch64-musl
-          download rust-release-simple-macos codex-macos-x86_64
-          download rust-release-simple-macos codex-macos-aarch64
-          download rust-release-simple-windows codex-windows-x86_64
-          download rust-release-simple-windows codex-windows-aarch64
+          # canonical package 归档（codex-package-<target>.tar.gz），
+          # 由三个 simple workflow 里的 build_codex_package.py 步骤产出。
+          download rust-release-simple codex-package-x86_64-unknown-linux-musl
+          download rust-release-simple codex-package-aarch64-unknown-linux-musl
+          download rust-release-simple-macos codex-package-x86_64-apple-darwin
+          download rust-release-simple-macos codex-package-aarch64-apple-darwin
+          download rust-release-simple-windows codex-package-x86_64-pc-windows-msvc
+          download rust-release-simple-windows codex-package-aarch64-pc-windows-msvc
 
       - name: Derive deterministic fork version
         id: version
@@ -179,10 +184,38 @@ jobs:
               --out npm-dist/publish \
               --version "${{ steps.version.outputs.version }}"
 
-      - name: Smoke test Linux x64 binary
+      # 只跑 --version 抓不到打包问题：裸二进制也能过。这里走真实安装路径
+      # （npm pack → install -g），并验证 daemon 首次启动能从完整本地包 seed
+      # —— 这正是裸二进制发布会失败的场景。
+      - name: Smoke test Linux x64 package
         if: ${{ steps.release_runs.outputs.ready == 'true' }}
         shell: bash
-        run: npm-dist/publish/codex-linux-x64/bin/codex --version
+        run: |
+          set -euo pipefail
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "${smoke_dir}"' EXIT
+
+          pkg_name="$(node -p "require('./npm-dist/publish/codex-linux-x64/package.json').name")"
+          npm pack --silent --pack-destination "${smoke_dir}" npm-dist/publish/codex-linux-x64 >/dev/null
+
+          prefix="${smoke_dir}/prefix"
+          npm install -g --prefix "${prefix}" --ignore-scripts "${smoke_dir}"/*.tgz
+          pkg="${prefix}/lib/node_modules/${pkg_name}"
+
+          # 与 daemon seeding 校验（app-server-daemon/src/prepare_install.rs）
+          # 同一份文件清单。
+          test -f "${pkg}/codex-package.json"
+          test -x "${pkg}/bin/codex"
+          test -x "${pkg}/bin/codex-code-mode-host"
+          test -x "${pkg}/codex-path/rg"
+          test -x "${pkg}/codex-resources/bwrap"
+
+          export CODEX_HOME="${smoke_dir}/codex-home"
+          if ! timeout 180 "${pkg}/bin/codex" app-server daemon start; then
+            find "${CODEX_HOME}" -name '*.log' -exec tail -n 50 {} + || true
+            exit 1
+          fi
+          timeout 60 "${pkg}/bin/codex" app-server daemon stop
 
       - name: Publish npm packages
         if: >-
