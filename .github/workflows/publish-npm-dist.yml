@@ -210,7 +210,9 @@ jobs:
           test -x "${pkg}/codex-path/rg"
           test -x "${pkg}/codex-resources/bwrap"
 
+          # codex 拒绝指向不存在目录的 CODEX_HOME，先创建。
           export CODEX_HOME="${smoke_dir}/codex-home"
+          mkdir -p "${CODEX_HOME}"
           if ! timeout 180 "${pkg}/bin/codex" app-server daemon start; then
             find "${CODEX_HOME}" -name '*.log' -exec tail -n 50 {} + || true
             exit 1
