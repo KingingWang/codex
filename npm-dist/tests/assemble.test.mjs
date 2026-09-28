@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,12 +22,6 @@ import {
   validateVersion,
 } from "../scripts/assemble.mjs";
 import { packageOrder, publishArgs } from "../scripts/publish.mjs";
-
-const binaryHeaders = {
-  "elf": [0x7f, 0x45, 0x4c, 0x46],
-  "mach-o": [0xcf, 0xfa, 0xed, 0xfe],
-  "pe": [0x4d, 0x5a],
-};
 
 test("validates metadata inputs", () => {
   assert.equal(validateScope("@kingingwang"), "@kingingwang");
@@ -63,32 +58,60 @@ test("builds valid package metadata from release artifacts", (t) => {
 
   const artifactsDir = join(root, "artifacts");
   const outDir = join(root, "publish");
+  const version = "0.147.0-fork.20260812000000";
   for (const platform of platforms) {
-    const artifactDir = join(artifactsDir, platform.artifactName);
-    mkdirSync(artifactDir, { recursive: true });
-    const artifactPath = join(artifactDir, platform.artifactFile);
-    const binaryPath = join(root, `${platform.artifactName}.binary`);
+    // Build a minimal canonical package tree, mirroring
+    // scripts/codex_package/layout.py.
+    const isWindows = platform.os[0] === "win32";
+    const exe = isWindows ? ".exe" : "";
+    const pkg = join(root, `pkg-${platform.target}`);
+    mkdirSync(join(pkg, "bin"), { recursive: true });
+    mkdirSync(join(pkg, "codex-resources"), { recursive: true });
+    mkdirSync(join(pkg, "codex-path"), { recursive: true });
     writeFileSync(
-      binaryPath,
-      Buffer.from([...binaryHeaders[platform.format], 0, 0]),
+      join(pkg, "codex-package.json"),
+      JSON.stringify({
+        layoutVersion: 1,
+        version,
+        target: platform.target,
+        variant: "codex",
+        entrypoint: `bin/codex${exe}`,
+        resourcesDir: "codex-resources",
+        pathDir: "codex-path",
+      }),
     );
-    chmodSync(binaryPath, 0o755);
-
-    if (platform.compressed) {
-      const result = spawnSync("zstd", [
-        "-q",
-        "-f",
-        binaryPath,
-        "-o",
-        artifactPath,
-      ]);
-      assert.equal(result.status, 0, result.stderr?.toString());
-    } else {
-      writeFileSync(artifactPath, readFileSync(binaryPath));
+    const executables = [
+      `bin/codex${exe}`,
+      `bin/codex-code-mode-host${exe}`,
+      `codex-path/rg${exe}`,
+    ];
+    if (isWindows) {
+      executables.push(
+        "codex-resources/codex-command-runner.exe",
+        "codex-resources/codex-windows-sandbox-setup.exe",
+      );
+    } else if (platform.os[0] === "linux") {
+      executables.push("codex-resources/bwrap");
     }
+    for (const name of executables) {
+      const path = join(pkg, name);
+      writeFileSync(path, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+      chmodSync(path, 0o755);
+    }
+
+    const artifactName = `codex-package-${platform.target}`;
+    const artifactDir = join(artifactsDir, artifactName);
+    mkdirSync(artifactDir, { recursive: true });
+    const result = spawnSync("tar", [
+      "-czf",
+      join(artifactDir, `${artifactName}.tar.gz`),
+      "-C",
+      pkg,
+      ".",
+    ]);
+    assert.equal(result.status, 0, result.stderr?.toString());
   }
 
-  const version = "0.147.0-fork.20260812000000";
   assemblePackages({
     artifactsDir,
     outDir,
@@ -104,11 +127,18 @@ test("builds valid package metadata from release artifacts", (t) => {
     assert.deepEqual(packageJson, {
       name: `@test/${platform.packageName}`,
       version,
-      description: `Codex CLI binary for ${platform.os[0]}-${platform.cpu[0]} (fork distribution)`,
+      description: `Codex CLI package for ${platform.os[0]}-${platform.cpu[0]} (fork distribution)`,
       license: "Apache-2.0",
       os: platform.os,
       cpu: platform.cpu,
-      files: ["bin", "README.md", "LICENSE"],
+      files: [
+        "bin",
+        "codex-resources",
+        "codex-path",
+        "codex-package.json",
+        "README.md",
+        "LICENSE",
+      ],
       publishConfig: { access: "public" },
       homepage: "https://github.com/example/codex",
       repository: {
@@ -116,6 +146,21 @@ test("builds valid package metadata from release artifacts", (t) => {
         url: "git+https://github.com/example/codex.git",
       },
     });
+
+    const packageDir = join(outDir, platform.packageName);
+    const manifest = JSON.parse(
+      readFileSync(join(packageDir, "codex-package.json"), "utf8"),
+    );
+    assert.equal(manifest.target, platform.target);
+    const entrypoint = platform.os[0] === "win32" ? "bin/codex.exe" : "bin/codex";
+    assert.equal(manifest.entrypoint, entrypoint);
+    if (platform.os[0] !== "win32") {
+      assert.notEqual(
+        statSync(join(packageDir, entrypoint)).mode & 0o111,
+        0,
+        `${platform.packageName} entrypoint must be executable`,
+      );
+    }
   }
 
   const optionalDependencies = Object.fromEntries(
