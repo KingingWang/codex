@@ -693,7 +693,8 @@ fn consecutive_turns_share_byte_identical_prefix() {
 #[test]
 fn cache_markers_stay_under_breakpoint_limit() {
     // The Anthropic API caps cache breakpoints at 4 per request. Verify we
-    // never exceed that even when system, tools, and history are all in play.
+    // never exceed that even when both system tiers, tools, and history are
+    // all in play.
     let mut prompt = Prompt::default();
     prompt.base_instructions = BaseInstructions {
         text: "You are helpful.".to_string(),
@@ -701,6 +702,9 @@ fn cache_markers_stay_under_breakpoint_limit() {
     };
     prompt.tools = vec![shell_tool(), read_tool()].into();
     prompt.input = vec![
+        user_message(
+            "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nstyle\n</INSTRUCTIONS>",
+        ),
         user_message("hello"),
         assistant_message("hi"),
         user_message("again"),
@@ -708,18 +712,17 @@ fn cache_markers_stay_under_breakpoint_limit() {
     let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
 
     let mut count = 0;
-    if req
+    count += req
         .system
         .as_ref()
         .map(|s| {
-            s.iter().any(|b| match b {
-                AnthropicSystemBlock::Text { cache_control, .. } => cache_control.is_some(),
-            })
+            s.iter()
+                .filter(|b| match b {
+                    AnthropicSystemBlock::Text { cache_control, .. } => cache_control.is_some(),
+                })
+                .count()
         })
-        .unwrap_or(false)
-    {
-        count += 1;
-    }
+        .unwrap_or(0);
     count += req
         .tools
         .iter()
@@ -741,6 +744,8 @@ fn cache_markers_stay_under_breakpoint_limit() {
                 .count();
         }
     }
+    // Worst case: system base + system tail + one message-level marker.
+    assert_eq!(count, 3, "expected the tiered strategy's 3 markers");
     assert!(
         count <= 4,
         "expected at most 4 cache markers, found {count}"
@@ -907,36 +912,238 @@ fn earlier_messages_stay_byte_stable_across_turns() {
     );
 }
 
-/// Even when developer-role context drifts every turn (e.g. dynamic_context
-/// scripts), the first converted message stays byte-identical because
-/// developer/system roles are dropped at conversion time. This is what lets
-/// the SYSTEM/TOOLS cache anchors survive across turns even though the
-/// developer payload is unstable.
+/// Anthropic has no developer/system message role. Rather than dropping that
+/// content (which silently lost subagent spawn instructions and
+/// dynamic_context output), it is re-routed into the user stream. The cache
+/// marker must skip re-routed blocks whenever a stable user block is
+/// available in the same message.
 #[test]
-fn developer_message_drift_doesnt_shift_first_message() {
+fn developer_messages_are_rerouted_into_user_stream() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        developer_message("You are a review subagent."),
+        user_message("review the diff"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(req.messages.len(), 1);
+    let blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(
+        blocks.len(),
+        2,
+        "developer content must survive alongside the user text"
+    );
+    match &blocks[0] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "You are a review subagent.");
+            assert!(
+                cache_control.is_none(),
+                "re-routed developer content must not carry the marker when a stable user block follows"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    match &blocks[1] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "review the diff");
+            assert!(
+                cache_control.is_some(),
+                "marker must land on the last stable user-origin block"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+}
+
+/// dynamic_context_script output is re-appended to EVERY sampling request and
+/// can drift between requests. It rides at the tail of the user stream,
+/// AFTER the message-level cache marker, so the cached prefix (everything up
+/// to the marker) stays byte-identical even while the developer payload
+/// changes. This is what lets the SYSTEM/TOOLS/MESSAGE cache anchors survive
+/// across turns even though the developer payload is unstable.
+#[test]
+fn trailing_developer_drift_keeps_marker_on_stable_prefix() {
     let mut prompt_a = Prompt::default();
     prompt_a.input = vec![
         user_message("real bootstrap"),
-        developer_message("dynamic context A"),
         assistant_message("ok"),
         user_message("trailing"),
+        developer_message("dynamic context A"),
     ];
     let mut prompt_b = Prompt::default();
     prompt_b.input = vec![
         user_message("real bootstrap"),
-        developer_message("entirely different B content"),
         assistant_message("ok"),
         user_message("trailing"),
+        developer_message("entirely different B content"),
     ];
 
     let req_a = build_anthropic_request(&prompt_a, &test_model_info()).unwrap();
     let req_b = build_anthropic_request(&prompt_b, &test_model_info()).unwrap();
 
-    // Same number of messages on both sides — developer items dropped.
-    assert_eq!(req_a.messages.len(), req_b.messages.len());
-    // First message must serialize byte-identically (no cache_control on
-    // either after the cc-haha-aligned single-marker design).
+    // [user bootstrap][assistant ok][user trailing + developer tail].
+    assert_eq!(req_a.messages.len(), 3);
+    assert_eq!(req_b.messages.len(), 3);
+    // The stable prefix messages are byte-identical (no markers live on
+    // them), so the prior turn's cached prefix still matches.
     assert_eq!(req_a.messages[0], req_b.messages[0]);
+    assert_eq!(req_a.messages[1], req_b.messages[1]);
+
+    let tail_a = match &req_a.messages[2].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    let tail_b = match &req_b.messages[2].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(tail_a.len(), 2);
+    assert_eq!(tail_b.len(), 2);
+    // The stable block (marker included) is byte-identical across requests.
+    assert_eq!(tail_a[0], tail_b[0]);
+    match &tail_a[0] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "trailing");
+            assert!(
+                cache_control.is_some(),
+                "marker must sit on the last stable block, before the drifting tail"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    // The drifted developer payload differs but stays unmarked, so it never
+    // becomes part of a cached prefix.
+    assert_ne!(tail_a[1], tail_b[1]);
+    match &tail_a[1] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "dynamic context A");
+            assert!(
+                cache_control.is_none(),
+                "drifting re-routed content must never carry the marker"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+}
+
+/// When the trailing user message is ENTIRELY re-routed developer content,
+/// the marker walks back to the previous stable user block instead of
+/// anchoring on bytes that can drift on every request.
+#[test]
+fn all_developer_trailing_message_moves_marker_to_previous_user_message() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("stable input"),
+        assistant_message("ok"),
+        developer_message("dynamic context"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    assert_eq!(req.messages.len(), 3);
+
+    match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => match &b[0] {
+            AnthropicContentBlock::Text {
+                text,
+                cache_control,
+            } => {
+                assert_eq!(text, "stable input");
+                assert!(
+                    cache_control.is_some(),
+                    "marker must walk back to the last stable user block"
+                );
+            }
+            other => panic!("unexpected block: {other:?}"),
+        },
+        _ => panic!("expected blocks"),
+    }
+    match &req.messages[2].content {
+        AnthropicMessageContent::Blocks(b) => match &b[0] {
+            AnthropicContentBlock::Text { cache_control, .. } => {
+                assert!(
+                    cache_control.is_none(),
+                    "an all-re-routed message must not carry the marker"
+                );
+            }
+            other => panic!("unexpected block: {other:?}"),
+        },
+        _ => panic!("expected blocks"),
+    }
+}
+
+/// A recorded (stable) developer message in the middle of history is
+/// included deterministically, so turn N+1's prefix stays byte-identical
+/// modulo cache_control — the invariant the gateway's prefix lookup relies
+/// on.
+#[test]
+fn stable_developer_message_keeps_prefix_byte_identical() {
+    let mut turn_n = Prompt::default();
+    turn_n.input = vec![
+        user_message("question"),
+        developer_message("approved action: run ls"),
+    ];
+    let mut turn_n1 = Prompt::default();
+    turn_n1.input = vec![
+        user_message("question"),
+        developer_message("approved action: run ls"),
+        assistant_message("done"),
+        user_message("next"),
+    ];
+
+    let req_n = build_anthropic_request(&turn_n, &test_model_info()).unwrap();
+    let req_n1 = build_anthropic_request(&turn_n1, &test_model_info()).unwrap();
+
+    fn strip_cc(m: &AnthropicMessage) -> serde_json::Value {
+        let mut v = serde_json::to_value(m).unwrap();
+        if let Some(content) = v.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for block in content {
+                if let Some(obj) = block.as_object_mut() {
+                    obj.remove("cache_control");
+                }
+            }
+        }
+        v
+    }
+
+    assert_eq!(strip_cc(&req_n.messages[0]), strip_cc(&req_n1.messages[0]));
+
+    // Turn N's marker sits on the stable user block (blocks[0]), NOT on the
+    // trailing re-routed developer block.
+    let blocks = match &req_n.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(blocks.len(), 2);
+    match &blocks[0] {
+        AnthropicContentBlock::Text { cache_control, .. } => {
+            assert!(cache_control.is_some());
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    match &blocks[1] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "approved action: run ls");
+            assert!(cache_control.is_none());
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
 }
 
 /// AGENTS.md fragments are large (often thousands of tokens) and stable for
@@ -973,29 +1180,34 @@ fn agents_md_fragment_is_lifted_into_system_block() {
 
     let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
 
-    // System block must contain BOTH the original instructions and the
-    // lifted AGENTS.md text.
+    // System is tiered: block 0 = base instructions (session-stable cache
+    // anchor), block 1 = the lifted fragment with its boundaries preserved.
+    // Both carry cache markers (Claude Code's two-tier system pattern).
     let system = req.system.as_ref().expect("system block present");
-    assert_eq!(system.len(), 1);
+    assert_eq!(system.len(), 2);
     let AnthropicSystemBlock::Text {
         text,
         cache_control,
     } = &system[0];
-    assert!(
-        text.contains("You are helpful."),
-        "system block must keep the base instructions"
-    );
-    assert!(
-        text.contains("# AGENTS.md instructions for /tmp"),
-        "system block must contain the lifted AGENTS.md fragment, got: {text:?}"
-    );
-    assert!(
-        text.contains("</INSTRUCTIONS>"),
-        "system block must contain the AGENTS.md end marker"
+    assert_eq!(
+        text, "You are helpful.",
+        "block 0 must keep the base instructions"
     );
     assert!(
         cache_control.is_some(),
-        "system block must carry cache marker"
+        "base-instructions block must carry a cache marker"
+    );
+    let AnthropicSystemBlock::Text {
+        text,
+        cache_control,
+    } = &system[1];
+    assert_eq!(
+        text, &agents_md_text,
+        "the lifted fragment must be its own block, not concatenated into the base"
+    );
+    assert!(
+        cache_control.is_some(),
+        "system tail block must carry a cache marker"
     );
 
     // Messages must NO LONGER contain the AGENTS.md text — only the env
@@ -1042,7 +1254,7 @@ fn agents_md_lifts_only_matching_block_from_mixed_message() {
         role: "user".to_string(),
         content: vec![
             ContentItem::InputText {
-                text: agents_md_text,
+                text: agents_md_text.clone(),
             },
             ContentItem::InputText {
                 text: "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"
@@ -1060,8 +1272,10 @@ fn agents_md_lifts_only_matching_block_from_mixed_message() {
 
     // Lifted into system.
     let system = req.system.as_ref().expect("system");
-    let AnthropicSystemBlock::Text { text, .. } = &system[0];
-    assert!(text.contains("# AGENTS.md instructions for /repo"));
+    // Block 0 is the (default) base instructions; the lifted fragment is the
+    // tail block with its boundaries preserved.
+    let AnthropicSystemBlock::Text { text, .. } = system.last().expect("system tail block");
+    assert_eq!(text, &agents_md_text);
 
     // m_0 still exists with the remaining 2 blocks.
     assert_eq!(req.messages.len(), 1);
@@ -1079,6 +1293,51 @@ fn agents_md_lifts_only_matching_block_from_mixed_message() {
         .collect();
     assert!(texts.iter().any(|t| t.contains("<environment_context>")));
     assert!(texts.iter().any(|t| t.as_str() == "actual question"));
+}
+
+/// Host-provided instructions carry no directory, so the fragment header has
+/// no ` for <dir>` suffix. The canonical start marker is
+/// `# AGENTS.md instructions`; the directory-less variant must be lifted too.
+#[test]
+fn agents_md_fragment_without_directory_is_lifted() {
+    let agents_md_text =
+        "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nhost rules\n</INSTRUCTIONS>".to_string();
+
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: String::new(),
+        ..Default::default()
+    };
+    prompt.input = vec![user_message(&agents_md_text), user_message("do the task")];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    let system = req.system.as_ref().expect("system block present");
+    assert_eq!(system.len(), 1);
+    let AnthropicSystemBlock::Text {
+        text,
+        cache_control,
+    } = &system[0];
+    assert_eq!(text, &agents_md_text);
+    assert!(cache_control.is_some());
+
+    let all_message_text: String = req
+        .messages
+        .iter()
+        .flat_map(|m| match &m.content {
+            AnthropicMessageContent::Blocks(b) => b.clone(),
+            _ => Vec::new(),
+        })
+        .filter_map(|b| match b {
+            AnthropicContentBlock::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    assert_eq!(
+        all_message_text, "do the task",
+        "the lifted fragment must leave the message stream"
+    );
 }
 
 fn custom_tool_call(name: &str, call_id: &str, input: &str) -> ResponseItem {
