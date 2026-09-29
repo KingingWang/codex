@@ -103,6 +103,7 @@ pub fn spawn_anthropic_stream(
     ResponseStream {
         rx_event,
         upstream_request_id: None,
+        interrupt: None,
     }
 }
 
