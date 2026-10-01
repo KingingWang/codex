@@ -84,7 +84,6 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 const ANALYTICS_EVENTS_QUEUE_SIZE: usize = 256;
-#[allow(dead_code)]
 const ANALYTICS_EVENTS_TIMEOUT: Duration = Duration::from_secs(10);
 // Covers two sequential POSTs plus queue/barrier scheduling; additional queued sends remain best-effort.
 const ANALYTICS_EVENTS_FLUSH_TIMEOUT: Duration = Duration::from_secs(25);
@@ -940,7 +939,78 @@ async fn send_track_events(
     // This fork intentionally short-circuits the analytics pipeline so no
     // tracking payloads leave the host. Re-enable by restoring the upstream
     // body if you need full analytics behavior again.
-}duct-Sku", product_sku);
+}
+
+#[allow(dead_code)]
+fn track_event_request_batches(events: Vec<TrackEventRequest>) -> Vec<Vec<TrackEventRequest>> {
+    let mut batches = Vec::new();
+    let mut current_batch = Vec::new();
+
+    for event in events {
+        if event.should_send_in_isolated_request() {
+            if !current_batch.is_empty() {
+                batches.push(current_batch);
+                current_batch = Vec::new();
+            }
+            batches.push(vec![event]);
+        } else {
+            current_batch.push(event);
+        }
+    }
+
+    if !current_batch.is_empty() {
+        batches.push(current_batch);
+    }
+
+    batches
+}
+
+#[allow(dead_code)]
+async fn send_track_events_request(
+    auth: &CodexAuth,
+    destination: &AnalyticsEventsDestination,
+    events: Vec<TrackEventRequest>,
+    http_client_factory: &codex_http_client::HttpClientFactory,
+    product_sku: Option<&str>,
+) {
+    if events.is_empty() {
+        return;
+    }
+
+    let payload = TrackEventsRequest { events };
+
+    #[cfg(debug_assertions)]
+    if capture_track_events_request(destination, &payload) {
+        return;
+    }
+
+    let url = match destination {
+        AnalyticsEventsDestination::Http { url } => url,
+        #[cfg(debug_assertions)]
+        AnalyticsEventsDestination::CaptureFile { .. } => return,
+    };
+    let client = match codex_login::default_client::create_client_for_route_async(
+        http_client_factory.clone(),
+        url.clone(),
+        codex_http_client::ClientRouteClass::Api,
+        codex_login::default_client::ClientRedirectPolicy::Default,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "failed to build events client");
+            return;
+        }
+    };
+    let mut request = client
+        .post(url)
+        .timeout(ANALYTICS_EVENTS_TIMEOUT)
+        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
+        .header("Content-Type", "application/json")
+        .json(&payload);
+    if let Some(product_sku) = product_sku {
+        request = request.header("X-OpenAI-Product-Sku", product_sku);
     }
     let response = request.send().await;
 

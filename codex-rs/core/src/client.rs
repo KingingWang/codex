@@ -347,6 +347,7 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::FlexUnavailable => "flex capacity unavailable".to_string(),
         ApiError::ServerOverloaded { .. } => "HTTP 529 server overloaded".to_string(),
         ApiError::RateLimitExceeded { .. } => "HTTP 429 rate limit exceeded".to_string(),
+        ApiError::ContentFilter => "content filter".to_string(),
     }
 }
 
