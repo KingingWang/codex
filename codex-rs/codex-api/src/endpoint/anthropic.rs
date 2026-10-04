@@ -25,10 +25,10 @@ use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
+use crate::non_responses_item_id::unique_item_id;
 use crate::sse::anthropic::spawn_anthropic_stream;
 use codex_client::HttpTransport;
 use codex_client::Request;
-use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
@@ -302,8 +302,9 @@ async fn convert_response_to_events(
                 if thinking.is_empty() {
                     continue;
                 }
+                let item_id = unique_item_id(&format!("reasoning_{idx}"));
                 let added = ResponseItem::Reasoning {
-                    id: Some(ResponseItemId::from_server(format!("reasoning_{idx}"))),
+                    id: Some(item_id.clone()),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: String::new(),
@@ -330,7 +331,7 @@ async fn convert_response_to_events(
                     return;
                 }
                 let done = ResponseItem::Reasoning {
-                    id: Some(ResponseItemId::from_server(format!("reasoning_{idx}"))),
+                    id: Some(item_id),
                     // The thinking text goes into `summary` (the Responses API
                     // summary path) rather than `content`: clients that render
                     // completed reasoning items read the summary channel
@@ -361,8 +362,9 @@ async fn convert_response_to_events(
                 if text.is_empty() {
                     continue;
                 }
+                let item_id = unique_item_id(&format!("msg_{idx}"));
                 let added = ResponseItem::Message {
-                    id: Some(ResponseItemId::from_server(format!("msg_{idx}"))),
+                    id: Some(item_id.clone()),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: String::new(),
@@ -386,7 +388,7 @@ async fn convert_response_to_events(
                     return;
                 }
                 let done = ResponseItem::Message {
-                    id: Some(ResponseItemId::from_server(format!("msg_{idx}"))),
+                    id: Some(item_id),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText { text: text.clone() }],
                     phase: None,
@@ -565,6 +567,16 @@ mod tests {
         assert!(matches!(&events[1], Ok(ResponseEvent::OutputItemAdded(_))));
         assert!(matches!(&events[2], Ok(ResponseEvent::OutputTextDelta(_))));
         assert!(matches!(&events[3], Ok(ResponseEvent::OutputItemDone(_))));
+        let added_id = match &events[1] {
+            Ok(ResponseEvent::OutputItemAdded(item)) => item.id(),
+            _ => None,
+        };
+        let done_id = match &events[3] {
+            Ok(ResponseEvent::OutputItemDone(item)) => item.id(),
+            _ => None,
+        };
+        assert_eq!(added_id, done_id);
+        assert!(added_id.is_some_and(|id| id.starts_with("msg_")));
         match events.last().unwrap() {
             Ok(ResponseEvent::Completed {
                 token_usage: Some(usage),
