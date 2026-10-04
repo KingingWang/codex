@@ -7,6 +7,7 @@ use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::common::normalize_chat_completion_tool_arguments;
 use crate::error::ApiError;
+use crate::non_responses_item_id::unique_item_id;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
@@ -78,10 +79,10 @@ pub async fn process_chat_completions_sse(
     let mut stream = stream.eventsource();
     let mut accumulated_tool_calls: HashMap<i64, ToolCallAccumulator> = HashMap::new();
     let mut final_usage: Option<TokenUsage> = None;
-    // Whether an OutputItemAdded for the assistant text message has been emitted.
+    // The assistant text item's ID, assigned when OutputItemAdded is emitted.
     // The turn processor requires an OutputItemAdded before it can handle
     // OutputTextDelta events; without it the deltas are silently dropped.
-    let mut text_item_added = false;
+    let mut text_item_id: Option<ResponseItemId> = None;
     // Whether an OutputItemDone for the assistant text message has been emitted.
     let mut text_item_done = false;
     // Accumulated text content from all OutputTextDelta events, used to build
@@ -144,9 +145,11 @@ pub async fn process_chat_completions_sse(
             // finish_reason chunk). This must happen BEFORE tool call events so
             // the TUI can finalize the stream_controller while it is still
             // active, preventing duplicate rendering of the text content.
-            if text_item_added && !text_item_done {
+            if let Some(item_id) = &text_item_id
+                && !text_item_done
+            {
                 let done_item = ResponseItem::Message {
-                    id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
+                    id: Some(item_id.clone()),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: accumulated_text.clone(),
@@ -294,7 +297,7 @@ pub async fn process_chat_completions_sse(
                 &tx_event,
                 &mut accumulated_tool_calls,
                 &mut reasoning,
-                &mut text_item_added,
+                &mut text_item_id,
                 &mut text_item_done,
                 &mut accumulated_text,
                 &mut output_emitted,
@@ -316,7 +319,7 @@ async fn process_chat_choice(
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     accumulated_tool_calls: &mut HashMap<i64, ToolCallAccumulator>,
     reasoning: &mut ReasoningStream,
-    text_item_added: &mut bool,
+    text_item_id: &mut Option<ResponseItemId>,
     text_item_done: &mut bool,
     accumulated_text: &mut String,
     output_emitted: &mut bool,
@@ -345,9 +348,10 @@ async fn process_chat_choice(
         }
         // Emit OutputItemAdded before the first text delta so the turn
         // processor has an active_item to attach deltas to.
-        if !*text_item_added {
+        if text_item_id.is_none() {
+            let item_id = unique_item_id("msg_assistant");
             let added_item = ResponseItem::Message {
-                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
+                id: Some(item_id.clone()),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: String::new(),
@@ -358,7 +362,7 @@ async fn process_chat_choice(
             let _ = tx_event
                 .send(Ok(ResponseEvent::OutputItemAdded(added_item)))
                 .await;
-            *text_item_added = true;
+            *text_item_id = Some(item_id);
         }
         accumulated_text.push_str(content);
         *output_emitted = true;
@@ -436,9 +440,11 @@ async fn process_chat_choice(
         // Emit OutputItemDone for the assistant text message if we added one.
         // This must happen BEFORE tool call events so the TUI can finalize the
         // stream_controller while it is still active, preventing duplicate rendering.
-        if *text_item_added && !*text_item_done {
+        if let Some(item_id) = text_item_id.as_ref()
+            && !*text_item_done
+        {
             let done_item = ResponseItem::Message {
-                id: Some(ResponseItemId::from_server("msg_assistant".to_string())),
+                id: Some(item_id.clone()),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: accumulated_text.clone(),
@@ -566,6 +572,24 @@ mod tests {
         ));
         assert!(matches!(&events[3], Ok(ResponseEvent::OutputItemDone(_))));
         assert!(matches!(&events[4], Ok(ResponseEvent::Completed { .. })));
+
+        let message_ids = |events: &[Result<ResponseEvent, ApiError>]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Ok(
+                        ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item),
+                    ) => item.id().cloned(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let ids = message_ids(&events);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], ids[1]);
+        assert!(ids[0].starts_with("msg_"));
+        let repeated = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4]).await;
+        assert_ne!(ids[0], message_ids(&repeated)[0]);
     }
 
     #[tokio::test]
@@ -1178,7 +1202,7 @@ mod tests {
 
         let events = collect_chat_events(&[chunk1, chunk2, chunk3, chunk4, chunk5]).await;
 
-        let reasoning_dones: Vec<String> = events
+        let reasoning_dones: Vec<(ResponseItemId, String)> = events
             .iter()
             .filter_map(|ev| match ev {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
@@ -1192,18 +1216,20 @@ mod tests {
                         ) => text.clone(),
                         None => String::new(),
                     };
-                    Some(format!("{}:{text}", id.as_deref().unwrap_or_default()))
+                    Some((id.clone().expect("reasoning item id"), text))
                 }
                 _ => None,
             })
             .collect();
         assert_eq!(
-            reasoning_dones,
-            vec![
-                "reasoning_0:before".to_string(),
-                "reasoning_0_1:after".to_string()
-            ],
-            "each reasoning segment must be completed once with its own id: {events:?}"
+            reasoning_dones
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["before", "after"]
         );
+        assert!(reasoning_dones[0].0.starts_with("reasoning_0_"));
+        assert!(reasoning_dones[1].0.starts_with("reasoning_0_1_"));
+        assert_ne!(reasoning_dones[0].0, reasoning_dones[1].0);
     }
 }
