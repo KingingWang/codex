@@ -17,6 +17,7 @@
 
 use crate::common::ResponseEvent;
 use crate::error::ApiError;
+use crate::non_responses_item_id::unique_item_id;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
@@ -139,9 +140,9 @@ impl ReasoningStream {
 }
 
 fn reasoning_item_id(choice_index: i64, segment: usize) -> ResponseItemId {
-    ResponseItemId::from_server(if segment == 0 {
-        format!("reasoning_{choice_index}")
+    if segment == 0 {
+        unique_item_id(&format!("reasoning_{choice_index}"))
     } else {
-        format!("reasoning_{choice_index}_{segment}")
-    })
+        unique_item_id(&format!("reasoning_{choice_index}_{segment}"))
+    }
 }
