@@ -31,6 +31,7 @@ use crate::anthropic_types::stop_reason_to_end_turn;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::error::ApiError;
+use crate::non_responses_item_id::unique_item_id;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
@@ -69,6 +70,7 @@ enum BlockKind {
     Tool(ToolBlockState),
     Thinking {
         accumulated: String,
+        block_id: ResponseItemId,
         /// Captured from Anthropic's `signature_delta` events. Required by
         /// Vertex AI (and the direct Anthropic API in some modes) when the
         /// thinking block is replayed in a follow-up turn. We persist it via
@@ -210,7 +212,7 @@ pub async fn process_anthropic_sse(
             } => {
                 let kind = match &content_block {
                     AnthropicContentBlock::Text { .. } => {
-                        let block_id = ResponseItemId::from_server(format!("msg_{index}"));
+                        let block_id = unique_item_id(&format!("msg_{index}"));
                         let item = ResponseItem::Message {
                             id: Some(block_id.clone()),
                             role: "assistant".to_string(),
@@ -262,8 +264,9 @@ pub async fn process_anthropic_sse(
                         signature,
                         ..
                     } => {
+                        let block_id = unique_item_id(&format!("reasoning_{index}"));
                         let item = ResponseItem::Reasoning {
-                            id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
+                            id: Some(block_id.clone()),
                             summary: Vec::new(),
                             content: Some(vec![ReasoningItemContent::ReasoningText {
                                 text: String::new(),
@@ -281,6 +284,7 @@ pub async fn process_anthropic_sse(
                         output_emitted = true;
                         BlockKind::Thinking {
                             accumulated: thinking.clone(),
+                            block_id,
                             signature: signature.clone(),
                         }
                     }
@@ -382,9 +386,10 @@ pub async fn process_anthropic_sse(
                     }),
                     BlockKind::Thinking {
                         accumulated,
+                        block_id,
                         signature,
                     } => Some(ResponseItem::Reasoning {
-                        id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
+                        id: Some(block_id),
                         // The thinking text goes into `summary` (the Responses
                         // API summary path) rather than `content`: clients that
                         // render completed reasoning items read the summary
@@ -450,9 +455,10 @@ pub async fn process_anthropic_sse(
                             }),
                             BlockKind::Thinking {
                                 accumulated,
+                                block_id,
                                 signature,
                             } => Some(ResponseItem::Reasoning {
-                                id: Some(ResponseItemId::from_server(format!("reasoning_{index}"))),
+                                id: Some(block_id),
                                 // See `ContentBlockStop`: thinking text is
                                 // carried on the summary channel.
                                 summary: vec![ReasoningItemReasoningSummary::SummaryText {
@@ -796,5 +802,29 @@ mod tests {
             .collect();
         assert_eq!(summary_text, "Let me think");
         assert_eq!(encrypted_content.as_deref(), Some("sig-1"));
+
+        let item_ids = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item)) => {
+                    item.id()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(item_ids.len(), 4);
+        assert_eq!(item_ids[0], item_ids[1]);
+        assert_eq!(item_ids[2], item_ids[3]);
+        assert_ne!(item_ids[0], item_ids[2]);
+        assert!(item_ids[2].starts_with("msg_"));
+        let repeated = collect_events(chunks).await;
+        let repeated_id = repeated
+            .iter()
+            .find_map(|event| match event {
+                Ok(ResponseEvent::OutputItemAdded(item)) => item.id(),
+                _ => None,
+            })
+            .expect("repeated thinking item");
+        assert_ne!(item_ids[0], repeated_id);
     }
 }

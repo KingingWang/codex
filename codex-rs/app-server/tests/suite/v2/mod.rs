@@ -125,6 +125,7 @@ mod skills_list;
 mod sleep;
 mod thread_archive;
 mod thread_attachments;
+mod thread_chat_item_ids;
 mod thread_delete;
 mod thread_environments;
 mod thread_fork;
