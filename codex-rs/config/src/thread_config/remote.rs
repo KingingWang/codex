@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::ModelProviderAuthInfo;
@@ -196,6 +197,9 @@ fn model_provider_from_proto(
         supports_websockets: provider.supports_websockets,
         supports_standalone_web_search: provider.supports_standalone_web_search,
         capabilities: None,
+        // The remote thread-config proto has no freeform-tool capability field, so
+        // leave the decision to the wire protocol.
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
     Ok((id, info))
@@ -228,6 +232,7 @@ fn model_provider_to_proto(
         requires_openai_auth,
         supports_websockets,
         supports_standalone_web_search,
+        freeform_tool_support: _,
         include_internal_metadata: _,
         capabilities: _,
     } = provider;
@@ -464,6 +469,7 @@ mod tests {
     fn model_provider_proto_defaults_standalone_web_search_to_false() {
         let expected = ModelProviderInfo {
             supports_standalone_web_search: false,
+            freeform_tool_support: FreeformToolSupport::Auto,
             ..expected_provider()
         };
         let proto = model_provider_to_proto("local", expected.clone());
@@ -587,6 +593,7 @@ mod tests {
             requires_openai_auth: false,
             supports_websockets: true,
             supports_standalone_web_search: true,
+            freeform_tool_support: FreeformToolSupport::Auto,
             gateway_oauth: None,
             aws: None,
             capabilities: None,

@@ -118,6 +118,7 @@ mod thread_processor_behavior_tests {
     use codex_config::SessionThreadConfig;
     use codex_config::StaticThreadConfigLoader;
     use codex_config::ThreadConfigSource;
+    use codex_model_provider_info::FreeformToolSupport;
     use codex_model_provider_info::ModelProviderInfo;
     use codex_model_provider_info::WireApi;
     use codex_protocol::ThreadId;
@@ -615,6 +616,7 @@ mod thread_processor_behavior_tests {
             supports_websockets: true,
             supports_standalone_web_search: false,
             capabilities: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         };
         let config_manager = ConfigManager::new(

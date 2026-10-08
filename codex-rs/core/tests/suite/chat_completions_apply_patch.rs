@@ -1,6 +1,7 @@
-//! Chat Completions providers receive `apply_patch` as a function tool when the
-//! model metadata opts in via `apply_patch_tool_type = "function"`, and
-//! function-style calls execute end to end.
+//! Chat Completions providers always receive `apply_patch` as a function tool:
+//! the freeform form is a Responses-only custom tool that this wire protocol
+//! cannot carry, so a freeform declaration is lowered instead of dropped.
+//! Function-style calls execute end to end.
 
 use anyhow::Result;
 use codex_model_provider_info::ModelProviderInfo;
@@ -51,9 +52,10 @@ fn chat_completions_provider(server: &MockServer) -> ModelProviderInfo {
     provider
 }
 
-#[test]
-fn chat_completions_apply_patch_function_tool_round_trip() -> Result<()> {
-    run_test_with_large_stack("chat-apply-patch-round-trip", || async {
+/// Drives one `apply_patch` call end to end over the Chat Completions wire
+/// protocol, asserting the advertised tool shape and the applied file content.
+fn apply_patch_round_trip(name: &'static str, declared: ApplyPatchToolType) -> Result<()> {
+    run_test_with_large_stack(name, move || async move {
         skip_if_no_network!(Ok(()));
 
         let server = MockServer::start().await;
@@ -109,7 +111,7 @@ fn chat_completions_apply_patch_function_tool_round_trip() -> Result<()> {
         let provider = chat_completions_provider(&server);
         let test = test_codex()
             .with_model_info_override("gpt-5.5", |model| {
-                model.apply_patch_tool_type = Some(ApplyPatchToolType::Function);
+                model.apply_patch_tool_type = Some(declared);
             })
             .with_config(move |config| {
                 config.model_provider = provider;
@@ -228,13 +230,18 @@ fn chat_completions_without_apply_patch_metadata_omits_the_tool() -> Result<()> 
     })
 }
 
-/// Freeform `apply_patch` is a Responses-only custom tool: even when the model
-/// metadata marks it as available, the Chat Completions wire format cannot
-/// represent it and the request must omit it.
 #[test]
-fn chat_completions_freeform_apply_patch_is_not_advertised() -> Result<()> {
-    run_test_with_large_stack("chat-apply-patch-freeform-dropped", || async {
-        skip_if_no_network!(Ok(()));
-        assert_apply_patch_not_advertised(Some(ApplyPatchToolType::Freeform)).await
-    })
+fn chat_completions_apply_patch_function_tool_round_trip() -> Result<()> {
+    apply_patch_round_trip("chat-apply-patch-round-trip", ApplyPatchToolType::Function)
+}
+
+/// Freeform `apply_patch` is a Responses-only custom tool that the Chat
+/// Completions wire format cannot represent, so the declaration is lowered to
+/// the function form: the model still gets a working `apply_patch`.
+#[test]
+fn chat_completions_freeform_apply_patch_is_lowered_to_a_function_tool() -> Result<()> {
+    apply_patch_round_trip(
+        "chat-apply-patch-freeform-lowered",
+        ApplyPatchToolType::Freeform,
+    )
 }

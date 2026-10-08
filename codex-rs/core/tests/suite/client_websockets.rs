@@ -17,6 +17,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_otel::MetricsClient;
@@ -2666,6 +2667,7 @@ fn websocket_provider_with_connect_timeout(
         supports_websockets: true,
         supports_standalone_web_search: false,
         capabilities: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     }
 }
