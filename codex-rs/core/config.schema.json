@@ -1692,6 +1692,25 @@
       ],
       "type": "string"
     },
+    "FreeformToolSupport": {
+      "description": "Whether a provider's upstream accepts native freeform tools.\n\nFreeform tools are Responses-API custom tools whose argument is raw text constrained by a grammar, such as `apply_patch`. The Chat Completions and Anthropic wire protocols cannot carry them at all, so for those providers the declaration is always lowered to the equivalent function form. This setting covers the remaining case: a provider that speaks the Responses protocol but whose upstream still rejects custom tools. Without a way to express that, the tool is registered and then dropped during serialization, so the model never sees it while its instructions still tell it to use it.",
+      "oneOf": [
+        {
+          "description": "Not declared by the provider. Responses providers keep the freeform form advertised by the model catalog; Chat and Anthropic providers lower it.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The upstream rejects native freeform tools, so lower them to the function form even when `wire_api = \"responses\"`.",
+          "enum": [
+            "unsupported"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "GatewayOAuthConfig": {
       "additionalProperties": false,
       "properties": {
@@ -2686,6 +2705,15 @@
         "experimental_bearer_token": {
           "description": "Value to use with `Authorization: Bearer <token>` header. Use of this config is discouraged in favor of `env_key` for security reasons, but this may be necessary when using this programmatically.",
           "type": "string"
+        },
+        "freeform_tool_support": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FreeformToolSupport"
+            }
+          ],
+          "default": "auto",
+          "description": "Whether the upstream accepts native freeform (Responses custom) tools. Only consulted when `wire_api = \"responses\"`; the Chat Completions and Anthropic protocols cannot carry freeform tools regardless."
         },
         "gateway_oauth": {
           "allOf": [

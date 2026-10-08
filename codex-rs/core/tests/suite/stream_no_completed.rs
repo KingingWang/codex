@@ -2,6 +2,7 @@
 //! delivering a `response.completed` event.
 
 use codex_core::TurnInputRequest;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::protocol::EventMsg;
@@ -49,6 +50,7 @@ fn responses_provider(server_uri: &str, stream_max_retries: u64) -> ModelProvide
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     }
 }

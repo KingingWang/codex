@@ -22,6 +22,7 @@ use codex_login::auth::BedrockApiKeyAuth;
 use codex_login::default_client::originator;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
@@ -1656,6 +1657,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -3175,6 +3177,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -3813,6 +3816,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -3901,6 +3905,7 @@ async fn env_var_overrides_loaded_auth() {
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 

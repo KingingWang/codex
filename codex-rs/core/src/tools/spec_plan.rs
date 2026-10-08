@@ -66,6 +66,8 @@ use codex_features::Feature;
 use codex_features::SleepToolMode;
 use codex_login::AuthManager;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_model_provider_info::FreeformToolSupport;
+use codex_model_provider_info::WireApi;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::account::PlanType;
@@ -75,6 +77,7 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
@@ -1284,11 +1287,31 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     }
 
     if environment_mode.has_environment()
-        && let Some(apply_patch_tool_type) = &context.model_info.apply_patch_tool_type
+        && let Some(declared_apply_patch_tool_type) = &context.model_info.apply_patch_tool_type
     {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+        // Lower a freeform declaration the provider cannot carry: the Chat Completions
+        // and Anthropic protocols have no freeform tools, and a Responses gateway may
+        // still reject them. Registering the freeform form anyway would let it be
+        // dropped silently during serialization, leaving the model without
+        // `apply_patch` while its instructions still tell it to use that tool.
+        //
+        // `model_info` is already the merged view of the catalog entry, the
+        // `model_apply_patch_tool_type` config override, and any step-settings edit, so
+        // it stays the only source of truth here. An explicit request for a form this
+        // wire protocol cannot represent is lowered too, because honoring it would
+        // reproduce the silent drop.
+        let provider = context.turn_context.provider.info();
+        let carries_freeform = provider.wire_api == WireApi::Responses
+            && provider.freeform_tool_support != FreeformToolSupport::Unsupported;
+        let apply_patch_tool_type = match declared_apply_patch_tool_type {
+            ApplyPatchToolType::Freeform if !carries_freeform => ApplyPatchToolType::Function,
+            ApplyPatchToolType::Freeform | ApplyPatchToolType::Function => {
+                declared_apply_patch_tool_type.clone()
+            }
+        };
         registry.add(ApplyPatchHandler::new(
-            apply_patch_tool_type.clone(),
+            apply_patch_tool_type,
             include_environment_id,
         ));
     }

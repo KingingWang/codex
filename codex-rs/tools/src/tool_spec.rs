@@ -148,6 +148,26 @@ pub fn create_tools_raw_json_for_responses_api(
     serde_json::value::to_raw_value(tools).map(Arc::from)
 }
 
+/// Reports a freeform tool that the Chat Completions wire protocol cannot carry.
+///
+/// Freeform tools are Responses-API custom tools constrained by a grammar. Callers
+/// are expected to lower them to the equivalent function form before serializing a
+/// Chat Completions request, so this is a diagnostics aid rather than an expected
+/// path: without it the tool disappears from the request silently.
+fn warn_unrepresentable_freeform_tool(name: &str, namespace: Option<&str>) {
+    match namespace {
+        Some(namespace) => tracing::warn!(
+            tool = name,
+            namespace,
+            "dropping freeform tool that the Chat Completions API cannot represent"
+        ),
+        None => tracing::warn!(
+            tool = name,
+            "dropping freeform tool that the Chat Completions API cannot represent"
+        ),
+    }
+}
+
 /// Returns JSON values that are compatible with Function Calling in the
 /// Chat Completions API:
 /// https://platform.openai.com/docs/guides/function-calling?api-mode=responses
@@ -185,11 +205,21 @@ pub fn create_tools_json_for_chat_completions(
                                 "function": func,
                             }));
                         }
-                        // Custom (freeform) tools are not supported in the
-                        // Chat Completions API — skip them.
-                        ResponsesApiNamespaceTool::Custom(_) => {}
+                        // The Chat Completions API has no freeform (custom)
+                        // tools, so a namespaced freeform declaration has no
+                        // representation here.
+                        ResponsesApiNamespaceTool::Custom(tool) => {
+                            warn_unrepresentable_freeform_tool(&tool.name, Some(&ns.name));
+                        }
                     }
                 }
+            }
+            // A top-level freeform tool has no Chat Completions representation.
+            // Tool registration is expected to lower it to the function form
+            // first, so reaching this arm means the tool would otherwise vanish
+            // from the request without a trace.
+            ToolSpec::Freeform(tool) => {
+                warn_unrepresentable_freeform_tool(&tool.name, /*namespace*/ None);
             }
             // Other tool types (web_search, image_generation, etc.) are not supported
             // in chat/completions API - skip them

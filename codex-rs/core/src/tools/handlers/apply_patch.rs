@@ -48,6 +48,8 @@ use codex_apply_patch::ApplyPatchFileChange;
 use codex_apply_patch::ApplyPatchFileUpdateMode;
 use codex_apply_patch::Hunk;
 use codex_apply_patch::StreamingPatchParser;
+use codex_apply_patch::normalize_apply_patch_delimiters;
+use codex_apply_patch::patch_input_from_function_arguments;
 use codex_exec_server::ExecutorFileSystem;
 use codex_features::Feature;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -307,10 +309,16 @@ fn write_permissions_for_paths(
 /// Extracts the raw patch text used as the command-shaped hook input for apply_patch.
 fn apply_patch_payload_command(payload: &ToolPayload) -> Option<String> {
     match payload {
-        ToolPayload::Function { arguments } => parse_arguments::<ApplyPatchToolArgs>(arguments)
-            .ok()
-            .map(|args| args.input),
-        ToolPayload::Custom { input } => Some(input.clone()),
+        ToolPayload::Function { arguments } => {
+            let input = match parse_arguments::<ApplyPatchToolArgs>(arguments) {
+                Ok(args) => args.input,
+                // A near-miss JSON wrapper still has one faithful reading; recover it.
+                Err(_) => patch_input_from_function_arguments(arguments)?,
+            };
+            Some(normalize_apply_patch_delimiters(&input))
+        }
+        // Native freeform input is already the raw patch: delimiter repair only.
+        ToolPayload::Custom { input } => Some(normalize_apply_patch_delimiters(input)),
         _ => None,
     }
 }
@@ -356,10 +364,22 @@ impl ApplyPatchHandler {
 
         let patch_input = match payload {
             ToolPayload::Function { arguments } => {
-                let args: ApplyPatchToolArgs = parse_arguments(&arguments)?;
-                args.input
+                let input = match parse_arguments::<ApplyPatchToolArgs>(&arguments) {
+                    Ok(args) => args.input,
+                    // On wire protocols without freeform tools the model must JSON-escape
+                    // the patch body and reliably makes representation mistakes. Recover
+                    // the one faithful reading instead of guessing at patch content.
+                    Err(strict_error) => patch_input_from_function_arguments(&arguments)
+                        .ok_or_else(|| {
+                            FunctionCallError::RespondToModel(format!(
+                                "apply_patch arguments were not a usable patch ({strict_error}); resend the patch as a JSON object whose \"input\" string is the full `*** Begin Patch` ... `*** End Patch` envelope."
+                            ))
+                        })?,
+                };
+                normalize_apply_patch_delimiters(&input)
             }
-            ToolPayload::Custom { input } => input,
+            // Native freeform input is already the raw patch: delimiter repair only.
+            ToolPayload::Custom { input } => normalize_apply_patch_delimiters(&input),
             _ => {
                 return Err(FunctionCallError::RespondToModel(
                     "apply_patch handler received unsupported payload".to_string(),

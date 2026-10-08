@@ -11,7 +11,9 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
@@ -327,6 +329,19 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
+fn update_provider(turn: &mut TurnContext, update: impl FnOnce(&mut ModelProviderInfo)) {
+    let mut provider_info = turn.config.model_provider.clone();
+    update(&mut provider_info);
+    update_config(turn, |config| config.model_provider = provider_info.clone());
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn declare_apply_patch_tool_type(turn: &mut TurnContext, tool_type: ApplyPatchToolType) {
+    update_turn_settings_for_test(turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).apply_patch_tool_type = Some(tool_type);
+    });
+}
+
 struct TestNamespaceExtensionTool {
     namespace: &'static str,
     tool_name: &'static str,
@@ -529,6 +544,98 @@ async fn apply_patch_function_tool_type_produces_function_spec() {
     };
     assert_eq!(tool.name, "apply_patch");
     assert!(has_parameter(plan.visible_spec("apply_patch"), "input"));
+}
+
+/// A Responses provider carries freeform tools natively, so the catalog's
+/// freeform declaration reaches the model unchanged.
+#[tokio::test]
+async fn apply_patch_freeform_is_kept_on_a_responses_provider() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Responses);
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    let ToolSpec::Freeform(tool) = plan.visible_spec("apply_patch") else {
+        panic!("apply_patch should stay a freeform tool");
+    };
+    assert_eq!(tool.name, "apply_patch");
+}
+
+/// The Chat Completions protocol has no freeform tools, so the declaration is
+/// lowered to the function form rather than dropped during serialization.
+#[tokio::test]
+async fn apply_patch_freeform_is_lowered_on_a_chat_provider() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Chat);
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    let ToolSpec::Function(tool) = plan.visible_spec("apply_patch") else {
+        panic!("apply_patch should be lowered to a function tool");
+    };
+    assert_eq!(tool.name, "apply_patch");
+    assert!(has_parameter(plan.visible_spec("apply_patch"), "input"));
+}
+
+/// The Anthropic Messages protocol cannot carry freeform tools either.
+#[tokio::test]
+async fn apply_patch_freeform_is_lowered_on_an_anthropic_provider() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Anthropic);
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    assert!(matches!(
+        plan.visible_spec("apply_patch"),
+        ToolSpec::Function(_)
+    ));
+}
+
+/// A Responses gateway that rejects native custom tools gets the lowered form
+/// even though its wire protocol could otherwise carry it.
+#[tokio::test]
+async fn apply_patch_freeform_is_lowered_when_the_provider_rejects_custom_tools() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| {
+            provider.wire_api = WireApi::Responses;
+            provider.freeform_tool_support = FreeformToolSupport::Unsupported;
+        });
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    assert!(matches!(
+        plan.visible_spec("apply_patch"),
+        ToolSpec::Function(_)
+    ));
+}
+
+/// `model_apply_patch_tool_type` cannot force a form the wire protocol has no
+/// representation for: an explicit freeform request on a Chat Completions
+/// provider is still lowered, because honoring it would drop the tool.
+#[tokio::test]
+async fn explicit_freeform_request_is_still_lowered_when_the_wire_cannot_carry_it() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Chat);
+        update_config(turn, |config| {
+            config.model_apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+        });
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    assert!(matches!(
+        plan.visible_spec("apply_patch"),
+        ToolSpec::Function(_)
+    ));
 }
 
 #[tokio::test]
