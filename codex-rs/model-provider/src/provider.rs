@@ -14,6 +14,8 @@ use codex_login::CodexAuth;
 use codex_login::GatewayAuthManager;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::default_client::ClientRedirectPolicy;
+#[cfg(test)]
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::OpenAiModelsManager;
@@ -841,6 +843,7 @@ mod tests {
             project_id: None,
             location: None,
             credential_file: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         }
     }

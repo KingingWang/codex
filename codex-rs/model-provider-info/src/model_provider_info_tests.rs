@@ -101,6 +101,7 @@ base_url = "http://localhost:11434/v1"
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -144,6 +145,7 @@ query_params = { api-version = "2025-04-01-preview" }
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -191,6 +193,7 @@ supports_standalone_web_search = true
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -388,6 +391,7 @@ fn test_create_amazon_bedrock_provider() {
             project_id: None,
             location: None,
             credential_file: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         }
     );

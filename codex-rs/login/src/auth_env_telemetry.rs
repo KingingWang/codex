@@ -1,3 +1,5 @@
+#[cfg(test)]
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_otel::AuthEnvTelemetryMetadata;
 
@@ -84,6 +86,7 @@ mod tests {
             project_id: None,
             location: None,
             credential_file: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         };
 
