@@ -1,3 +1,4 @@
+mod envelope_repair;
 mod file_update;
 mod invocation;
 mod parser;
@@ -21,6 +22,9 @@ use codex_exec_server::RemoveOptions;
 use codex_exec_server::WriteFileOptions;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::PathUriParseError;
+pub use envelope_repair::normalize_apply_patch_delimiters;
+pub use envelope_repair::patch_input_from_function_arguments;
+pub use envelope_repair::strip_outer_markdown_code_fence;
 pub use parser::Hunk;
 pub use parser::ParseError;
 use parser::ParseError::*;

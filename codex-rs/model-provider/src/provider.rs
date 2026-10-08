@@ -13,6 +13,8 @@ use codex_login::CodexAuth;
 use codex_login::GatewayAuthManager;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::default_client::ClientRedirectPolicy;
+#[cfg(test)]
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::OpenAiModelsManager;
@@ -668,6 +670,7 @@ mod tests {
             supports_websockets: false,
             supports_standalone_web_search: false,
             capabilities: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         }
     }

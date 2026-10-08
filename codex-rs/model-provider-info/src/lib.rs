@@ -145,6 +145,28 @@ impl<'de> Deserialize<'de> for WireApi {
     }
 }
 
+/// Whether a provider's upstream accepts native freeform tools.
+///
+/// Freeform tools are Responses-API custom tools whose argument is raw text
+/// constrained by a grammar, such as `apply_patch`. The Chat Completions and
+/// Anthropic wire protocols cannot carry them at all, so for those providers the
+/// declaration is always lowered to the equivalent function form. This setting
+/// covers the remaining case: a provider that speaks the Responses protocol but
+/// whose upstream still rejects custom tools. Without a way to express that, the
+/// tool is registered and then dropped during serialization, so the model never
+/// sees it while its instructions still tell it to use it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FreeformToolSupport {
+    /// Not declared by the provider. Responses providers keep the freeform form
+    /// advertised by the model catalog; Chat and Anthropic providers lower it.
+    #[default]
+    Auto,
+    /// The upstream rejects native freeform tools, so lower them to the function
+    /// form even when `wire_api = "responses"`.
+    Unsupported,
+}
+
 /// Serializable representation of a provider definition.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -216,6 +238,11 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the standalone web-search endpoint.
     #[serde(default)]
     pub supports_standalone_web_search: bool,
+    /// Whether the upstream accepts native freeform (Responses custom) tools.
+    /// Only consulted when `wire_api = "responses"`; the Chat Completions and
+    /// Anthropic protocols cannot carry freeform tools regardless.
+    #[serde(default)]
+    pub freeform_tool_support: FreeformToolSupport,
     /// Runtime-only opt-in for internal metadata, independent of the destination check.
     /// This cannot be loaded from or written to serialized provider configuration.
     #[serde(skip)]
@@ -582,6 +609,7 @@ other non-default provider fields are not supported"
             supports_websockets: true,
             supports_standalone_web_search: true,
             capabilities: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: true,
         }
     }
@@ -623,6 +651,7 @@ other non-default provider fields are not supported"
             supports_websockets: false,
             supports_standalone_web_search: false,
             capabilities: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         }
     }
@@ -861,6 +890,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         supports_websockets: false,
         supports_standalone_web_search: false,
         capabilities: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     }
 }
