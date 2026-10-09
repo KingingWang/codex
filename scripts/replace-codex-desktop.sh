@@ -6,12 +6,15 @@
 # -----
 # ChatGPT.app / Codex.app 桌面端内置了一个 codex CLI：
 #
+#   新版布局（CLI 收进了嵌套的 CodexCLI.app）：
+#     /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+#   旧版布局（脚本仍兼容，会自动探测）：
 #     /Applications/ChatGPT.app/Contents/Resources/codex
 #
 # 想让桌面端跑 fork 的版本，过去只能手动：
 #
-#     rm /Applications/ChatGPT.app/Contents/Resources/codex
-#     ln -s /opt/homebrew/bin/codex /Applications/ChatGPT.app/Contents/Resources/codex
+#     rm /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+#     ln -s /opt/homebrew/bin/codex /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
 #
 # 这个脚本把这件事自动化，并且不依赖 npm / Homebrew / zstd：
 #   1. 从 fork 的 GitHub Release 固定链接下载当前架构的裸二进制
@@ -30,7 +33,7 @@
 #
 # 关于签名
 # --------
-# 只替换 Contents/Resources/codex 不会让 app 起不来，因为三道检查的作用域都不
+# 只替换内嵌的 codex 二进制不会让 app 起不来，因为三道检查的作用域都不
 # 覆盖这个改动：
 #   - 内核 exec 时只验被启动的 Mach-O 自身签名，不验 bundle 的资源封印；
 #   - Gatekeeper 的整包评估只在首次启动（带 quarantine 时）发生一次；
@@ -39,6 +42,9 @@
 # bundle 封印确实会破（codesign --verify 和 spctl --assess 都会失败），但启动
 # 路径上没有人去查它。所以默认只清 quarantine：那一步覆盖的是「装好还没启动过
 # 就改 bundle」的情况，此时首次启动会撞上整包评估并弹「已损坏」。
+#
+# 新布局下改动落在嵌套的 CodexCLI.app 里，它的封印同样会破；但同理，启动
+# 路径上没有人验它，处理方式和外层 app 一致。
 #
 # ad-hoc 重签反而是更大的扰动：它把主程序的 Developer ID 身份换成 ad-hoc，
 # cdhash 变化会牵连按签名身份绑定的钥匙串 ACL、TCC 授权和自动更新校验。
@@ -63,6 +69,7 @@
 #
 # 环境变量：
 #   CODEX_APP          覆盖 .app 路径（默认依次找 ChatGPT.app / Codex.app）
+#   CODEX_APP_BIN      覆盖 app 内嵌 codex 二进制路径（默认自动探测新/旧布局）
 #   CODEX_FORK_REPO    覆盖 "owner/repo"（默认 KingingWang/codex）
 #   CODEX_FORK_DIR     托管二进制目录（默认 ~/.codex/fork-desktop）
 #   CODEX_RELEASE_URL  完整覆盖下载 URL（优先于 --release）
@@ -75,7 +82,7 @@
 #   - sudo 写权限（写入 /Applications 下的 .app；--update 只动用户目录，不需要 sudo 加成）
 #
 # 重要：
-#   - 桌面端自动更新会还原 Contents/Resources/codex；升级后重跑一次本脚本即可
+#   - 桌面端自动更新会还原内嵌的 codex 二进制；升级后重跑一次本脚本即可
 #   - 替换前必须退出桌面端，脚本会 pgrep 检查
 #
 # 退出码：
@@ -127,7 +134,7 @@ replace-codex-desktop.sh — 用 fork release 二进制替换 macOS 桌面端内
   replace-codex-desktop.sh --no-cache           # 不使用/不写入二进制缓存
   replace-codex-desktop.sh --resign             # 额外 ad-hoc 重签（默认不重签）
 
-环境变量：CODEX_APP / CODEX_FORK_REPO / CODEX_FORK_DIR / CODEX_RELEASE_URL
+环境变量：CODEX_APP / CODEX_APP_BIN / CODEX_FORK_REPO / CODEX_FORK_DIR / CODEX_RELEASE_URL
            CODEX_NO_CACHE=1 等价于 --no-cache；CODEX_RESIGN=1 等价于 --resign
 HELP
       exit 0 ;;
@@ -178,7 +185,22 @@ if [ -z "$APP" ]; then
 fi
 [ -n "$APP" ] && [ -d "$APP" ] || die "ChatGPT.app / Codex.app not found (set CODEX_APP=/path/to/ChatGPT.app)"
 
-TARGET="$APP/Contents/Resources/codex"
+# ---------------------------------------------------------------------------
+# 定位 app 内嵌的 codex 二进制
+# 新版桌面端把 CLI 收进了嵌套的 CodexCLI.app；旧版直接放在 Resources 下。
+# 两种布局都探测（软链也算存在，兼容之前替换过的状态），可用 CODEX_APP_BIN
+# 显式覆盖。
+# ---------------------------------------------------------------------------
+TARGET="${CODEX_APP_BIN:-}"
+if [ -z "$TARGET" ]; then
+  for candidate in \
+    "$APP/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" \
+    "$APP/Contents/Resources/codex"; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then TARGET="$candidate"; break; fi
+  done
+fi
+# 都探测不到时按新布局路径报「not found」，由后面的分支给出排查提示
+[ -n "$TARGET" ] || TARGET="$APP/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 BAK="$TARGET.bak"
 
 # ---------------------------------------------------------------------------
@@ -465,7 +487,9 @@ elif [ -e "$TARGET" ]; then
 else
   die "codex binary not found at: $TARGET
        the app layout may have changed. Inspect with:
-         find \"$APP/Contents\" -name 'codex*' -type f"
+         find \"$APP/Contents\" -name 'codex*' -type f
+       and point the script at the real path with:
+         CODEX_APP_BIN=/path/to/codex $0"
 fi
 
 echo
