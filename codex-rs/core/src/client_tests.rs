@@ -149,6 +149,205 @@ fn test_model_provider() -> SharedModelProvider {
     test_model_client(SessionSource::Cli).state.provider.clone()
 }
 
+fn tool_search_function_call_fixture() -> serde_json::Value {
+    json!({
+        "type": "function_call",
+        "id": "fc_search",
+        "call_id": "search-1",
+        "namespace": "tool_search",
+        "name": "tool_search_tool",
+        "arguments": json!({"query": "spawn_agent", "limit": 2}).to_string(),
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn-1",
+            "create_time": 123.5,
+        },
+    })
+}
+
+#[test]
+fn tool_search_function_alias_preserves_ids_arguments_and_metadata() {
+    for encrypted_function_args in [serde_json::Value::Null, json!([])] {
+        let mut item = tool_search_function_call_fixture();
+        item["encrypted_function_args"] = encrypted_function_args;
+        let item = serde_json::from_value(item).expect("fixture item should parse");
+        let normalized = super::normalize_tool_search_function_call(item);
+        assert_eq!(
+            serde_json::to_value(normalized).expect("search call should serialize"),
+            json!({
+                "type": "tool_search_call",
+                "id": "fc_search",
+                "call_id": "search-1",
+                "execution": "client",
+                "arguments": {"query": "spawn_agent", "limit": 2},
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-1",
+                    "create_time": 123.5,
+                },
+            }),
+        );
+    }
+}
+
+#[test]
+fn tool_search_function_alias_preserves_other_calls() {
+    let base = tool_search_function_call_fixture();
+    let mut cases = Vec::new();
+    for (key, value) in [
+        ("namespace", serde_json::Value::Null),
+        ("namespace", json!("mcp__server")),
+        ("name", json!("other_tool")),
+        ("name", json!("tool_searchtool_search_tool")),
+        ("encrypted_function_args", json!(["opaque ciphertext"])),
+    ] {
+        let mut item = base.clone();
+        item[key] = value;
+        cases.push(item);
+    }
+    for arguments in [
+        "",
+        "{",
+        "{}",
+        r#"{"query":42}"#,
+        r#"{"query":"spawn_agent","limit":-1}"#,
+    ] {
+        let mut item = base.clone();
+        item["arguments"] = json!(arguments);
+        cases.push(item);
+    }
+    cases.push(json!({
+        "type": "tool_search_call",
+        "call_id": "search-1",
+        "execution": "client",
+        "arguments": {"query": "spawn_agent"},
+    }));
+
+    for item in cases {
+        let expected =
+            serde_json::from_value::<ResponseItem>(item).expect("fixture item should parse");
+        assert_eq!(
+            super::normalize_tool_search_function_call(expected.clone()),
+            expected,
+        );
+    }
+}
+
+#[test_case::test_case(false, WireApi::Responses, false; "native")]
+#[test_case::test_case(true, WireApi::Responses, false; "function alias")]
+#[test_case::test_case(true, WireApi::Responses, true; "partial function alias")]
+#[test_case::test_case(true, WireApi::Chat, false; "chat unchanged")]
+#[test_case::test_case(true, WireApi::Anthropic, false; "anthropic unchanged")]
+#[tokio::test]
+async fn tool_search_stream_mapping_preserves_wire_continuation_baseline(
+    use_function_alias: bool,
+    wire_api: WireApi,
+    empty_added_arguments: bool,
+) -> anyhow::Result<()> {
+    let function_call = serde_json::from_value(tool_search_function_call_fixture())?;
+    let wire_item = if use_function_alias {
+        function_call
+    } else {
+        super::normalize_tool_search_function_call(function_call)
+    };
+    let mut added_item = wire_item.clone();
+    if empty_added_arguments && let ResponseItem::FunctionCall { arguments, .. } = &mut added_item {
+        arguments.clear();
+    }
+    let normalize = wire_api == WireApi::Responses;
+    let expected_added = if normalize {
+        super::normalize_tool_search_function_call(added_item.clone())
+    } else {
+        added_item.clone()
+    };
+    let expected_done = if normalize {
+        super::normalize_tool_search_function_call(wire_item.clone())
+    } else {
+        wire_item.clone()
+    };
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(
+        create_oss_provider_with_base_url("https://example.com/v1", wire_api),
+        None,
+    );
+    let temp = TempDir::new()?;
+    let (mut stream, last_response) = super::map_response_events(
+        None,
+        futures::stream::iter([
+            Ok(ResponseEvent::OutputItemAdded(added_item)),
+            Ok(ResponseEvent::OutputItemDone(wire_item.clone())),
+            Ok(ResponseEvent::Completed {
+                response_id: "response-search".to_string(),
+                token_usage: None,
+                usage_metadata: None,
+                end_turn: None,
+            }),
+        ]),
+        test_session_telemetry(),
+        started_inference_attempt(&temp)?,
+        client.state.provider.clone(),
+    );
+    let mut delivered_added = Vec::new();
+    let mut delivered_done = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            ResponseEvent::OutputItemAdded(item) => delivered_added.push(item),
+            ResponseEvent::OutputItemDone(item) => delivered_done.push(item),
+            _ => {}
+        }
+    }
+    assert_eq!(delivered_added, vec![expected_added]);
+    assert_eq!(delivered_done, vec![expected_done.clone()]);
+    let last_response = last_response.await?;
+    assert_eq!(last_response.items_added, vec![wire_item]);
+
+    if normalize {
+        let metadata = test_responses_metadata_for_client(
+            &client,
+            None,
+            format!("{}:0", client.state.thread_id),
+            None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let build_request = |prompt: &Prompt| {
+            client.build_responses_request(
+                prompt,
+                &test_model_info(),
+                None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                None,
+                &metadata,
+                false,
+            )
+        };
+        let previous = build_request(&Prompt::default())?;
+        let search_output = ResponseItem::ToolSearchOutput {
+            id: None,
+            call_id: Some("search-1".to_string()),
+            status: "completed".to_string(),
+            execution: "client".to_string(),
+            tools: Vec::new(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let current = build_request(&Prompt {
+            input: vec![expected_done, search_output.clone()],
+            ..Default::default()
+        })?;
+        let mut session = client.new_session();
+        session.websocket_session.last_request = Some(previous);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(last_response).expect("receiver should be open");
+        session.websocket_session.last_response_rx = Some(receiver);
+        let continuation = session.prepare_websocket_request(&current);
+        assert_eq!(
+            continuation.map(|continuation| (continuation.response_id, continuation.items)),
+            (!use_function_alias).then_some(("response-search".to_string(), vec![search_output])),
+            "rewritten aliases must resend full input; native search must retain incremental reuse",
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
     use codex_client::HttpTransport;
