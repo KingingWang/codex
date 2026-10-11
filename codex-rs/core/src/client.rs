@@ -94,6 +94,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::SearchToolCallParams;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::AuthRecoveryEvent;
@@ -117,6 +118,7 @@ use futures::StreamExt;
 use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode;
+use serde::Deserialize;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -5525,6 +5527,53 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
 const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
 const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
 
+fn normalize_tool_search_function_call(item: ResponseItem) -> ResponseItem {
+    let ResponseItem::FunctionCall {
+        name,
+        namespace,
+        arguments,
+        encrypted_function_args,
+        ..
+    } = &item
+    else {
+        return item;
+    };
+    if namespace.as_deref() != Some("tool_search")
+        || name != "tool_search_tool"
+        || encrypted_function_args
+            .as_ref()
+            .is_some_and(|arguments| !arguments.is_empty())
+    {
+        return item;
+    }
+    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return item;
+    };
+    if SearchToolCallParams::deserialize(&arguments).is_err() {
+        return item;
+    }
+
+    // Some Responses backends emit the model-visible search function instead of
+    // a native search call. Execution and replayed history must use the native
+    // call/output pair, while WebSocket bookkeeping keeps the original wire item.
+    match item {
+        ResponseItem::FunctionCall {
+            id,
+            call_id,
+            internal_chat_message_metadata_passthrough,
+            ..
+        } => ResponseItem::ToolSearchCall {
+            id,
+            call_id: Some(call_id),
+            status: None,
+            execution: "client".to_string(),
+            arguments,
+            internal_chat_message_metadata_passthrough,
+        },
+        item => item,
+    }
+}
+
 fn map_response_stream(
     mut api_stream: codex_api::ResponseStream,
     session_telemetry: SessionTelemetry,
@@ -5569,6 +5618,7 @@ where
         let mut tx_last_response = Some(tx_last_response);
         let mut items_added: Vec<ResponseItem> = Vec::new();
         let mut active_item_id: Option<ResponseItemId> = None;
+        let normalize_function_tool_search = matches!(provider.info().wire_api, WireApi::Responses);
         let (request_start, mut ttft_ms) = (Instant::now(), None);
         let mut api_stream = api_stream;
         let upstream_request_id = upstream_request_id.as_deref();
@@ -5602,7 +5652,15 @@ where
                         );
                     }
                     active_item_id = None;
+                    // Keep the server's representation as the continuation baseline.
+                    // A rewritten search call then fails the prefix comparison and
+                    // safely resends full input instead of mixing wire item types.
                     items_added.push(item.clone());
+                    let item = if normalize_function_tool_search {
+                        normalize_tool_search_function_call(item)
+                    } else {
+                        item
+                    };
                     if tx_event
                         .send(Ok(ResponseEvent::OutputItemDone(item)))
                         .await
@@ -5658,6 +5716,14 @@ where
                         }
                         active_item_id = item.id().cloned();
                     }
+                    let event = match event {
+                        ResponseEvent::OutputItemAdded(item) if normalize_function_tool_search => {
+                            ResponseEvent::OutputItemAdded(normalize_tool_search_function_call(
+                                item,
+                            ))
+                        }
+                        event => event,
+                    };
                     if matches!(&event, ResponseEvent::OutputItemAdded(_)) && ttft_ms.is_none() {
                         ttft_ms = Some(
                             i64::try_from(request_start.elapsed().as_millis()).unwrap_or(i64::MAX),
