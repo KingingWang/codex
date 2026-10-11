@@ -810,6 +810,7 @@ impl ModelClient {
                 content_item_kinds_enabled: self.state.content_item_kinds_enabled,
                 workspace_routing: self.state.workspace_routing.clone(),
                 reasoning_effort_override_enabled: self.state.reasoning_effort_override_enabled,
+                last_inference_tools: StdMutex::new(None),
             }),
             agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
@@ -819,6 +820,10 @@ impl ModelClient {
             event_sender: self.event_sender.clone(),
             http_client_factory: self.http_client_factory.clone(),
             restored_history: self.restored_history,
+            // A provider switch invalidates any API-key-scoped cyber programs
+            // resolved against the previous provider.
+            api_key_cyber_access_programs:
+                cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
         }
     }
 
@@ -4117,7 +4122,7 @@ mod chat_completions_request_tests {
             input,
             cyber_access_program: None,
             tools: vec![create_exec_command_tool(CommandToolOptions {
-                allow_login_shell: false,
+                include_login_parameter: false,
                 exec_permission_approvals_enabled: false,
             })]
             .into(),
