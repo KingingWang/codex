@@ -41,6 +41,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::user_message_preview;
 use serde_json::Value;
 
@@ -86,6 +87,8 @@ pub struct ThreadItem {
     pub git_origin_url: Option<SanitizedGitUrl>,
     /// Session source from session metadata.
     pub source: Option<SessionSource>,
+    /// Optional analytics source classification from session metadata.
+    pub thread_source: Option<ThreadSource>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Immediate control/spawn parent thread id from session metadata.
@@ -130,6 +133,7 @@ struct HeadTailSummary {
     git_sha: Option<String>,
     git_origin_url: Option<SanitizedGitUrl>,
     source: Option<SessionSource>,
+    thread_source: Option<ThreadSource>,
     history_mode: ThreadHistoryMode,
     parent_thread_id: Option<ThreadId>,
     agent_nickname: Option<String>,
@@ -826,6 +830,7 @@ async fn build_thread_item(
             git_sha,
             git_origin_url,
             source,
+            thread_source,
             history_mode,
             parent_thread_id,
             agent_nickname,
@@ -853,6 +858,7 @@ async fn build_thread_item(
             git_sha,
             git_origin_url,
             source,
+            thread_source,
             history_mode,
             parent_thread_id,
             agent_nickname,
@@ -1004,6 +1010,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     summary.originator = (!session_meta_line.meta.originator.is_empty())
                         .then(|| session_meta_line.meta.originator.clone());
                     summary.source = Some(session_meta_line.meta.source.clone());
+                    summary.thread_source = session_meta_line.meta.thread_source.clone();
                     summary.history_mode = session_meta_line.meta.history_mode;
                     summary.parent_thread_id = session_meta_line.meta.parent_thread_id;
                     summary.agent_nickname = session_meta_line.meta.agent_nickname.clone();
