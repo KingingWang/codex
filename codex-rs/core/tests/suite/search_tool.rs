@@ -76,6 +76,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use test_case::test_case;
 
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
@@ -141,6 +142,32 @@ fn tool_search_output_has_namespace_child(
         "tools": tool_search_output_tools(request, call_id),
     });
     namespace_child_tool(&output, namespace, tool_name).is_some()
+}
+
+fn request_items_with_call_id(request: &ResponsesRequest, call_id: &str) -> Vec<Value> {
+    request
+        .input()
+        .into_iter()
+        .filter(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
+        .collect()
+}
+
+fn ev_tool_search_function_call_alias(call_id: &str, arguments: &Value) -> Value {
+    json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "id": format!("fc_{call_id}"),
+            "call_id": call_id,
+            "namespace": "tool_search",
+            "name": "tool_search_tool",
+            "arguments": serde_json::to_string(arguments)
+                .expect("tool search alias arguments should serialize"),
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": format!("{call_id}-metadata"),
+            },
+        },
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -834,24 +861,188 @@ async fn tool_search_returns_deferred_tools_without_follow_up_tool_injection() -
     Ok(())
 }
 
+#[test_case(false; "without encrypted function args")]
+#[test_case(true; "with empty encrypted function args")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
+async fn tool_search_function_call_alias_is_normalized_and_discovered_tools_execute(
+    empty_encrypted_function_args: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "tool-search-spawn-agent";
+    let apps_server = AppsTestServer::mount_searchable(&server).await?;
+    let search_call_id = "function-tool-search-1";
+    let calendar_call_id = "function-calendar-call-1";
+    let search_arguments = json!({
+        "query": "create calendar event",
+        "limit": 1,
+    });
+    let mut search_alias = ev_tool_search_function_call_alias(search_call_id, &search_arguments);
+    if empty_encrypted_function_args {
+        search_alias["item"]["encrypted_function_args"] = json!(Vec::<String>::new());
+    }
     let mock = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_tool_search_call(
-                    call_id,
-                    &json!({
-                        "query": "spawn agent",
-                        "limit": 1,
-                    }),
-                ),
+                search_alias,
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "call_id": calendar_call_id,
+                        "name": SEARCH_CALENDAR_CREATE_TOOL,
+                        "namespace": SEARCH_CALENDAR_NAMESPACE,
+                        "arguments": serde_json::to_string(&json!({
+                            "title": "Alias search lunch",
+                            "starts_at": "2026-03-10T12:00:00Z"
+                        })).expect("serialize calendar args")
+                    }
+                }),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = configured_builder(apps_server.chatgpt_base_url.clone());
+    let test = builder.build_with_auto_env(&server).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Find and run the calendar create tool".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let EventMsg::McpToolCallBegin(begin) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::McpToolCallBegin(_))
+    })
+    .await
+    else {
+        unreachable!("event guard guarantees McpToolCallBegin");
+    };
+    assert_eq!(begin.call_id, calendar_call_id);
+    assert_eq!(begin.app_name.as_deref(), Some("Calendar"));
+    assert_eq!(begin.action_name.as_deref(), Some("calendar_create_event"));
+
+    let EventMsg::McpToolCallEnd(end) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::McpToolCallEnd(_))
+    })
+    .await
+    else {
+        unreachable!("event guard guarantees McpToolCallEnd");
+    };
+    assert_eq!(end.call_id, calendar_call_id);
+    assert_eq!(
+        end.invocation,
+        McpInvocation {
+            server: "codex_apps".to_string(),
+            tool: "calendar_create_event".to_string(),
+            arguments: Some(json!({
+                "title": "Alias search lunch",
+                "starts_at": "2026-03-10T12:00:00Z"
+            })),
+        }
+    );
+    assert!(
+        end.result
+            .as_ref()
+            .expect("search-surfaced tool call should succeed")
+            .structured_content
+            .is_some()
+    );
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 3);
+
+    let normalized_search_items = request_items_with_call_id(&requests[1], search_call_id);
+    assert_eq!(
+        normalized_search_items
+            .iter()
+            .map(|item| item["type"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("tool_search_call"), json!("tool_search_output")],
+        "alias should be replayed as exactly one native search call and output: {normalized_search_items:?}"
+    );
+    assert_eq!(
+        normalized_search_items[0]
+            .get("execution")
+            .and_then(Value::as_str),
+        Some("client")
+    );
+    assert_eq!(
+        normalized_search_items[0].get("arguments"),
+        Some(&search_arguments)
+    );
+
+    let tools = tool_search_output_tools(&requests[1], search_call_id);
+    assert!(
+        namespace_child_tool(
+            &json!({ "tools": tools }),
+            SEARCH_CALENDAR_NAMESPACE,
+            SEARCH_CALENDAR_CREATE_TOOL
+        )
+        .is_some(),
+        "alias search should surface the calendar create tool: {tools:?}"
+    );
+
+    let calendar_items = request_items_with_call_id(&requests[2], calendar_call_id);
+    assert_eq!(
+        calendar_items
+            .iter()
+            .map(|item| item["type"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("function_call"), json!("function_call_output")]
+    );
+    assert!(
+        recorded_apps_tool_call_by_call_id(&server, calendar_call_id)
+            .await
+            .pointer("/params/_meta/_codex_apps/call_id")
+            .is_some(),
+        "search-surfaced calendar tool should reach the Apps MCP server"
+    );
+
+    Ok(())
+}
+
+#[test_case(false; "native search call")]
+#[test_case(true; "function search alias")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_search_returns_deferred_v1_multi_agent_tools(use_function_alias: bool) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "tool-search-spawn-agent";
+    let arguments = json!({
+        "query": "spawn agent",
+        "limit": 1,
+    });
+    let search_call = if use_function_alias {
+        ev_tool_search_function_call_alias(call_id, &arguments)
+    } else {
+        ev_tool_search_call(call_id, &arguments)
+    };
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                search_call,
                 ev_completed("resp-1"),
             ]),
             sse(vec![
@@ -874,6 +1065,14 @@ async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
 
     let requests = mock.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(
+        request_items_with_call_id(&requests[1], call_id)
+            .iter()
+            .map(|item| item["type"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("tool_search_call"), json!("tool_search_output")],
+        "V1 tool discovery should replay a matched native search call and output"
+    );
 
     let first_request_body = requests[0].body_json();
     let first_request_tools = tool_names(&first_request_body);
@@ -923,6 +1122,12 @@ async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
     assert_eq!(
         spawn_agent.get("defer_loading").and_then(Value::as_bool),
         Some(true)
+    );
+    assert!(
+        spawn_agent
+            .pointer("/parameters/properties/message/encrypted")
+            .is_none(),
+        "V1 messages should remain plaintext"
     );
     let description = spawn_agent
         .get("description")
