@@ -5299,6 +5299,7 @@ mod tests {
         let items = vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-a".into(),
+                turn_attribution: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: None,
@@ -5324,6 +5325,7 @@ mod tests {
             ),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
+                root_turn_id: None,
                 started_at: None,
                 last_agent_message: None,
                 error: None,
