@@ -1399,6 +1399,7 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         git_sha,
         git_origin_url,
         source,
+        thread_source,
         history_mode: _,
         parent_thread_id,
         agent_nickname,
@@ -1441,6 +1442,9 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     }
     if item.source.is_none() {
         item.source = source;
+    }
+    if item.thread_source.is_none() {
+        item.thread_source = thread_source;
     }
     if item.parent_thread_id.is_none() {
         item.parent_thread_id = parent_thread_id;
@@ -2159,6 +2163,7 @@ fn thread_item_from_state_metadata(
                 .or_else(|_| serde_json::from_value(Value::String(item.source)))
                 .unwrap_or(SessionSource::Unknown),
         ),
+        thread_source: item.thread_source,
         history_mode: item.history_mode,
         parent_thread_id,
         agent_nickname: item.agent_nickname,
