@@ -181,7 +181,7 @@ pub(super) fn stored_thread_from_rollout_item(
         originator: item.originator,
         source,
         history_mode: item.history_mode,
-        thread_source: None,
+        thread_source: item.thread_source,
         agent_nickname: item.agent_nickname,
         agent_role: item.agent_role,
         agent_path: None,
@@ -380,6 +380,36 @@ mod tests {
             Some(
                 compressed_path.with_file_name(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"))
             )
+        );
+    }
+
+    #[test]
+    fn rollout_conversion_preserves_thread_source() {
+        use codex_protocol::protocol::ThreadSource;
+
+        let uuid = Uuid::from_u128(2);
+        let path = PathBuf::from(format!(
+            "/tmp/sessions/2025/01/03/rollout-2025-01-03T12-00-00-{uuid}.jsonl"
+        ));
+        let thread = stored_thread_from_rollout_item(
+            ThreadItem {
+                path: path.clone(),
+                source: Some(SessionSource::VSCode),
+                thread_source: Some(ThreadSource::Feature(
+                    "codez_selection_side_chat".to_string(),
+                )),
+                ..Default::default()
+            },
+            /*archived*/ false,
+            "test-provider",
+        )
+        .expect("stored thread");
+
+        assert_eq!(
+            thread.thread_source,
+            Some(ThreadSource::Feature(
+                "codez_selection_side_chat".to_string()
+            ))
         );
     }
 }

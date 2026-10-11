@@ -768,6 +768,7 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -794,6 +795,7 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -820,6 +822,7 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -939,6 +942,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -965,6 +969,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1027,6 +1032,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1053,6 +1059,7 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1107,6 +1114,7 @@ async fn test_pagination_cursor() {
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
+            thread_source: None,
             history_mode: Default::default(),
             parent_thread_id: None,
             agent_nickname: None,
@@ -1316,6 +1324,7 @@ async fn test_get_thread_contents() {
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
+            thread_source: None,
             history_mode: Default::default(),
             parent_thread_id: None,
             agent_nickname: None,
@@ -1726,6 +1735,7 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1752,6 +1762,7 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
+                thread_source: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1972,6 +1983,82 @@ async fn test_model_provider_filter_selects_only_matching_sessions() -> Result<(
     )
     .await?;
     assert_eq!(all_sessions.items.len(), 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_threads_carries_thread_source_from_session_meta() -> Result<()> {
+    use codex_protocol::protocol::ThreadSource;
+
+    let temp_dir = TempDir::new().unwrap();
+    let home = temp_dir.path();
+
+    let ts_str = "2025-01-03T12-00-00";
+    let uuid = Uuid::from_u128(42);
+    let format: &[FormatItem] =
+        format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
+    let dt = PrimitiveDateTime::parse(ts_str, format)
+        .unwrap()
+        .assume_utc();
+    let dir = home
+        .join("sessions")
+        .join(format!("{:04}", dt.year()))
+        .join(format!("{:02}", u8::from(dt.month())))
+        .join(format!("{:02}", dt.day()));
+    fs::create_dir_all(&dir)?;
+    let mut file = File::create(dir.join(format!("rollout-{ts_str}-{uuid}.jsonl")))?;
+
+    // Codez marks selection side-chat children with a feature thread_source; the
+    // rollout scan must surface it so clients can filter these threads out.
+    let meta = serde_json::json!({
+        "timestamp": ts_str,
+        "type": "session_meta",
+        "payload": {
+            "session_id": uuid,
+            "id": uuid,
+            "timestamp": ts_str,
+            "cwd": ".",
+            "originator": "test_originator",
+            "cli_version": "test_version",
+            "base_instructions": null,
+            "model_provider": TEST_PROVIDER,
+            "thread_source": "codez_selection_side_chat",
+        },
+    });
+    writeln!(file, "{meta}")?;
+    let user_event = serde_json::json!({
+        "timestamp": ts_str,
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": "Hello from side chat",
+            "kind": "plain"
+        }
+    });
+    writeln!(file, "{user_event}")?;
+    drop(file);
+
+    let provider_filter = provider_vec(&[TEST_PROVIDER]);
+    let page = get_threads(
+        home,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        NO_SOURCE_FILTER,
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await?;
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].thread_source,
+        Some(ThreadSource::Feature(
+            "codez_selection_side_chat".to_string()
+        ))
+    );
 
     Ok(())
 }
