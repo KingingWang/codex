@@ -100,6 +100,7 @@ async fn reasoning_only_chat_completions_response_is_retried_until_success() {
         aws: None,
         wire_api: WireApi::Chat,
         chat_stream: true,
+        capabilities: None,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
