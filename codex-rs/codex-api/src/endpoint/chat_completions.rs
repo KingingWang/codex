@@ -22,6 +22,7 @@ use http::HeaderMap;
 use http::Method;
 use tokio::sync::mpsc;
 use tracing::instrument;
+use uuid::Uuid;
 
 /// Client for the Chat Completions API.
 ///
@@ -171,6 +172,8 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
             value["model"] = serde_json::Value::String(req.model.clone());
         }
 
+        assign_missing_tool_call_ids(&mut value);
+
         let parsed: ChatCompletionsResponse = serde_json::from_value(value).map_err(|e| {
             ApiError::Stream(format!(
                 "failed to parse chat completions response: {e}, body: {raw_body}"
@@ -195,6 +198,40 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
             upstream_request_id: None,
             interrupt: None,
         })
+    }
+}
+
+/// Some Chat Completions-compatible providers return complete function calls
+/// with a null, missing, or empty `id`. Give each such call an ID before
+/// deserialization so the tool result can refer back to the same call.
+fn assign_missing_tool_call_ids(value: &mut serde_json::Value) {
+    let Some(choices) = value
+        .get_mut("choices")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for choice in choices {
+        let Some(tool_calls) = choice
+            .pointer_mut("/message/tool_calls")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for tool_call in tool_calls {
+            let Some(tool_call) = tool_call.as_object_mut() else {
+                continue;
+            };
+            if tool_call
+                .get("id")
+                .is_none_or(|id| id.is_null() || id.as_str() == Some(""))
+            {
+                tool_call.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(format!("call_{}", Uuid::new_v4())),
+                );
+            }
+        }
     }
 }
 
@@ -480,6 +517,119 @@ mod tests {
         }
         handle.await.unwrap();
         events
+    }
+
+    #[tokio::test]
+    async fn null_tool_call_id_is_assigned_before_event_conversion() {
+        let mut value = serde_json::json!({
+            "id": "chat",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Checking the branch.",
+                    "tool_calls": [{
+                        "id": null,
+                        "call_id": null,
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": "{\"cmd\":\"pwd\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "function_call"
+            }]
+        });
+
+        assign_missing_tool_call_ids(&mut value);
+        let parsed: ChatCompletionsResponse = serde_json::from_value(value).unwrap();
+        let call_id = parsed.choices[0].message.tool_calls.as_ref().unwrap()[0]
+            .id
+            .clone();
+        assert!(call_id.starts_with("call_"));
+
+        let events = collect_events(parsed).await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall {
+                call_id: emitted_id, ..
+            })) if emitted_id == &call_id
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ResponseEvent::ToolCallInputDelta {
+                call_id: Some(emitted_id), ..
+            }) if emitted_id == &call_id
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                call_id: emitted_id, arguments, ..
+            })) if emitted_id == &call_id && arguments == r#"{"cmd":"pwd"}"#
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ResponseEvent::OutputTextDelta(text)) if text == "Checking the branch."
+        )));
+    }
+
+    #[test]
+    fn missing_tool_call_ids_are_unique_and_existing_ids_are_preserved() {
+        let mut value = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {"id": "call_existing"},
+                        {"id": null},
+                        {},
+                        {"id": ""}
+                    ]
+                }
+            }]
+        });
+
+        assign_missing_tool_call_ids(&mut value);
+        let calls = value
+            .pointer("/choices/0/message/tool_calls")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let ids: Vec<&str> = calls
+            .iter()
+            .map(|call| call["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids[0], "call_existing");
+        assert!(ids[1..].iter().all(|id| id.starts_with("call_")));
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            4
+        );
+    }
+
+    #[test]
+    fn non_string_tool_call_id_is_not_repaired() {
+        let mut value = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": 42,
+                        "type": "function",
+                        "function": {"name": "exec_command", "arguments": "{}"}
+                    }]
+                }
+            }],
+            "id": "chat",
+            "object": "chat.completion"
+        });
+
+        assign_missing_tool_call_ids(&mut value);
+        assert_eq!(value["choices"][0]["message"]["tool_calls"][0]["id"], 42);
+        assert!(serde_json::from_value::<ChatCompletionsResponse>(value).is_err());
     }
 
     fn empty_choices_response() -> ChatCompletionsResponse {
