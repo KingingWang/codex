@@ -453,12 +453,14 @@ impl CodexErr {
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::BioPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => None,
-            CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
-                self.server_retry_delay()
-            }
+            // Fork: 503 `server_is_overloaded` and plain 429 retry limits stay retryable so
+            // the stream layer retries them up to its budget. Server advice wins; otherwise
+            // exponential backoff is bounded by `MAX_LOCAL_RETRY_DELAY`.
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
+            | CodexErrorDetails::ServerOverloaded
+            | CodexErrorDetails::RetryLimit(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
             | CodexErrorDetails::UnexpectedStatus(_)
