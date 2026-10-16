@@ -321,6 +321,8 @@ async fn convert_response_to_events(
                 // active item. The turn processor needs an active_item before
                 // it can handle delta events.
                 let function_call_added = ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     namespace: namespace_map.get(&tc.function.name).cloned(),
                     name: tc.function.name.clone(),
@@ -353,6 +355,8 @@ async fn convert_response_to_events(
 
                 // Emit OutputItemDone with the full arguments
                 let function_call_done_item = ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     namespace: namespace_map.get(&tc.function.name).cloned(),
                     name: tc.function.name.clone(),
@@ -387,9 +391,13 @@ async fn convert_response_to_events(
             // and item/completed, so without a delta Zed shows no answer text.
             let assistant_id = unique_item_id("msg_assistant");
             let assistant_added = ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: Some(assistant_id.clone()),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
                     text: String::new(),
                 }],
                 phase: None,
@@ -415,9 +423,13 @@ async fn convert_response_to_events(
 
             // Emit OutputItemDone with the full text to finalize the item.
             let assistant_done = ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: Some(assistant_id),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
                     text: content.clone(),
                 }],
                 phase: None,
@@ -819,7 +831,7 @@ mod tests {
             Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. }))
             if role == "assistant"
                 && content.iter().any(
-                    |c| matches!(c, ContentItem::OutputText { text } if text == "Hello from test!")
+                    |c| matches!(c, ContentItem::OutputText { text, .. } if text == "Hello from test!")
                 )
         ));
         assert!(matches!(&events[4], Ok(ResponseEvent::Completed { .. })));
@@ -1020,7 +1032,7 @@ mod tests {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. }))
                     if role == "assistant"
                         && content.iter().any(
-                            |c| matches!(c, ContentItem::OutputText { text } if text == "Hello from test!"),
+                            |c| matches!(c, ContentItem::OutputText { text, .. } if text == "Hello from test!"),
                         ) =>
                 {
                     saw_text_done = true;
@@ -1121,7 +1133,7 @@ mod tests {
                     role, content, ..
                 })) if role == "assistant"
                     && content.iter().any(
-                        |c| matches!(c, ContentItem::OutputText { text } if text == "answer1"),
+                        |c| matches!(c, ContentItem::OutputText { text, .. } if text == "answer1"),
                     ) =>
                 {
                     saw_text_done = true;

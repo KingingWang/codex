@@ -364,9 +364,13 @@ async fn convert_response_to_events(
                 }
                 let item_id = unique_item_id(&format!("msg_{idx}"));
                 let added = ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: Some(item_id.clone()),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: String::new(),
                     }],
                     phase: None,
@@ -388,9 +392,15 @@ async fn convert_response_to_events(
                     return;
                 }
                 let done = ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: Some(item_id),
                     role: "assistant".to_string(),
-                    content: vec![ContentItem::OutputText { text: text.clone() }],
+                    content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
+                        text: text.clone(),
+                    }],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
                 };
@@ -411,6 +421,8 @@ async fn convert_response_to_events(
                     other => other.to_string(),
                 };
                 let added = ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     namespace: namespace_map.get(name).cloned(),
                     name: name.clone(),
@@ -439,6 +451,8 @@ async fn convert_response_to_events(
                     return;
                 }
                 let done = ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     namespace: namespace_map.get(name).cloned(),
                     name: name.clone(),

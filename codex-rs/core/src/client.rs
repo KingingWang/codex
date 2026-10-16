@@ -386,6 +386,7 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::ServerOverloaded { .. } => "HTTP 529 server overloaded".to_string(),
         ApiError::RateLimitExceeded { .. } => "HTTP 429 rate limit exceeded".to_string(),
         ApiError::ContentFilter => "content filter".to_string(),
+        ApiError::ResponseIncomplete(_) => "incomplete response".to_string(),
     }
 }
 
@@ -852,6 +853,7 @@ impl ModelClient {
                 concurrent_reasoning_summaries_enabled: self
                     .state
                     .concurrent_reasoning_summaries_enabled,
+                output_token_replay_enabled: self.state.output_token_replay_enabled,
                 include_attestation,
                 attestation_provider: self.state.attestation_provider.clone(),
                 disable_websockets: AtomicBool::new(
@@ -1759,11 +1761,17 @@ fn flatten_agent_messages_for_responses(
             let text = agent_message_text(&content)?;
             let role = agent_message_role(&author, own_agent_path);
             let content = if role == "assistant" {
-                codex_protocol::models::ContentItem::OutputText { text }
+                codex_protocol::models::ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
+                    text,
+                }
             } else {
                 codex_protocol::models::ContentItem::InputText { text }
             };
             Some(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id,
                 role: role.to_string(),
                 content: vec![content],
@@ -1784,16 +1792,6 @@ impl ModelClientSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(Arc::clone(tools));
         previous.is_some_and(|previous| previous != *tools)
-    }
-}
-
-impl<'a> ResponsesHttpExecutor<'a> {
-    pub(crate) fn new(client: &'a ModelClient) -> Self {
-        Self { client }
-    }
-
-    pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
-        Arc::clone(&self.turn_state)
     }
 
     /// Whether this session's client uses the same provider configuration as
@@ -1823,6 +1821,12 @@ impl<'a> ResponsesHttpExecutor<'a> {
         if let Some(notifier) = &self.stream_error_notifier {
             notifier.notify(message, additional_details, http_status_code);
         }
+    }
+}
+
+impl<'a> ResponsesHttpExecutor<'a> {
+    pub(crate) fn new(client: &'a ModelClient) -> Self {
+        Self { client }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3915,7 +3919,7 @@ fn content_items_to_chat_content(
     for item in content {
         match item {
             codex_protocol::models::ContentItem::InputText { text }
-            | codex_protocol::models::ContentItem::OutputText { text } => {
+            | codex_protocol::models::ContentItem::OutputText { text, .. } => {
                 text_parts.push(text.clone());
                 multipart_parts.push(serde_json::json!({"type": "text", "text": text.clone()}));
             }
@@ -4200,6 +4204,7 @@ mod chat_completions_request_tests {
             /*include_timing_metrics*/ false,
             /*beta_features_header*/ None,
             /*concurrent_reasoning_summaries_enabled*/ false,
+            /*output_token_replay_enabled*/ false,
             /*attestation_provider*/ None,
             /*http_client_factory*/
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -4326,6 +4331,8 @@ mod chat_completions_request_tests {
 
     fn warning_item(message: &str) -> ResponseItem {
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -4338,9 +4345,13 @@ mod chat_completions_request_tests {
 
     fn assistant_message(text: &str) -> ResponseItem {
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
                 text: text.to_string(),
             }],
             phase: None,
@@ -4364,6 +4375,8 @@ mod chat_completions_request_tests {
 
     fn function_call(call_id: &str, arguments: &str) -> ResponseItem {
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             name: "exec_command".to_string(),
             namespace: None,
@@ -4376,6 +4389,8 @@ mod chat_completions_request_tests {
 
     fn function_call_named(call_id: &str, name: &str, arguments: &str) -> ResponseItem {
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             name: name.to_string(),
             namespace: None,
@@ -4423,6 +4438,7 @@ mod chat_completions_request_tests {
 
     fn custom_tool_call(call_id: &str, input: &str) -> ResponseItem {
         ResponseItem::CustomToolCall {
+            encrypted_content: None,
             id: None,
             status: None,
             call_id: call_id.to_string(),
@@ -5157,6 +5173,8 @@ mod chat_completions_request_tests {
     #[test]
     fn chat_completions_request_user_message_with_image_uses_multipart_content() {
         let request = build_request(vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -5200,6 +5218,8 @@ mod chat_completions_request_tests {
     #[test]
     fn chat_completions_request_user_message_text_only_remains_string() {
         let request = build_request(vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -5222,10 +5242,14 @@ mod chat_completions_request_tests {
     #[test]
     fn chat_completions_request_assistant_message_drops_image() {
         let request = build_request(vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![
                 ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
                     text: "Here is the result".to_string(),
                 },
                 ContentItem::InputImage {
@@ -5254,6 +5278,8 @@ mod chat_completions_request_tests {
     #[test]
     fn chat_completions_request_user_message_image_only() {
         let request = build_request(vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputImage {
@@ -5284,6 +5310,8 @@ mod chat_completions_request_tests {
     #[test]
     fn chat_completions_request_user_message_image_detail_none_omits_field() {
         let request = build_request(vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputImage {
@@ -5311,6 +5339,8 @@ mod chat_completions_request_tests {
     #[test]
     fn chat_completions_request_user_message_multiple_images() {
         let request = build_request(vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -5683,6 +5713,7 @@ fn normalize_tool_search_function_call(item: ResponseItem) -> ResponseItem {
             internal_chat_message_metadata_passthrough,
             ..
         } => ResponseItem::ToolSearchCall {
+            encrypted_content: None,
             id,
             call_id: Some(call_id),
             status: None,

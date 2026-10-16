@@ -214,9 +214,13 @@ pub async fn process_anthropic_sse(
                     AnthropicContentBlock::Text { .. } => {
                         let block_id = unique_item_id(&format!("msg_{index}"));
                         let item = ResponseItem::Message {
+                            status: None,
+                            encrypted_content: None,
                             id: Some(block_id.clone()),
                             role: "assistant".to_string(),
                             content: vec![ContentItem::OutputText {
+                                annotations: None,
+                                logprobs: None,
                                 text: String::new(),
                             }],
                             phase: None,
@@ -237,6 +241,8 @@ pub async fn process_anthropic_sse(
                     }
                     AnthropicContentBlock::ToolUse { id, name, .. } => {
                         let item = ResponseItem::FunctionCall {
+                            status: None,
+                            encrypted_content: None,
                             id: None,
                             namespace: namespace_map.get(name).cloned(),
                             name: name.clone(),
@@ -369,13 +375,21 @@ pub async fn process_anthropic_sse(
                         accumulated,
                         block_id,
                     } => Some(ResponseItem::Message {
+                        status: None,
+                        encrypted_content: None,
                         id: Some(block_id),
                         role: "assistant".to_string(),
-                        content: vec![ContentItem::OutputText { text: accumulated }],
+                        content: vec![ContentItem::OutputText {
+                            annotations: None,
+                            logprobs: None,
+                            text: accumulated,
+                        }],
                         phase: None,
                         internal_chat_message_metadata_passthrough: None,
                     }),
                     BlockKind::Tool(state) => Some(ResponseItem::FunctionCall {
+                        status: None,
+                        encrypted_content: None,
                         id: None,
                         namespace: namespace_map.get(&state.name).cloned(),
                         name: state.name,
@@ -438,13 +452,21 @@ pub async fn process_anthropic_sse(
                                 accumulated,
                                 block_id,
                             } => Some(ResponseItem::Message {
+                                status: None,
+                                encrypted_content: None,
                                 id: Some(block_id),
                                 role: "assistant".to_string(),
-                                content: vec![ContentItem::OutputText { text: accumulated }],
+                                content: vec![ContentItem::OutputText {
+                                    annotations: None,
+                                    logprobs: None,
+                                    text: accumulated,
+                                }],
                                 phase: None,
                                 internal_chat_message_metadata_passthrough: None,
                             }),
                             BlockKind::Tool(state) => Some(ResponseItem::FunctionCall {
+                                status: None,
+                                encrypted_content: None,
                                 id: None,
                                 namespace: namespace_map.get(&state.name).cloned(),
                                 name: state.name,
