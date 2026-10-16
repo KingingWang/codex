@@ -149,9 +149,13 @@ pub async fn process_chat_completions_sse(
                 && !text_item_done
             {
                 let done_item = ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: Some(item_id.clone()),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: accumulated_text.clone(),
                     }],
                     phase: None,
@@ -171,6 +175,8 @@ pub async fn process_chat_completions_sse(
                 if let (Some(id), Some(name)) = (id, name) {
                     let args = normalize_tool_call_arguments(arguments);
                     let function_call_item = ResponseItem::FunctionCall {
+                        status: None,
+                        encrypted_content: None,
                         id: None,
                         namespace: namespace_map.get(&name).cloned(),
                         name: name.clone(),
@@ -351,9 +357,13 @@ async fn process_chat_choice(
         if text_item_id.is_none() {
             let item_id = unique_item_id("msg_assistant");
             let added_item = ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: Some(item_id.clone()),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
                     text: String::new(),
                 }],
                 phase: None,
@@ -444,9 +454,13 @@ async fn process_chat_choice(
             && !*text_item_done
         {
             let done_item = ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: Some(item_id.clone()),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
                     text: accumulated_text.clone(),
                 }],
                 phase: None,
@@ -465,6 +479,8 @@ async fn process_chat_choice(
             if let (Some(id), Some(name)) = (id, name) {
                 let args = normalize_tool_call_arguments(arguments);
                 let function_call_item = ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     namespace: namespace_map.get(&name).cloned(),
                     name: name.clone(),
@@ -941,7 +957,7 @@ mod tests {
                     role, content, ..
                 })) if role == "assistant"
                     && content.iter().any(
-                        |c| matches!(c, ContentItem::OutputText { text } if text == "Hello"),
+                        |c| matches!(c, ContentItem::OutputText { text, .. } if text == "Hello"),
                     ) =>
                 {
                     saw_text_done = true;
@@ -976,7 +992,7 @@ mod tests {
                     role, content, ..
                 })) if role == "assistant"
                     && content.iter().any(
-                        |c| matches!(c, ContentItem::OutputText { text } if text == "answer1"),
+                        |c| matches!(c, ContentItem::OutputText { text, .. } if text == "answer1"),
                     ) =>
                 {
                     saw_text_done = true;
