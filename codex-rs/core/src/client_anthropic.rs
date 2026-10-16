@@ -179,7 +179,9 @@ fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<Respo
         let mut kept_content: Vec<ContentItem> = Vec::with_capacity(content.len());
         for c in content {
             let text_ref = match c {
-                ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
+                ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                    Some(text)
+                }
                 ContentItem::InputImage { .. } => None,
                 ContentItem::InputAudio { .. } => None,
             };
@@ -195,6 +197,8 @@ fn lift_agents_md_into_system(items: &[ResponseItem]) -> (Vec<String>, Vec<Respo
         }
         if !kept_content.is_empty() {
             remaining.push(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: id.clone(),
                 role: role.clone(),
                 content: kept_content,
@@ -614,7 +618,7 @@ fn content_items_to_blocks(items: &[ContentItem]) -> Vec<AnthropicContentBlock> 
     items
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 if text.is_empty() {
                     None
                 } else {

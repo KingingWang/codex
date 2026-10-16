@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 
 pub(crate) const MAX_THREAD_PRODUCTS: usize = 4096;
+#[allow(dead_code)]
 const MAX_PRODUCT_BATCHES: usize = 16;
 
 /// An explicit change to a thread's product attribution, independent of authentication.
@@ -44,6 +45,7 @@ impl ThreadProducts {
 
 /// Preserve order within each product, with a bounded number of concurrent streams.
 /// Too many products drops only attribution, preserving the original event order.
+#[allow(dead_code)]
 pub(crate) fn product_event_batches(
     events: Vec<TrackEventRequest>,
     thread_products: &ThreadProducts,
@@ -67,6 +69,7 @@ pub(crate) fn product_event_batches(
     batches
 }
 
+#[allow(dead_code)]
 fn event_thread_id(event: &TrackEventRequest) -> Option<&str> {
     match event {
         TrackEventRequest::SkillInvocation(event) => event.event_params.thread_id.as_deref(),

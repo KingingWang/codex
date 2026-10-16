@@ -79,6 +79,8 @@ fn test_model_info() -> ModelInfo {
 
 fn user_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -91,9 +93,13 @@ fn user_message(text: &str) -> ResponseItem {
 
 fn assistant_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase: None,
@@ -103,6 +109,8 @@ fn assistant_message(text: &str) -> ResponseItem {
 
 fn function_call(name: &str, call_id: &str, args: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
         id: None,
         namespace: None,
         name: name.to_string(),
@@ -115,6 +123,8 @@ fn function_call(name: &str, call_id: &str, args: &str) -> ResponseItem {
 
 fn developer_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {
@@ -465,6 +475,8 @@ fn signed_thinking_replays_from_summary_then_legacy_content() {
 fn data_url_image_becomes_base64_source() {
     let mut prompt = Prompt::default();
     prompt.input = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {
@@ -1166,6 +1178,8 @@ fn agents_md_fragment_is_lifted_into_system_block() {
     prompt.input = vec![
         user_message(&agents_md_text),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -1250,6 +1264,8 @@ fn agents_md_lifts_only_matching_block_from_mixed_message() {
 
     let mut prompt = Prompt::default();
     prompt.input = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -1342,6 +1358,7 @@ fn agents_md_fragment_without_directory_is_lifted() {
 
 fn custom_tool_call(name: &str, call_id: &str, input: &str) -> ResponseItem {
     ResponseItem::CustomToolCall {
+        encrypted_content: None,
         id: None,
         status: None,
         call_id: call_id.to_string(),

@@ -1877,6 +1877,8 @@ async fn append_dynamic_context(
         "appending dynamic context to prompt"
     );
     input.push(ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {

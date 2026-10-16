@@ -41,9 +41,13 @@ fn accepts_only_ids_issued_by_the_responses_api() {
 #[test]
 fn message_ids_use_their_own_prefix() {
     let message = |id: &str| ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::from_server(id.to_string())),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: "answer".to_string(),
         }],
         phase: None,

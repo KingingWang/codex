@@ -340,7 +340,9 @@ async fn tool_search_stream_mapping_preserves_wire_continuation_baseline(
         session.websocket_session.last_response_rx = Some(receiver);
         let continuation = session.prepare_websocket_request(&current);
         assert_eq!(
-            continuation.map(|continuation| (continuation.response_id, continuation.items)),
+            continuation
+                .ok()
+                .map(|continuation| (continuation.response_id, continuation.items)),
             (!use_function_alias).then_some(("response-search".to_string(), vec![search_output])),
             "rewritten aliases must resend full input; native search must retain incremental reuse",
         );
@@ -1423,6 +1425,8 @@ fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> 
         request.input,
         vec![
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1432,9 +1436,13 @@ fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> 
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
                     text: "Message Type: NEW_TASK\nPayload:\nfrom parent".to_string(),
                 }],
                 phase: None,
@@ -1466,9 +1474,13 @@ async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyh
         internal_chat_message_metadata_passthrough: None,
     };
     let assistant_message = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::from_server("msg_server".to_string())),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: "answer".to_string(),
         }],
         phase: None,
