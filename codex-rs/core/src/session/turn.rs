@@ -2001,11 +2001,14 @@ async fn run_sampling_request(
                     return Err(err);
                 }
                 CodexErrorDetails::UsageLimitReached(e) => {
+                    // Fork: usage-limit 429s stay stream-retryable, so fall through to the
+                    // retry loop instead of ending the turn; still publish the rate-limit
+                    // snapshot first so the UI reflects the latest state on every attempt.
                     let rate_limits = e.rate_limits.clone();
                     if let Some(rate_limits) = rate_limits {
                         sess.update_rate_limits(&turn_context, *rate_limits).await;
                     }
-                    return Err(err);
+                    err
                 }
                 _ => err,
             },

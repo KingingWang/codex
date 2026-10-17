@@ -3604,8 +3604,14 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         .mount(&server)
         .await;
 
-    let mut builder = test_codex();
-    let codex_fixture = builder.build(&server).await?;
+    // Fork: usage-limit 429s are stream-retryable; disable retries so this rate-limit
+    // event assertion keeps its single-request terminal premise.
+    let codex_fixture = test_codex()
+        .with_config(|config| {
+            config.model_provider.stream_max_retries = Some(0);
+        })
+        .build(&server)
+        .await?;
     let codex = codex_fixture.codex.clone();
 
     let expected_limits = json!({

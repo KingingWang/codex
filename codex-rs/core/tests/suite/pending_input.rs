@@ -2236,7 +2236,9 @@ async fn terminal_compaction_error_does_not_retry_pending_input(
         CompactionFailurePoint::PreTurn => ev_message_item_done("initial", "first answer"),
         CompactionFailurePoint::MidTurn => ev_function_call("call-1", "test_tool", "{}"),
     };
-    let failure = responses::sse_failed("failed-compact", "insufficient_quota", "quota exhausted");
+    // Fork: quota-class failures are stream-retryable now, so this test uses a terminal
+    // invalid_prompt failure to preserve its terminal-compaction premise.
+    let failure = responses::sse_failed("failed-compact", "invalid_prompt", "invalid prompt");
     let mut streams = vec![
         vec![
             chunk(ev_response_created("initial")),
@@ -2344,7 +2346,7 @@ async fn terminal_compaction_error_does_not_retry_pending_input(
             EventMsg::Error(error) => {
                 assert_eq!(
                     error.codex_error_info,
-                    Some(CodexErrorInfo::UsageLimitExceeded)
+                    Some(CodexErrorInfo::InvalidPrompt)
                 );
                 errors.push(error.clone());
             }
