@@ -507,6 +507,122 @@ async fn responses_http_rate_limit_exhausts_stream_retries() -> Result<()> {
     Ok(())
 }
 
+/// Fork: HTTP 429s whose bodies classify as quota/usage-limit/flex errors retry with the
+/// server-advised delay instead of ending the turn.
+#[test_case::test_case(json!({ "error": { "code": "insufficient_quota", "message": "quota" } }); "insufficient_quota")]
+#[test_case::test_case(json!({ "error": { "type": "usage_limit_reached", "message": "limit", "plan_type": "pro" } }); "usage_limit_reached")]
+#[test_case::test_case(json!({ "error": { "type": "usage_not_included", "message": "not included" } }); "usage_not_included")]
+#[test_case::test_case(json!({ "error": { "code": "flex_unavailable", "message": "no flex capacity" } }); "flex_unavailable")]
+#[tokio::test(flavor = "current_thread")]
+async fn responses_http_classified_429_uses_retry_after(body: serde_json::Value) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let mut telemetry = RetryTelemetryCapture::install();
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "1")
+                .set_body_json(body),
+            responses::sse_response(responses::sse(vec![
+                responses::ev_response_created("recovered"),
+                responses::ev_completed("recovered"),
+            ])),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    submit_user_input(&test, "retry the classified 429").await?;
+    let retry = telemetry.next_retry().await;
+    assert!(
+        (Duration::from_millis(900)..=Duration::from_secs(1)).contains(&retry.delay),
+        "server-advised delay should be ~1s, got {:?}",
+        retry.delay
+    );
+    assert_eq!(
+        retry,
+        RetryTelemetryEvent {
+            attempt: 1,
+            delay: retry.delay,
+            layer: "stream".into(),
+            operation: "sampling".into(),
+        }
+    );
+    assert!(wait_for_retry(&mut telemetry, &retry).await >= Duration::from_millis(900));
+    wait_for_turn_completion(&test).await;
+
+    assert_eq!(response_mock.requests().len(), 2);
+    assert_eq!(
+        telemetry.events.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    );
+    Ok(())
+}
+
+/// Fork: classified 429 retries still stop at `stream_max_retries` and surface the original
+/// error classification instead of a generic retry-limit error.
+#[test_case::test_case(json!({ "error": { "code": "insufficient_quota", "message": "quota" } }), CodexErrorInfo::UsageLimitExceeded; "insufficient_quota")]
+#[test_case::test_case(json!({ "error": { "type": "usage_limit_reached", "message": "limit", "plan_type": "pro" } }), CodexErrorInfo::UsageLimitExceeded; "usage_limit_reached")]
+#[test_case::test_case(json!({ "error": { "type": "usage_not_included", "message": "not included" } }), CodexErrorInfo::UsageLimitExceeded; "usage_not_included")]
+#[test_case::test_case(json!({ "error": { "code": "flex_unavailable", "message": "no flex capacity" } }), CodexErrorInfo::FlexUnavailable; "flex_unavailable")]
+#[tokio::test(flavor = "current_thread")]
+async fn responses_http_classified_429_exhausts_stream_retries(
+    body: serde_json::Value,
+    expected: CodexErrorInfo,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let classified = || ResponseTemplate::new(429).set_body_json(body.clone());
+    let response_mock = responses::mount_response_sequence(
+        &server,
+        vec![classified(), classified()],
+    )
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    submit_user_input(&test, "exhaust the classified 429 retry budget").await?;
+
+    let mut error_events = 0;
+    let mut stream_error_events = 0;
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::Error(error) => {
+                error_events += 1;
+                assert_eq!(error.codex_error_info, Some(expected.clone()));
+            }
+            EventMsg::StreamError(_) => stream_error_events += 1,
+            EventMsg::TurnComplete(event) => {
+                assert_eq!(
+                    event.error.and_then(|error| error.codex_error_info),
+                    Some(expected.clone())
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(error_events, 1);
+    assert_eq!(stream_error_events, 1, "the first retry should be reported");
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
 /// Check backoff without a live server or tracing events coordinating the retry loop.
 #[tokio::test(start_paused = true)]
 async fn http_retry_backoff_exhausts_attempts() {
@@ -1557,6 +1673,9 @@ async fn assert_terminal_failure(
     Ok(())
 }
 
+/// Ignored in this fork: every HTTP 429 (including `flex_unavailable` bodies) is
+/// intentionally stream-retryable, conflicting with this upstream test's terminal premise.
+#[ignore = "fork: FlexUnavailable 429s are intentionally stream-retryable, conflicting with this upstream test's terminal-flex premise"]
 #[tokio::test(flavor = "current_thread")]
 async fn http_and_sse_flex_unavailable_are_terminal() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1614,6 +1733,9 @@ async fn http_and_sse_flex_unavailable_are_terminal() -> Result<()> {
     Ok(())
 }
 
+/// Ignored in this fork: every HTTP 429 (including `flex_unavailable` bodies) is
+/// intentionally stream-retryable, conflicting with this upstream test's terminal premise.
+#[ignore = "fork: FlexUnavailable 429s are intentionally stream-retryable, conflicting with this upstream test's terminal-flex premise"]
 #[tokio::test(flavor = "current_thread")]
 async fn websocket_streamed_flex_unavailable_is_terminal() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1661,6 +1783,9 @@ async fn websocket_streamed_flex_unavailable_is_terminal() -> Result<()> {
     Ok(())
 }
 
+/// Ignored in this fork: every HTTP 429 (including `usage_limit_reached` bodies) is
+/// intentionally stream-retryable, conflicting with this upstream test's terminal premise.
+#[ignore = "fork: usage-limit 429s are intentionally stream-retryable, conflicting with this upstream test's terminal-usage-limit premise"]
 #[tokio::test(flavor = "current_thread")]
 async fn websocket_usage_limit_with_malformed_nested_headers_is_terminal() -> Result<()> {
     skip_if_no_network!(Ok(()));
