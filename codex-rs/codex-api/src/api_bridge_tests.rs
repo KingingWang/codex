@@ -74,7 +74,8 @@ async fn map_api_error_preserves_retry_delay() {
     }
 }
 
-/// Mapping a new error category preserves elapsed advice without making hard failures retryable.
+/// Mapping a new error category preserves elapsed advice. Fork: quota and usage-limit 429
+/// bodies stay retryable, so only policy failures remain terminal here.
 #[tokio::test(start_paused = true)]
 async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
     use std::time::Duration;
@@ -84,8 +85,8 @@ async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
     for (status, code, retryable) in [
         (503, "server_is_overloaded", true),
         (429, "rate_limit_exceeded", true),
-        (429, "insufficient_quota", false),
-        (429, "usage_limit_reached", false),
+        (429, "insufficient_quota", true),
+        (429, "usage_limit_reached", true),
         (400, "cyber_policy", false),
     ] {
         let error = map_api_error(ApiError::Transport(TransportError::Http {
@@ -105,7 +106,7 @@ async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
             retryable.then_some(Duration::from_secs(6)),
             "{code}",
         );
-        if status == 429 && retryable {
+        if code == "rate_limit_exceeded" {
             assert_eq!(
                 (
                     error.to_codex_protocol_error(),

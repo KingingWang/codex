@@ -52,6 +52,24 @@ fn retryability_preserves_error_details_distinctions() {
             }),
             true,
         ),
+        // Fork: quota / usage-limit / flex 429 bodies stay retryable at the stream layer.
+        (CodexErr::QuotaExceeded, true),
+        (CodexErr::UsageNotIncluded, true),
+        (
+            CodexErr::UsageLimitReached(UsageLimitReachedError {
+                plan_type: None,
+                resets_at: None,
+                limit_window_minutes: None,
+                rate_limits: None,
+                promo_message: None,
+                rate_limit_reached_type: None,
+            }),
+            true,
+        ),
+        (
+            CodexErr::new(CodexErrorDetails::FlexUnavailable),
+            true,
+        ),
         (
             CodexErr::UnexpectedStatus(UnexpectedResponseError {
                 status: StatusCode::TOO_MANY_REQUESTS,
@@ -104,7 +122,7 @@ fn retry_delay_distinguishes_server_advice_backoff_and_terminal_errors() {
         (Some(advice), Some(advice), Some(advice)),
     );
 
-    let error = CodexErr::QuotaExceeded.with_retry_after(retry_after);
+    let error = CodexErr::ContextWindowExceeded.with_retry_after(retry_after);
     assert_eq!(
         (
             error.retry_delay(/*retry_count*/ 1),

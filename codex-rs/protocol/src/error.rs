@@ -422,8 +422,6 @@ impl CodexErr {
             | CodexErrorDetails::Interrupted
             | CodexErrorDetails::EnvVar(_)
             | CodexErrorDetails::Fatal(_)
-            | CodexErrorDetails::UsageNotIncluded
-            | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
             | CodexErrorDetails::ResponseIncomplete(_)
@@ -438,18 +436,23 @@ impl CodexErr {
             | CodexErrorDetails::AgentLimitReached { .. }
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent
-            | CodexErrorDetails::UsageLimitReached(_)
-            | CodexErrorDetails::FlexUnavailable
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::BioPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => None,
-            // Fork: 503 `server_is_overloaded` and plain 429 retry limits stay retryable so
-            // the stream layer retries them up to its budget. Server advice wins; otherwise
+            // Fork: every upstream HTTP 429 stays retryable at the stream layer regardless
+            // of body classification, so quota (`insufficient_quota` / `usage_not_included`),
+            // usage-limit (`usage_limit_reached`) and flex (`flex_unavailable`) 429s retry up
+            // to the stream budget instead of ending the turn. 503 `server_is_overloaded` and
+            // plain 429 retry limits also stay retryable. Server advice wins; otherwise
             // exponential backoff is bounded by `MAX_LOCAL_RETRY_DELAY`.
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::ServerOverloaded
+            | CodexErrorDetails::UsageNotIncluded
+            | CodexErrorDetails::QuotaExceeded
+            | CodexErrorDetails::UsageLimitReached(_)
+            | CodexErrorDetails::FlexUnavailable
             | CodexErrorDetails::RetryLimit(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
