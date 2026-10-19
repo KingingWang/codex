@@ -45,7 +45,7 @@ impl Session {
         &self,
         step_context: &StepContext,
     ) -> bool {
-        if !step_context.settings.model_info.use_responses_lite {
+        if !step_context.incremental_tools_supported() {
             return false;
         }
         let state = self.state.lock().await;
