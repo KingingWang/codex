@@ -1442,3 +1442,36 @@ fn object_function_arguments_are_preserved() {
         &json!({ "cmd": ["ls", "-l"] })
     );
 }
+
+/// Anthropic reads tools exclusively from `prompt.tools`. A prompt that still
+/// carries the full catalog (the incremental-tools gate keeps it there for
+/// `WireApi::Anthropic`) must convert with the declarations intact, even when
+/// the history already contains tool_use / tool_result blocks.
+#[test]
+fn request_keeps_full_tool_catalog_with_tool_use_history() {
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: "base".to_string(),
+        ..Default::default()
+    };
+    prompt.input = vec![
+        user_message("run ls"),
+        function_call("shell", "toolu_1", "{}"),
+        function_output("toolu_1", "ok"),
+    ];
+    prompt.tools = vec![shell_tool()].into();
+
+    let req = build_anthropic_request(&prompt, &test_model_info())
+        .expect("tool_use history with a declared catalog must build");
+
+    assert_eq!(req.tools.len(), 1);
+    assert_eq!(req.tools[0].name, "shell");
+    assert!(req.system.is_some(), "base instructions should survive");
+    let has_tool_use = req.messages.iter().any(|message| match &message.content {
+        AnthropicMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|block| matches!(block, AnthropicContentBlock::ToolUse { .. })),
+        _ => false,
+    });
+    assert!(has_tool_use, "tool_use history should survive conversion");
+}

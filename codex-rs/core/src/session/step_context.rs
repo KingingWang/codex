@@ -13,6 +13,7 @@ use crate::tools::router::ToolRouter;
 use codex_extension_api::ExtensionData;
 use codex_file_system::EnvironmentAccess;
 use codex_mcp::McpBinding;
+use codex_model_provider_info::WireApi;
 use codex_otel::SessionTelemetry;
 use codex_plugin::ExecutorPluginHookSource;
 use codex_protocol::items::ModelInvocationContext;
@@ -48,14 +49,41 @@ pub(crate) struct StepContext {
 }
 
 impl StepContext {
+    /// Whether the active model and provider wire protocol can carry tool
+    /// declarations as history items. Only Responses Lite over the Responses
+    /// wire format understands `additional_tools`; the Chat Completions and
+    /// Anthropic converters read tools exclusively from `Prompt.tools`.
+    pub(crate) fn incremental_tools_supported(&self) -> bool {
+        self.settings.model_info.use_responses_lite
+            && matches!(self.turn.provider.info().wire_api, WireApi::Responses)
+    }
+
     /// Whether new context windows should record tool declarations in history.
     pub(crate) fn incremental_tools_enabled(&self) -> bool {
-        self.settings.model_info.use_responses_lite
-            && self
+        if !self.settings.model_info.use_responses_lite
+            || !self
                 .turn
                 .config
                 .features
                 .enabled(codex_features::Feature::IncrementalTools)
+        {
+            return false;
+        }
+        // Incremental tools would silently drop the whole tool catalog on
+        // non-Responses providers, so ignore the feature there.
+        let wire_api = self.turn.provider.info().wire_api;
+        if !matches!(wire_api, WireApi::Responses) {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    wire_api = %wire_api,
+                    "ignoring incremental tools: only the Responses wire API supports \
+                     tool declarations in history"
+                );
+            });
+            return false;
+        }
+        true
     }
 
     /// Pairs the step's environments with access using current session and originating-turn grants.
