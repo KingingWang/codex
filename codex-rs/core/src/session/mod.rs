@@ -5726,3 +5726,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "world_state_item_tests.rs"]
 mod world_state_item_tests;
+
+#[cfg(test)]
+#[path = "step_context_tests.rs"]
+mod step_context_tests;
