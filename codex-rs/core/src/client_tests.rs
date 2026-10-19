@@ -1634,6 +1634,81 @@ fn spawned_session_source() -> SessionSource {
     })
 }
 
+/// Chat Completions reads tools exclusively from `prompt.tools`. A prompt that
+/// still carries the full catalog (the incremental-tools gate keeps it there
+/// for `WireApi::Chat`) must convert with the declarations intact, even when
+/// the history already contains tool calls.
+#[test]
+fn chat_completions_request_keeps_full_catalog_with_tool_call_history() {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::FunctionCall {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                namespace: None,
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: "call-1".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("call-1".to_string()),
+                name: None,
+                namespace: None,
+                output: FunctionCallOutputPayload {
+                    body: codex_protocol::models::FunctionCallOutputBody::Text("ok".to_string()),
+                    success: None,
+                },
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        tools: vec![ToolSpec::Function(ResponsesApiTool {
+            name: "shell".to_string(),
+            description: "Execute a shell command".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::default(),
+            output_schema: None,
+        })]
+        .into(),
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+            provenance: None,
+        },
+        ..Default::default()
+    };
+
+    let request = client
+        .new_session()
+        .build_chat_completions_request(
+            &prompt,
+            &test_model_info(),
+            /*effort*/ None,
+            "test-session",
+        )
+        .expect("tool call history with a declared catalog must build");
+
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0]["function"]["name"], "shell");
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| message.tool_calls.is_some()),
+        "tool call history should survive conversion"
+    );
+    let system = request
+        .messages
+        .first()
+        .expect("base instructions become the system message");
+    assert_eq!(system.role, "system");
+    assert_eq!(system.content, Some(json!("base instructions")));
+}
+
 fn reasoning_effort_in_request(
     model_info: &ModelInfo,
     session_source: SessionSource,
