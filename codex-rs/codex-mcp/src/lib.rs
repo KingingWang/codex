@@ -37,6 +37,7 @@ pub use sandbox_metadata::MCP_SANDBOX_STATE_META_CAPABILITY;
 pub use sandbox_metadata::SandboxState;
 pub use tool_catalog_cache::McpToolCatalogCache;
 pub use tools::ToolInfo;
+pub use tools::flatten_tools_for_default_namespace;
 pub use trusted_access::TrustedAccessContext;
 
 /// Backward-compatible name for the shared Codex Apps tools runtime.

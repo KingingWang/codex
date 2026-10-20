@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use codex_config::McpServerConfig;
+use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::ToolName;
 use rmcp::model::Tool;
 use serde::Deserialize;
@@ -213,6 +214,82 @@ where
     model_tools
 }
 
+/// Maximum bytes of server-level namespace description prepended to each
+/// flattened tool description. Server instructions apply to every tool the
+/// server exposes, so inlining them unbounded would multiply a large blob by
+/// the server's tool count.
+const MAX_FLATTENED_NAMESPACE_DESCRIPTION_BYTES: usize = 1_000;
+
+/// Flattens namespaced MCP tools into the default `functions` namespace for
+/// providers that cannot consume Responses tool namespaces.
+///
+/// Each namespaced tool's callable name becomes
+/// `<callable_namespace>__<callable_name>` (the parts are already sanitized
+/// and length-bounded by [`normalize_tools_for_model_with_prefix`]) and its
+/// namespace resets to the default function namespace, so the model-visible
+/// identity is one flat function name such as `mcp__node_repl__js`. The
+/// namespace description is prepended to the tool description so the model
+/// keeps the server-level context the namespace object used to carry.
+///
+/// Distinct tools that would share a flat name (for example namespace `a__b`
+/// tool `c` versus namespace `a` tool `b__c`) keep both entries through a
+/// deterministic hash suffix, mirroring the collision handling in
+/// `normalize_tools_for_model_with_prefix`.
+pub fn flatten_tools_for_default_namespace(tools: &[ToolInfo]) -> Vec<ToolInfo> {
+    let mut used_names = HashSet::new();
+    let mut flat_tools = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let mut flat = tool.clone();
+        let namespace = flat.callable_namespace.trim().to_string();
+        if namespace.is_empty() || namespace == DEFAULT_FUNCTION_NAMESPACE {
+            used_names.insert(flat.callable_name.clone());
+            flat_tools.push(flat);
+            continue;
+        }
+        let raw_identity = format!(
+            "{}\0{}\0{}",
+            flat.server_name, flat.callable_namespace, flat.callable_name
+        );
+        let base_name = format!("{namespace}{MCP_TOOL_NAME_DELIMITER}{}", flat.callable_name);
+        let mut name = base_name.clone();
+        if !used_names.insert(name.clone()) {
+            let mut attempt = 0_u32;
+            loop {
+                let hash_input = if attempt == 0 {
+                    raw_identity.clone()
+                } else {
+                    format!("{raw_identity}\0{attempt}")
+                };
+                let suffix = callable_name_hash_suffix(&hash_input);
+                let max_base_len = MAX_TOOL_NAME_LENGTH.saturating_sub(suffix.len());
+                name = format!("{}{}", truncate_name(&base_name, max_base_len), suffix);
+                if used_names.insert(name.clone()) {
+                    break;
+                }
+                attempt = attempt.saturating_add(1);
+            }
+        }
+        flat.callable_name = name;
+        flat.callable_namespace = DEFAULT_FUNCTION_NAMESPACE.to_string();
+        if let Some(namespace_description) = flat
+            .namespace_description
+            .as_deref()
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+        {
+            let namespace_description = truncate_name(
+                namespace_description,
+                MAX_FLATTENED_NAMESPACE_DESCRIPTION_BYTES,
+            );
+            let tool_description = flat.tool.description.as_deref().unwrap_or_default();
+            flat.tool.description =
+                Some(format!("{namespace_description}\n\n{tool_description}").into());
+        }
+        flat_tools.push(flat);
+    }
+    flat_tools
+}
+
 #[derive(Debug)]
 struct CallableToolCandidate {
     tool: ToolInfo,
@@ -312,5 +389,91 @@ fn unique_callable_parts(
             return (namespace, tool_name);
         }
         attempt = attempt.saturating_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::JsonObject;
+    use std::sync::Arc;
+
+    fn tool_info(server_name: &str, namespace: &str, tool_name: &str) -> ToolInfo {
+        ToolInfo {
+            server_name: server_name.to_string(),
+            supports_parallel_tool_calls: false,
+            server_origin: None,
+            callable_name: tool_name.to_string(),
+            callable_namespace: namespace.to_string(),
+            namespace_description: None,
+            tool: Tool::new(
+                tool_name.to_string(),
+                format!("test tool {tool_name}"),
+                Arc::new(JsonObject::default()),
+            ),
+            openai_file_input_optional_fields: HashMap::new(),
+            connector_id: None,
+            connector_name: None,
+            plugin_display_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn flatten_tools_for_default_namespace_flattens_distinct_namespaces() {
+        // The kimi-k3 regression: two MCP servers both expose `js`; the
+        // flattened wire identity must keep them distinct.
+        let mut node_repl = tool_info("node_repl", "mcp__node_repl", "js");
+        node_repl.namespace_description = Some("Node REPL server".to_string());
+        let cua_repl = tool_info("cua_repl", "mcp__cua_repl", "js");
+
+        let flat = flatten_tools_for_default_namespace(&[node_repl, cua_repl]);
+
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[0].callable_name, "mcp__node_repl__js");
+        assert_eq!(flat[0].callable_namespace, DEFAULT_FUNCTION_NAMESPACE);
+        assert_eq!(flat[1].callable_name, "mcp__cua_repl__js");
+        assert_eq!(flat[1].callable_namespace, DEFAULT_FUNCTION_NAMESPACE);
+        // Raw MCP routing fields stay intact for the protocol call.
+        assert_eq!(flat[0].server_name, "node_repl");
+        assert_eq!(flat[0].tool.name.as_ref(), "js");
+        // The namespace description is inlined so the model keeps the
+        // server-level context the namespace object used to carry.
+        let description = flat[0]
+            .tool
+            .description
+            .as_deref()
+            .expect("flattened tool keeps a description");
+        assert!(description.starts_with("Node REPL server\n\n"));
+        assert!(description.ends_with("test tool js"));
+    }
+
+    #[test]
+    fn flatten_tools_for_default_namespace_hashes_colliding_flat_names() {
+        let first = tool_info("a__b", "a__b", "c");
+        let second = tool_info("a", "a", "b__c");
+
+        let flat = flatten_tools_for_default_namespace(&[first, second]);
+
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[0].callable_name, "a__b__c");
+        assert_ne!(flat[1].callable_name, "a__b__c");
+        assert!(
+            flat[1].callable_name.starts_with("a__b__c_"),
+            "collision should append a hash suffix: {}",
+            flat[1].callable_name
+        );
+        assert!(flat[1].callable_name.len() <= MAX_TOOL_NAME_LENGTH);
+    }
+
+    #[test]
+    fn flatten_tools_for_default_namespace_keeps_default_namespace_tools() {
+        let exec = tool_info("builtins", DEFAULT_FUNCTION_NAMESPACE, "exec");
+
+        let flat = flatten_tools_for_default_namespace(&[exec]);
+
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].callable_name, "exec");
+        assert_eq!(flat[0].callable_namespace, DEFAULT_FUNCTION_NAMESPACE);
+        assert_eq!(flat[0].tool.description.as_deref(), Some("test tool exec"));
     }
 }
