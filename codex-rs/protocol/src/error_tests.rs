@@ -66,10 +66,10 @@ fn retryability_preserves_error_details_distinctions() {
             }),
             true,
         ),
-        (
-            CodexErr::new(CodexErrorDetails::FlexUnavailable),
-            true,
-        ),
+        (CodexErr::new(CodexErrorDetails::FlexUnavailable), true),
+        // Fork: generic HTTP 400 `InvalidRequest` failures stay retryable at the stream
+        // layer; gateways often surface transient capacity/routing problems as plain 400s.
+        (CodexErr::InvalidRequest("bad request".into()), true),
         (
             CodexErr::UnexpectedStatus(UnexpectedResponseError {
                 status: StatusCode::TOO_MANY_REQUESTS,

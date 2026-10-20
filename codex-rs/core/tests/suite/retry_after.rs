@@ -431,11 +431,18 @@ async fn responses_http_rate_limit_uses_server_advised_retry_delay() -> Result<(
 
     submit_user_input(&test, "retry the upstream rate limit").await?;
     let retry = telemetry.next_retry().await;
+    // The server-advised deadline is captured when the response arrives, so the recorded
+    // delay lands a few milliseconds under the advised whole second.
+    assert!(
+        (Duration::from_millis(900)..=Duration::from_secs(1)).contains(&retry.delay),
+        "server-advised delay should be ~1s, got {:?}",
+        retry.delay
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
             attempt: 1,
-            delay: Duration::from_secs(1),
+            delay: retry.delay,
             layer: "stream".into(),
             operation: "sampling".into(),
         }
@@ -582,11 +589,8 @@ async fn responses_http_classified_429_exhausts_stream_retries(
 
     let server = responses::start_mock_server().await;
     let classified = || ResponseTemplate::new(429).set_body_json(body.clone());
-    let response_mock = responses::mount_response_sequence(
-        &server,
-        vec![classified(), classified()],
-    )
-    .await;
+    let response_mock =
+        responses::mount_response_sequence(&server, vec![classified(), classified()]).await;
     let test = test_codex()
         .with_config(|config| {
             config.model_provider.request_max_retries = Some(0);
@@ -610,6 +614,114 @@ async fn responses_http_classified_429_exhausts_stream_retries(
                 assert_eq!(
                     event.error.and_then(|error| error.codex_error_info),
                     Some(expected.clone())
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(error_events, 1);
+    assert_eq!(stream_error_events, 1, "the first retry should be reported");
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+/// Fork: a generic HTTP 400 (no usage/quota/policy classification) stays retryable at the
+/// stream layer because gateways often surface transient capacity/routing problems as plain
+/// 400 bodies.
+#[tokio::test(flavor = "current_thread")]
+async fn responses_http_400_invalid_request_retries_then_recovers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let mut telemetry = RetryTelemetryCapture::install();
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(400)
+                .set_body_json(json!({ "error": { "message": "transient upstream rejection" } })),
+            responses::sse_response(responses::sse(vec![
+                responses::ev_response_created("recovered"),
+                responses::ev_completed("recovered"),
+            ])),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    submit_user_input(&test, "retry the generic 400").await?;
+    let retry = telemetry.next_retry().await;
+    assert!(
+        retry.delay <= Duration::from_secs(1),
+        "local backoff for the first retry should stay short, got {:?}",
+        retry.delay
+    );
+    assert_eq!(
+        retry,
+        RetryTelemetryEvent {
+            attempt: 1,
+            delay: retry.delay,
+            layer: "stream".into(),
+            operation: "sampling".into(),
+        }
+    );
+    wait_for_turn_completion(&test).await;
+
+    assert_eq!(response_mock.requests().len(), 2);
+    assert_eq!(
+        telemetry.events.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    );
+    Ok(())
+}
+
+/// Fork: generic HTTP 400 retries still stop at `stream_max_retries` and surface the original
+/// error body instead of a generic retry-limit error.
+#[tokio::test(flavor = "current_thread")]
+async fn responses_http_400_invalid_request_exhausts_stream_retries() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let bad_request = || {
+        ResponseTemplate::new(400)
+            .set_body_json(json!({ "error": { "message": "transient upstream rejection" } }))
+    };
+    let response_mock =
+        responses::mount_response_sequence(&server, vec![bad_request(), bad_request()]).await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    submit_user_input(&test, "exhaust the generic 400 retry budget").await?;
+
+    let mut error_events = 0;
+    let mut stream_error_events = 0;
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::Error(error) => {
+                error_events += 1;
+                assert!(
+                    error.message.contains("transient upstream rejection"),
+                    "the original 400 body should surface, got: {}",
+                    error.message
+                );
+            }
+            EventMsg::StreamError(_) => stream_error_events += 1,
+            EventMsg::TurnComplete(event) => {
+                assert!(
+                    event.error.is_some(),
+                    "the turn should fail after exhausting the retry budget"
                 );
                 break;
             }

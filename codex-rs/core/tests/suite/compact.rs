@@ -2914,6 +2914,9 @@ async fn pre_sampling_compact_falls_back_from_retired_previous_model_after_renam
         .with_model(retired_model)
         .with_config(move |config| {
             config.model_provider = model_provider;
+            // Fork: generic HTTP 400s are stream-retryable; pin the budget to zero so the
+            // previous-model rejection still drives the immediate compaction fallback.
+            config.model_provider.stream_max_retries = Some(0);
             set_test_compact_prompt(config);
         });
     let initial = initial_builder
@@ -2957,6 +2960,9 @@ async fn pre_sampling_compact_falls_back_from_retired_previous_model_after_renam
         .with_model(retired_model)
         .with_config(move |config| {
             config.model_provider = model_provider;
+            // Fork: generic HTTP 400s are stream-retryable; pin the budget to zero so the
+            // previous-model rejection still drives the immediate compaction fallback.
+            config.model_provider.stream_max_retries = Some(0);
             set_test_compact_prompt(config);
         });
     let resumed = resumed_builder
@@ -3203,6 +3209,9 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
             config.model_provider_id = provider_id.to_owned();
             config.model_provider = model_provider;
             config.tool_registry.turn_metadata_includes_tool_info = true;
+            // Fork: generic HTTP 400s are stream-retryable; pin the budget to zero so the
+            // previous-model rejection still drives the immediate compaction fallback.
+            config.model_provider.stream_max_retries = Some(0);
             set_test_compact_prompt(config);
         });
     let test = builder
