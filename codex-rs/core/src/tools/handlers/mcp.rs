@@ -137,7 +137,14 @@ impl McpHandler {
     }
 
     fn hook_tool_name(&self) -> HookToolName {
-        HookToolName::new(ensure_mcp_prefix(&join_tool_name(&self.tool_name())))
+        let tool_name = self.tool_name();
+        // Flattened tools already carry the `mcp__server__tool` spelling as
+        // their bare name; joining it with the default namespace would
+        // double-prefix the hook id.
+        if tool_name.is_default_namespace() {
+            return HookToolName::new(ensure_mcp_prefix(&tool_name.name));
+        }
+        HookToolName::new(ensure_mcp_prefix(&join_tool_name(&tool_name)))
     }
 }
 
@@ -548,6 +555,12 @@ fn create_tool_spec(
     } else {
         mcp_tool_to_responses_api_tool(&tool_name, &tool_info.tool, schema_max_bytes)?
     };
+    // Tools flattened for namespace-incapable providers live in the default
+    // namespace: declare them as plain functions so no `namespace` tool group
+    // reaches a gateway that cannot interpret it.
+    if tool_name.is_default_namespace() {
+        return Ok(ToolSpec::Function(tool));
+    }
     let description = effective_namespace_description(tool_info, agent_plugin)
         .map(str::trim)
         .filter(|description| !description.is_empty())

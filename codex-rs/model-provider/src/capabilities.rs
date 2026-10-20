@@ -32,6 +32,13 @@ impl Default for ProviderCapabilities {
 impl ProviderCapabilities {
     pub(crate) fn from_config(info: &ModelProviderInfo) -> Self {
         let defaults = Self {
+            // Tool namespaces are an OpenAI Responses dialect. Third-party
+            // gateways typically flatten or reject them (for example two MCP
+            // tools named `js` in different namespaces 400 as a duplicated
+            // function name), so only the canonical OpenAI backend keeps them
+            // by default; other providers receive flattened `namespace__name`
+            // declarations unless explicitly overridden.
+            namespace_tools: info.is_openai() || info.uses_openai_actor_authorization(),
             remote_compaction: if info.is_openai()
                 || is_azure_responses_provider(&info.name, info.base_url.as_deref())
             {
@@ -43,6 +50,9 @@ impl ProviderCapabilities {
         };
         let overrides = info.capabilities.unwrap_or_default();
         Self {
+            namespace_tools: overrides
+                .namespace_tools
+                .unwrap_or(defaults.namespace_tools),
             external_web_access: overrides
                 .external_web_access
                 .unwrap_or(defaults.external_web_access),

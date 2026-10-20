@@ -2893,6 +2893,10 @@
           "description": "Whether hosted web search may access the live web.",
           "type": "boolean"
         },
+        "namespace_tools": {
+          "description": "Whether the provider understands Responses tool namespaces (`type: \"namespace\"` tool groups). `Some(false)` makes Codex flatten namespaced tools into `namespace__name` function declarations before sending; omission preserves provider defaults (namespaces for the canonical OpenAI backend, flat names elsewhere).",
+          "type": "boolean"
+        },
         "remote_compaction": {
           "allOf": [
             {

@@ -33,3 +33,43 @@ fn capability_overrides_preserve_unspecified_provider_defaults() {
         );
     }
 }
+
+#[test]
+fn namespace_tools_default_is_canonical_openai_only() {
+    let openai = create_model_provider(
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+        /*auth_manager*/ None,
+    );
+    assert!(openai.capabilities().namespace_tools);
+
+    let third_party =
+        create_model_provider(ModelProviderInfo::default(), /*auth_manager*/ None);
+    assert!(!third_party.capabilities().namespace_tools);
+}
+
+#[test]
+fn namespace_tools_override_wins_over_provider_default() {
+    let flattened_openai = create_model_provider(
+        ModelProviderInfo {
+            capabilities: Some(ModelProviderCapabilities {
+                namespace_tools: Some(false),
+                ..Default::default()
+            }),
+            ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        },
+        /*auth_manager*/ None,
+    );
+    assert!(!flattened_openai.capabilities().namespace_tools);
+
+    let namespaced_third_party = create_model_provider(
+        ModelProviderInfo {
+            capabilities: Some(ModelProviderCapabilities {
+                namespace_tools: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        /*auth_manager*/ None,
+    );
+    assert!(namespaced_third_party.capabilities().namespace_tools);
+}
