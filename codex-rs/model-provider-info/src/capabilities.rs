@@ -11,6 +11,12 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ModelProviderCapabilities {
+    /// Whether the provider understands Responses tool namespaces (`type:
+    /// "namespace"` tool groups). `Some(false)` makes Codex flatten namespaced
+    /// tools into `namespace__name` function declarations before sending;
+    /// omission preserves provider defaults (namespaces for the canonical
+    /// OpenAI backend, flat names elsewhere).
+    pub namespace_tools: Option<bool>,
     /// Whether hosted web search may access the live web.
     pub external_web_access: Option<bool>,
     /// Remote context-compaction protocol; omission preserves provider defaults.
