@@ -20,7 +20,9 @@ use codex_protocol::protocol::WarningEvent;
 use tokio::time::Instant;
 use tracing::warn;
 
-const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
+// Fork: start connection retries at 1s (upstream default 5s) so transient network
+// blips recover faster; the doubling schedule and 60s cap are unchanged.
+const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy)]
