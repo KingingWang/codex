@@ -157,6 +157,7 @@ pub(crate) fn build_tool_router(
         apps_enabled,
         &mcp.config().mcp_server_catalog,
         model_info.supports_search_tool,
+        !namespace_tools_enabled(turn_context),
         &mut registry,
     );
     apply_mcp_tool_exposure_policy(

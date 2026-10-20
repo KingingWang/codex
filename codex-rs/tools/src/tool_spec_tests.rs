@@ -8,6 +8,7 @@ use crate::FreeformToolFormat;
 use crate::JsonSchema;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
+use crate::create_tools_json_for_chat_completions;
 use crate::create_tools_json_for_responses_api;
 use crate::create_tools_json_for_responses_lite;
 use crate::create_tools_raw_json_for_responses_api;
@@ -410,4 +411,44 @@ fn tool_search_tool_spec_serializes_expected_wire_shape() {
             },
         })
     );
+}
+
+#[test]
+fn responses_lite_rejects_duplicate_names_in_default_namespace() {
+    let err = create_tools_json_for_responses_lite(&[
+        ToolSpec::Function(responses_lite_function("js")),
+        ToolSpec::Function(responses_lite_function("js")),
+    ])
+    .expect_err("duplicate bare names in the default namespace must fail locally");
+
+    let message = err.to_string();
+    assert!(message.contains("duplicate tool name `js`"), "{message}");
+}
+
+#[test]
+fn chat_completions_rejects_duplicate_names_across_namespaces() {
+    // Two MCP servers both exposing `js` flatten to the same bare function
+    // name; the serializer must refuse instead of letting the upstream 400.
+    let err = create_tools_json_for_chat_completions(&[
+        ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "mcp__node_repl".to_string(),
+            description: String::new(),
+            tools: vec![ResponsesApiNamespaceTool::Function(
+                responses_lite_function("js"),
+            )],
+        }),
+        ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "mcp__cua_repl".to_string(),
+            description: String::new(),
+            tools: vec![ResponsesApiNamespaceTool::Function(
+                responses_lite_function("js"),
+            )],
+        }),
+    ])
+    .expect_err("duplicate flattened names must fail locally");
+
+    let message = err.to_string();
+    assert!(message.contains("duplicate tool name `js`"), "{message}");
+    assert!(message.contains("mcp__cua_repl"), "{message}");
+    assert!(message.contains("mcp__node_repl"), "{message}");
 }

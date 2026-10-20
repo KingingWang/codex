@@ -11,8 +11,10 @@ use codex_protocol::config_types::WebSearchFilters as ConfigWebSearchFilters;
 use codex_protocol::config_types::WebSearchUserLocation as ConfigWebSearchUserLocation;
 use codex_protocol::config_types::WebSearchUserLocationType;
 use serde::Serialize;
+use serde::ser::Error as _;
 use serde_json::Value;
 use serde_json::value::RawValue;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// When serialized as JSON, this produces a valid "Tool" in the OpenAI
@@ -129,6 +131,23 @@ pub fn create_tools_json_for_responses_lite(
         functions_index.get_or_insert(tools_json.len());
     }
 
+    // The default namespace is a single flat scope on the server: two tools
+    // sharing a bare name there are an invalid request every strict gateway
+    // rejects with an opaque 400. Fail locally with the colliding names so
+    // the error names the tools instead.
+    let mut seen_names: HashMap<&str, &str> = HashMap::new();
+    for child in &functions.tools {
+        let (name, kind) = match child {
+            ResponsesApiNamespaceTool::Function(tool) => (tool.name.as_str(), "function"),
+            ResponsesApiNamespaceTool::Custom(tool) => (tool.name.as_str(), "custom"),
+        };
+        if let Some(previous_kind) = seen_names.insert(name, kind) {
+            return Err(serde_json::Error::custom(format!(
+                "duplicate tool name `{name}` in the default `{DEFAULT_FUNCTION_NAMESPACE}` namespace ({previous_kind} + {kind}); tool names must be unique before the request is sent"
+            )));
+        }
+    }
+
     if let Some(functions_index) = functions_index
         && !functions.tools.is_empty()
     {
@@ -175,10 +194,23 @@ pub fn create_tools_json_for_chat_completions(
     tools: &[ToolSpec],
 ) -> Result<Vec<Value>, serde_json::Error> {
     let mut tools_json = Vec::new();
+    // Chat Completions has no namespace scoping: every declaration flattens
+    // to a bare function name, so two tools sharing one name produce an
+    // invalid request the upstream rejects with an opaque 400. Detect the
+    // collision locally and report both origins instead.
+    let mut seen_names: HashMap<String, String> = HashMap::new();
 
     for tool in tools {
         match tool {
             ToolSpec::Function(resp_tool) => {
+                if let Some(origin) =
+                    seen_names.insert(resp_tool.name.clone(), "a top-level function".to_string())
+                {
+                    return Err(serde_json::Error::custom(format!(
+                        "duplicate tool name `{}` for the Chat Completions API (already provided by {origin}); namespaced tools flatten to bare names and must be unique",
+                        resp_tool.name
+                    )));
+                }
                 // Convert to chat/completions format: {"type": "function", "function": {...}}
                 let func = serde_json::json!({
                     "name": resp_tool.name,
@@ -195,6 +227,14 @@ pub fn create_tools_json_for_chat_completions(
                 for tool in &ns.tools {
                     match tool {
                         ResponsesApiNamespaceTool::Function(resp_tool) => {
+                            if let Some(origin) = seen_names
+                                .insert(resp_tool.name.clone(), format!("namespace `{}`", ns.name))
+                            {
+                                return Err(serde_json::Error::custom(format!(
+                                    "duplicate tool name `{}` for the Chat Completions API (namespace `{}` collides with {origin}); namespaced tools flatten to bare names and must be unique",
+                                    resp_tool.name, ns.name
+                                )));
+                            }
                             let func = serde_json::json!({
                                 "name": resp_tool.name,
                                 "description": resp_tool.description,

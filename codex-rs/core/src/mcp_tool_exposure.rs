@@ -41,6 +41,7 @@ impl McpHandlerCache {
         apps_enabled: bool,
         mcp_server_catalog: &codex_mcp::ResolvedMcpCatalog,
         search_tool_enabled: bool,
+        flatten_mcp_namespaces: bool,
         registry: &mut ToolRegistry,
     ) -> HashSet<ToolName> {
         let mut handlers = self
@@ -53,6 +54,7 @@ impl McpHandlerCache {
             apps_enabled,
             mcp_server_catalog,
             search_tool_enabled,
+            flatten_mcp_namespaces,
             &mut handlers,
             registry,
         )
@@ -66,19 +68,27 @@ fn append_mcp_tools(
     apps_enabled: bool,
     mcp_server_catalog: &codex_mcp::ResolvedMcpCatalog,
     search_tool_enabled: bool,
+    flatten_mcp_namespaces: bool,
     handlers: &mut HashMap<ToolName, CachedMcpHandler>,
     registry: &mut ToolRegistry,
 ) -> HashSet<ToolName> {
-    let current_tools: HashSet<_> = all_mcp_tools
+    // Providers that cannot consume Responses tool namespaces receive every
+    // MCP tool as one flat `namespace__name` function in the default
+    // namespace; the flattened identity is what the registry, the handler
+    // cache, and the model all agree on.
+    let flattened_tools = flatten_mcp_namespaces
+        .then(|| codex_mcp::flatten_tools_for_default_namespace(all_mcp_tools));
+    let mcp_tools = flattened_tools.as_deref().unwrap_or(all_mcp_tools);
+    let current_tools: HashSet<_> = mcp_tools
         .iter()
         .map(McpToolInfo::canonical_tool_name)
         .collect();
     handlers.retain(|name, _| current_tools.contains(name));
 
     // Keep regular MCP tools first; Apps tools also require connector and policy checks.
-    let non_app_tools = filter_non_codex_apps_mcp_tools_only(all_mcp_tools);
+    let non_app_tools = filter_non_codex_apps_mcp_tools_only(mcp_tools);
     let app_tools = apps_enabled
-        .then(|| filter_codex_apps_mcp_tools(all_mcp_tools, config))
+        .then(|| filter_codex_apps_mcp_tools(mcp_tools, config))
         .into_iter()
         .flatten();
     let exposure = if search_tool_enabled {
