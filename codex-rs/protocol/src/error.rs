@@ -431,7 +431,6 @@ impl CodexErr {
             | CodexErrorDetails::EnvVar(_)
             | CodexErrorDetails::Fatal(_)
             | CodexErrorDetails::InvalidImageRequest()
-            | CodexErrorDetails::InvalidRequest(_)
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
             | CodexErrorDetails::InvalidPrompt { .. }
@@ -453,11 +452,14 @@ impl CodexErr {
             // of body classification, so quota (`insufficient_quota` / `usage_not_included`),
             // usage-limit (`usage_limit_reached`) and flex (`flex_unavailable`) 429s retry up
             // to the stream budget instead of ending the turn. 503 `server_is_overloaded` and
-            // plain 429 retry limits also stay retryable. Server advice wins; otherwise
-            // exponential backoff is bounded by `MAX_LOCAL_RETRY_DELAY`.
+            // plain 429 retry limits also stay retryable, and so do generic HTTP 400
+            // `InvalidRequest` failures because gateways/front providers routinely surface
+            // transient capacity or routing problems as plain 400 bodies. Server advice wins;
+            // otherwise exponential backoff is bounded by `MAX_LOCAL_RETRY_DELAY`.
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
+            | CodexErrorDetails::InvalidRequest(_)
             | CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::UsageNotIncluded
             | CodexErrorDetails::QuotaExceeded

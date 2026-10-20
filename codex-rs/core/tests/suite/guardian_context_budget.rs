@@ -443,10 +443,13 @@ async fn review_respects_complete_context_budget(
         .map(responses::sse_response)
         .collect::<Vec<_>>();
     if matches!(reviewer_response, ReviewerResponse::CompactionError) {
+        // Fork: generic HTTP 400s are stream-retryable now, so this compaction-failure
+        // premise uses a classified `invalid_prompt` body, which stays terminal and keeps
+        // the single-request failure shape this test asserts.
         events.insert(
             /*index*/ 2,
             wiremock::ResponseTemplate::new(400).set_body_json(json!({
-                "error": {"code": "context_length_exceeded", "message": "compaction service context window exceeded"}
+                "error": {"code": "invalid_prompt", "message": "compaction service context window exceeded"}
             })),
         );
     }
