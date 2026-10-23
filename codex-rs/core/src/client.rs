@@ -817,7 +817,8 @@ impl ModelClient {
                 last_inference_tools: StdMutex::new(None),
             }),
             agent_identity_policy: self.agent_identity_policy,
-            prompt_cache_key_override: self.prompt_cache_key_override.clone(),
+            prompt_cache_key_policy: self.prompt_cache_key_policy.clone(),
+            session_id_override: self.session_id_override.clone(),
             request_contributors: self.request_contributors.clone(),
             executed_tool_calls: self.executed_tool_calls.clone(),
             codex_responses_headers: self.codex_responses_headers.clone(),
@@ -2776,7 +2777,8 @@ impl ModelClientSession {
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
-            );
+            )
+            .map_err(|error| self.client.state.provider.map_api_error(error))?;
             let (_, _sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
@@ -2980,7 +2982,8 @@ impl ModelClientSession {
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
-            );
+            )
+            .map_err(|error| self.client.state.provider.map_api_error(error))?;
             let (_, _sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
@@ -4130,7 +4133,6 @@ mod chat_completions_request_tests {
             input,
             cyber_access_program: None,
             tools: vec![create_exec_command_tool(CommandToolOptions {
-                include_login_parameter: false,
                 exec_permission_approvals_enabled: false,
             })]
             .into(),
