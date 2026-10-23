@@ -12058,6 +12058,9 @@ async fn make_remote_compaction_session(
     let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.base_url = Some(format!("{server_uri}/v1"));
     provider.supports_websockets = false;
+    // Fork: generic HTTP 400s are stream-retryable; pin the budget to zero so the
+    // previous-model rejection still drives the immediate compaction fallback.
+    provider.stream_max_retries = Some(0);
     make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),
         Vec::new(),
