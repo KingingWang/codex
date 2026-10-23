@@ -51,6 +51,18 @@ fn enable_incremental_tools(turn: &mut TurnContext) {
     turn.config = Arc::new(config);
 }
 
+/// `incremental_tools` became a stable, default-enabled feature upstream, so the
+/// "feature off" case has to turn it off explicitly instead of relying on the
+/// built-in default.
+fn disable_incremental_tools(turn: &mut TurnContext) {
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .disable(Feature::IncrementalTools)
+        .expect("incremental tools feature should be disableable");
+    turn.config = Arc::new(config);
+}
+
 fn shell_tool_spec() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "shell".to_string(),
@@ -97,6 +109,8 @@ async fn incremental_tools_gate_requires_responses_wire_api() {
         set_responses_lite(&mut turn, use_responses_lite);
         if feature_enabled {
             enable_incremental_tools(&mut turn);
+        } else {
+            disable_incremental_tools(&mut turn);
         }
         let step_context = StepContext::for_test(Arc::new(turn));
         let context = format!(
