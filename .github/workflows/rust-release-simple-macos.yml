@@ -70,6 +70,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # 真正参与构建的工具链由 codex-rs/rust-toolchain.toml 的 channel 决定，而上面
+      # dtolnay action 的 targets 只装进它自己那个版本。上游 bump channel
+      # （0.164.0: 1.95.0 -> 1.99.1）后，构建会因 target 缺失报
+      # "can't find crate for `std`"。这一步在默认 working-directory（codex-rs）下
+      # 执行，rustup 会按 rust-toolchain.toml 选中正确的工具链，对后续 bump 免疫。
+      - name: Add build target to the pinned toolchain
+        run: rustup target add "${{ matrix.target }}"
+
       # 【关键】下载预编译的 rusty_v8 静态库，避免从源码编译 V8（防 OOM + 防超时）
       # 该 action 下载 URL 写死指向 openai/codex 的 release，fork 仓库也能拉到。
       - name: Setup rusty_v8 prebuilt artifacts
