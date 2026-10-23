@@ -142,7 +142,8 @@ async fn window_with_tool_declarations_stays_incremental_only_on_responses() {
                     tools: vec![serde_json::json!({
                         "type": "function",
                         "name": "shell",
-                    })],
+                    })]
+                    .into(),
                 }],
             )
             .await;
