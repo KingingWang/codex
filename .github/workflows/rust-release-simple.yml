@@ -71,6 +71,9 @@ jobs:
           version: 0.14.0
           use-cache: false
 
+      - name: Test musl archive downloads
+        run: python3 ../.github/scripts/test_download_musl_archive.py
+
       - name: Install musl build tools
         env:
           TARGET: ${{ matrix.target }}
