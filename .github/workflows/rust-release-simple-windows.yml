@@ -49,6 +49,8 @@ jobs:
             label: aarch64
 
     env:
+      # CLI 和 canonical package 的 helper crate 都使用单线程编译。
+      CARGO_BUILD_JOBS: "1"
       # workspace profile.release 默认 lto="fat" + codegen-units=4，是 OOM 元凶。
       # 改用 thin LTO + 16 codegen-units 降低内存峰值。
       CARGO_PROFILE_RELEASE_LTO: "thin"
@@ -86,16 +88,12 @@ jobs:
           rm -rf "target/${target}/release/gn_out" 2>/dev/null || true
           echo "Cleaned stale v8 build artifacts (if any)"
 
-      - name: Limit build jobs to avoid OOM
-        shell: bash
-        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-
       # x86_64 需要 SQLITE_DISABLE_INTRINSIC，与官方 workflow 一致
       - name: Build release binary
         shell: bash
         env:
           LIBSQLITE3_FLAGS: ${{ matrix.target == 'x86_64-pc-windows-msvc' && 'SQLITE_DISABLE_INTRINSIC' || '' }}
-        run: cargo build --release --target ${{ matrix.target }} --bin codex --timings
+        run: cargo build --release --target ${{ matrix.target }} --bin codex -j 1 --timings
 
       - name: Prepare release artifact
         shell: bash

@@ -45,15 +45,18 @@ jobs:
           - runner: macos-15
             target: aarch64-apple-darwin
             label: aarch64
-          # Intel x86_64: 也在 macos-15 (ARM) 上交叉编译, 与官方 rust-release.yml 一致
-          # macos-13 (Xcode 15) 同样有 webrtc-sys 兼容问题
-          - runner: macos-15
+          # Intel x86_64: 使用 macOS 15 Intel runner 原生编译。
+          # 不再与 aarch64 争抢容量紧张的 ARM runner；仍保留 Xcode 16+，
+          # 避免旧 macos-13 SDK 的 webrtc-sys 兼容问题。
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             label: x86_64
 
     env:
       # macOS runner 用 libgit2 拉子模块（libwebrtc/libyuv）会间歇性失败，改走 git CLI
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # CLI 和 canonical package 的 helper crate 都使用单线程编译。
+      CARGO_BUILD_JOBS: "1"
       # workspace profile.release 默认 lto="fat" + codegen-units=4，是 OOM 元凶。
       # fat LTO 会把整个 workspace 100+ crate 的 bitcode 全部载入内存做全程序优化，
       # 峰值轻松超过 10GB，在 7-14GB 的 GitHub-hosted runner 上必爆内存/卡死。
@@ -108,12 +111,8 @@ jobs:
           rm -rf "target/${target}/release/gn_out" 2>/dev/null || true
           echo "Cleaned stale v8 build artifacts (if any)"
 
-      # 若仍遇到内存不足，取消下面两行注释限制编译并行度
-      - name: Limit build jobs to avoid OOM
-        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --bin codex --timings
+        run: cargo build --release --target ${{ matrix.target }} --bin codex -j 1 --timings
 
       - name: Prepare release artifact
         run: |
