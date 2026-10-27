@@ -34,6 +34,10 @@ jobs:
             label: aarch64-musl
       fail-fast: false   # 一个失败不影响其他
 
+    env:
+      # 主二进制已有 -j 1；helper crate 的增量构建也需要同样的限制。
+      CARGO_BUILD_JOBS: "1"
+
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
