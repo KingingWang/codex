@@ -322,7 +322,7 @@ fn proto_string_map(values: HashMap<String, RedactedString>) -> proto::StringMap
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
-        WireApi::Chat | WireApi::Anthropic => {
+        WireApi::Chat | WireApi::Anthropic | WireApi::Gemini => {
             panic!("wire api {wire_api:?} is not supported over the thread-config proto")
         }
     }

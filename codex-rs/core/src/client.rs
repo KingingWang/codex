@@ -47,6 +47,7 @@ use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
 use codex_api::ChatCompletionsRequest;
 use codex_api::ChatMessage;
 use codex_api::Compression;
+use codex_api::GeminiClient as ApiGeminiClient;
 use codex_api::MemoriesClient as ApiMemoriesClient;
 use codex_api::MemorySummarizeInput as ApiMemorySummarizeInput;
 use codex_api::MemorySummarizeOutput as ApiMemorySummarizeOutput;
@@ -183,6 +184,36 @@ pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
 const X_SESSION_AFFINITY_HEADER: &str = "x-session-affinity";
 const X_SESSION_ID_HEADER: &str = "X-Session-Id";
 const X_PARENT_SESSION_ID_HEADER: &str = "x-parent-session-id";
+
+/// Gateway affinity and context-window identity for non-Responses requests.
+/// No OpenAI-only metadata or unsupported prompt-cache body fields are added.
+fn native_session_headers(metadata: &CodexResponsesMetadata) -> Result<ApiHeaderMap> {
+    let mut headers = ApiHeaderMap::new();
+    let session = HeaderValue::from_str(&metadata.session_id).map_err(|err| {
+        CodexErr::InvalidRequest(format!("invalid Codex session ID header: {err}"))
+    })?;
+    headers.insert(X_SESSION_AFFINITY_HEADER, session.clone());
+    headers.insert(X_SESSION_ID_HEADER, session);
+    let window = HeaderValue::from_str(&metadata.window_id).map_err(|err| {
+        CodexErr::InvalidRequest(format!("invalid Codex window ID header: {err}"))
+    })?;
+    headers.insert(X_CODEX_WINDOW_ID_HEADER, window);
+    if let Some(parent) = metadata.parent_thread_id {
+        let parent = HeaderValue::from_str(&parent.to_string()).map_err(|err| {
+            CodexErr::InvalidRequest(format!("invalid Codex parent session ID header: {err}"))
+        })?;
+        headers.insert(X_PARENT_SESSION_ID_HEADER, parent);
+    }
+    Ok(headers)
+}
+
+fn native_api_telemetry_path(wire_api: WireApi, streaming: bool) -> &'static str {
+    match (wire_api, streaming) {
+        (WireApi::Gemini, true) => "/models/:streamGenerateContent",
+        (WireApi::Gemini, false) => "/models/:generateContent",
+        _ => "/v1/messages",
+    }
+}
 const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
     "x-codex-ws-stream-request-start-ms";
 const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
@@ -316,7 +347,7 @@ pub struct ModelClient {
 /// Implementations are expected to be cheap and non-blocking; the retry loop
 /// fires the callback synchronously without awaiting it.
 pub(crate) trait StreamErrorNotifier: Send + Sync {
-    /// Fired when Chat Completions / Anthropic streaming retries.
+    /// Fired when Chat Completions / Anthropic / Gemini streaming retries.
     ///
     /// - `message`: human-readable retry line, e.g. "Retrying... (attempt 2) — HTTP 429".
     /// - `additional_details`: rendering of the underlying error (its `Display` form).
@@ -326,7 +357,7 @@ pub(crate) trait StreamErrorNotifier: Send + Sync {
 
 /// Builds a short human-readable error code suffix from an `ApiError`, e.g.
 /// `HTTP 429`, `HTTP 502`, `connection timeout`, `network error`. Used by
-/// the Chat Completions / Anthropic retry notifications.
+/// the Chat Completions / Anthropic / Gemini retry notifications.
 fn api_error_code(err: &ApiError) -> String {
     match err {
         ApiError::Transport(TransportError::Http { status, .. }) => {
@@ -1300,7 +1331,8 @@ impl ModelClient {
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
     pub fn responses_websocket_enabled(&self) -> bool {
-        if !self.state.provider.info().supports_websockets
+        if self.state.provider.info().wire_api != WireApi::Responses
+            || !self.state.provider.info().supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
         {
             return false;
@@ -2701,9 +2733,16 @@ impl ModelClientSession {
                 )
                 .await
             }
-            WireApi::Anthropic => {
-                self.stream_anthropic_api(prompt, model_info, session_telemetry, inference_trace)
-                    .await
+            WireApi::Anthropic | WireApi::Gemini => {
+                self.stream_native_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await
             }
         }
     }
@@ -2801,31 +2840,9 @@ impl ModelClientSession {
                 client_setup.api_auth,
                 chat_stream,
             );
-            let mut extra_headers = ApiHeaderMap::new();
-            let session_header_value = HeaderValue::from_str(&responses_metadata.session_id)
-                .map_err(|err| {
-                    CodexErr::InvalidRequest(format!("invalid Codex session ID header: {err}"))
-                })?;
-            extra_headers.insert(X_SESSION_AFFINITY_HEADER, session_header_value.clone());
-            extra_headers.insert(X_SESSION_ID_HEADER, session_header_value);
-            // Only the compaction-window identity is forwarded here. The rest of the Responses
-            // compatibility metadata stays off this path because `WireApi::Chat` providers are
-            // frequently third parties.
-            let window_header_value = HeaderValue::from_str(&responses_metadata.window_id)
-                .map_err(|err| {
-                    CodexErr::InvalidRequest(format!("invalid Codex window ID header: {err}"))
-                })?;
-            extra_headers.insert(X_CODEX_WINDOW_ID_HEADER, window_header_value);
-            if let Some(parent_thread_id) = responses_metadata.parent_thread_id {
-                let parent_header_value = HeaderValue::from_str(&parent_thread_id.to_string())
-                    .map_err(|err| {
-                        CodexErr::InvalidRequest(format!(
-                            "invalid Codex parent session ID header: {err}"
-                        ))
-                    })?;
-                extra_headers.insert(X_PARENT_SESSION_ID_HEADER, parent_header_value);
-            }
-            let stream_result = client.request(request, extra_headers).await;
+            let stream_result = client
+                .request(request, native_session_headers(responses_metadata)?)
+                .await;
 
             match stream_result {
                 Ok(stream) => {
@@ -2936,26 +2953,45 @@ impl ModelClientSession {
         }
     }
 
-    /// Streams a turn via the Anthropic Messages API.
+    /// Native Anthropic and Gemini use the same authentication recovery,
+    /// request retry/backoff, and canonical response-stream mapping.
     #[instrument(
-        name = "model_client.stream_anthropic_api",
+        name = "model_client.stream_native_api",
         level = "info",
         skip_all,
         fields(
             model = %model_info.slug,
             wire_api = %self.client.state.provider.info().wire_api,
-            transport = "anthropic_http",
+            transport = if self.client.state.provider.info().wire_api == WireApi::Gemini {
+                "gemini_http"
+            } else { "anthropic_http" },
             http.method = "POST",
-            api.path = "v1/messages"
+            api.path = native_api_telemetry_path(
+                self.client.state.provider.info().wire_api,
+                self.client.state.provider.info().chat_stream
+            )
         )
     )]
-    async fn stream_anthropic_api(
+    async fn stream_native_api(
         &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        let is_gemini = self.client.state.provider.info().wire_api == WireApi::Gemini;
+        let chat_stream = self.client.state.provider.info().chat_stream;
+        let path = if is_gemini {
+            format!(
+                "/{}",
+                ApiGeminiClient::<ReqwestTransport>::path(&model_info.slug, chat_stream)
+                    .map_err(|error| self.client.state.provider.map_api_error(error))?
+            )
+        } else {
+            "/v1/messages".to_string()
+        };
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -2974,7 +3010,7 @@ impl ModelClientSession {
                 .await?;
             let transport = self.client.build_api_transport(
                 &client_setup.api_provider,
-                "/v1/messages",
+                &path,
                 client_setup.redirect_policy,
             )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
@@ -2987,7 +3023,10 @@ impl ModelClientSession {
             let (_, _sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
-                RequestRouteTelemetry::for_endpoint("/v1/messages"),
+                RequestRouteTelemetry::for_endpoint(native_api_telemetry_path(
+                    self.client.state.provider.info().wire_api,
+                    chat_stream,
+                )),
                 self.client.state.auth_env_telemetry.clone(),
             );
 
@@ -2998,21 +3037,39 @@ impl ModelClientSession {
                 .get_agent_path()
                 .unwrap_or_else(codex_protocol::AgentPath::root)
                 .to_string();
-            let request = crate::client_anthropic::build_anthropic_request_with_agent_path(
-                prompt,
-                model_info,
-                &own_agent_path,
-            )?;
             let inference_trace_attempt = inference_trace.start_attempt();
-            inference_trace_attempt.record_started(&request);
-            let chat_stream = self.client.state.provider.info().chat_stream;
-            let client = ApiAnthropicClient::new(
-                transport,
-                client_setup.api_provider,
-                client_setup.api_auth,
-                chat_stream,
-            );
-            let stream_result = client.request(request, ApiHeaderMap::new()).await;
+            let stream_result = if is_gemini {
+                let request = crate::client_gemini::build_gemini_request(
+                    prompt,
+                    model_info,
+                    effort.clone(),
+                    &own_agent_path,
+                )?;
+                inference_trace_attempt.record_started(&request);
+                let client = ApiGeminiClient::new(
+                    transport,
+                    client_setup.api_provider,
+                    client_setup.api_auth,
+                    chat_stream,
+                );
+                client
+                    .request(request, native_session_headers(responses_metadata)?)
+                    .await
+            } else {
+                let request = crate::client_anthropic::build_anthropic_request_with_agent_path(
+                    prompt,
+                    model_info,
+                    &own_agent_path,
+                )?;
+                inference_trace_attempt.record_started(&request);
+                let client = ApiAnthropicClient::new(
+                    transport,
+                    client_setup.api_provider,
+                    client_setup.api_auth,
+                    chat_stream,
+                );
+                client.request(request, ApiHeaderMap::new()).await
+            };
 
             match stream_result {
                 Ok(stream) => {
@@ -3040,7 +3097,11 @@ impl ModelClientSession {
                         session_telemetry,
                         &self.client.state.provider,
                         self.client.event_sender.as_ref(),
-                        /*turn_id*/ None,
+                        if is_gemini {
+                            responses_metadata.turn_id.as_deref()
+                        } else {
+                            None
+                        },
                     )
                     .await
                     {
@@ -3061,7 +3122,7 @@ impl ModelClientSession {
                                 warn!(
                                     auth_retry_count,
                                     delay_ms = delay.as_millis(),
-                                    "Anthropic received 401, retrying after backoff"
+                                    "Native protocol received 401, retrying after backoff"
                                 );
                                 self.notify_stream_retry(
                                     format!(
@@ -3101,7 +3162,7 @@ impl ModelClientSession {
                         retry_count,
                         delay_ms = delay.as_millis(),
                         error = %err,
-                        "Anthropic request failed, retrying after backoff"
+                        "Native protocol request failed, retrying after backoff"
                     );
                     self.notify_stream_retry(
                         format!(
