@@ -93,6 +93,7 @@ mod exec_policy;
 mod extension_sandbox;
 mod external_auth;
 mod fork_thread;
+mod gemini;
 mod git_enrichment;
 mod guardian_authorization;
 mod guardian_authorization_refresh;

@@ -6,6 +6,20 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn gemini_wire_api_round_trips_in_provider_config() {
+    let provider: ModelProviderInfo = toml::from_str(
+        "name = 'Gemini'\nwire_api = 'gemini'\nchat_stream = true\nbase_url = 'https://example.test/v1beta'\n",
+    ).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Gemini);
+    assert_eq!(provider.wire_api.to_string(), "gemini");
+    assert!(provider.chat_stream);
+    assert_eq!(
+        toml::from_str::<ModelProviderInfo>(&toml::to_string(&provider).unwrap()).unwrap(),
+        provider
+    );
+}
+
+#[test]
 fn runtime_internal_metadata_opt_in_is_not_serialized_or_configurable() {
     let trusted = ModelProviderInfo {
         include_internal_metadata: true,

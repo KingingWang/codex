@@ -10,6 +10,7 @@ mod apps;
 mod client;
 mod client_anthropic;
 mod client_common;
+mod client_gemini;
 mod model_request;
 mod realtime_context;
 mod realtime_conversation;

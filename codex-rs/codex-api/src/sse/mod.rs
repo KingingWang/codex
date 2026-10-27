@@ -1,6 +1,7 @@
 pub(crate) mod anthropic;
 pub(crate) mod chat_completions;
 mod chat_completions_reasoning;
+pub(crate) mod gemini;
 pub(crate) mod responses;
 mod responses_error;
 

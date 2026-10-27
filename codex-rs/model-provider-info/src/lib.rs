@@ -111,6 +111,8 @@ pub enum WireApi {
     Chat,
     /// The Messages API exposed by Anthropic at `/v1/messages`.
     Anthropic,
+    /// Google's native GenerateContent API at `/v1beta/models/{model}:generateContent`.
+    Gemini,
 }
 
 impl fmt::Display for WireApi {
@@ -119,6 +121,7 @@ impl fmt::Display for WireApi {
             Self::Responses => "responses",
             Self::Chat => "chat",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         };
         f.write_str(value)
     }
@@ -134,9 +137,10 @@ impl<'de> Deserialize<'de> for WireApi {
             "responses" => Ok(Self::Responses),
             "chat" => Ok(Self::Chat),
             "anthropic" => Ok(Self::Anthropic),
+            "gemini" => Ok(Self::Gemini),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["responses", "chat", "anthropic"],
+                &["responses", "chat", "anthropic", "gemini"],
             )),
         }
     }
@@ -145,8 +149,8 @@ impl<'de> Deserialize<'de> for WireApi {
 /// Whether a provider's upstream accepts native freeform tools.
 ///
 /// Freeform tools are Responses-API custom tools whose argument is raw text
-/// constrained by a grammar, such as `apply_patch`. The Chat Completions and
-/// Anthropic wire protocols cannot carry them at all, so for those providers the
+/// constrained by a grammar, such as `apply_patch`. The Chat Completions,
+/// Anthropic, and Gemini wire protocols cannot carry them at all, so for those providers the
 /// declaration is always lowered to the equivalent function form. This setting
 /// covers the remaining case: a provider that speaks the Responses protocol but
 /// whose upstream still rejects custom tools. Without a way to express that, the
@@ -156,7 +160,7 @@ impl<'de> Deserialize<'de> for WireApi {
 #[serde(rename_all = "snake_case")]
 pub enum FreeformToolSupport {
     /// Not declared by the provider. Responses providers keep the freeform form
-    /// advertised by the model catalog; Chat and Anthropic providers lower it.
+    /// advertised by the model catalog; Chat, Anthropic, and Gemini providers lower it.
     #[default]
     Auto,
     /// The upstream rejects native freeform tools, so lower them to the function
@@ -171,7 +175,7 @@ pub struct ModelProviderInfo {
     /// Friendly display name.
     #[serde(default)]
     pub name: String,
-    /// Base URL for the provider's OpenAI-compatible API.
+    /// Base URL for the provider API, including its versioned protocol prefix.
     pub base_url: Option<String>,
     /// Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery
     /// uses the Codex backend unless `base_url` overrides the inference endpoint.
@@ -198,8 +202,8 @@ pub struct ModelProviderInfo {
     /// Optional API capability overrides for a custom Responses-compatible provider.
     /// Unspecified capabilities retain their existing provider defaults.
     pub capabilities: Option<ModelProviderCapabilities>,
-    /// Whether to use SSE streaming for Chat Completions API requests.
-    /// Defaults to `false` (non-streaming). Only applicable when `wire_api = "chat"`.
+    /// Whether to use SSE streaming for Chat Completions, Anthropic, or Gemini requests.
+    /// Defaults to `false` (non-streaming).
     #[serde(default)]
     pub chat_stream: bool,
     /// Optional query parameters to append to the base URL.
@@ -236,8 +240,8 @@ pub struct ModelProviderInfo {
     #[serde(default)]
     pub supports_standalone_web_search: bool,
     /// Whether the upstream accepts native freeform (Responses custom) tools.
-    /// Only consulted when `wire_api = "responses"`; the Chat Completions and
-    /// Anthropic protocols cannot carry freeform tools regardless.
+    /// Only consulted when `wire_api = "responses"`; the Chat Completions,
+    /// Anthropic, and Gemini protocols cannot carry freeform tools regardless.
     #[serde(default)]
     pub freeform_tool_support: FreeformToolSupport,
     /// Runtime-only opt-in for internal metadata, independent of the destination check.

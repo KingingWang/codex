@@ -94,6 +94,28 @@ use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
+
+#[test]
+fn gemini_session_headers_include_parent_and_reject_invalid_ids() {
+    let mut metadata = CodexResponsesMetadata::new(
+        "installation".into(),
+        "session".into(),
+        "thread".into(),
+        "session:2".into(),
+    );
+    let parent = codex_protocol::ThreadId::new();
+    metadata.parent_thread_id = Some(parent);
+    let headers = super::native_session_headers(&metadata).unwrap();
+    assert_eq!(headers["x-session-id"], "session");
+    assert_eq!(headers["x-session-affinity"], "session");
+    assert_eq!(headers["x-codex-window-id"], "session:2");
+    assert_eq!(
+        headers["x-parent-session-id"].to_str().unwrap(),
+        parent.to_string()
+    );
+    metadata.session_id = "invalid\nid".into();
+    assert!(super::native_session_headers(&metadata).is_err());
+}
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tracing::Event;
@@ -236,6 +258,7 @@ fn tool_search_function_alias_preserves_other_calls() {
 #[test_case::test_case(true, WireApi::Responses, true; "partial function alias")]
 #[test_case::test_case(true, WireApi::Chat, false; "chat unchanged")]
 #[test_case::test_case(true, WireApi::Anthropic, false; "anthropic unchanged")]
+#[test_case::test_case(true, WireApi::Gemini, false; "gemini unchanged")]
 #[tokio::test]
 async fn tool_search_stream_mapping_preserves_wire_continuation_baseline(
     use_function_alias: bool,

@@ -73,3 +73,18 @@ fn namespace_tools_override_wins_over_provider_default() {
     );
     assert!(namespaced_third_party.capabilities().namespace_tools);
 }
+#[test]
+fn gemini_does_not_inherit_openai_hosted_capabilities() {
+    let mut info = codex_model_provider_info::ModelProviderInfo::create_openai_provider(Some(
+        "https://example.test/v1beta".into(),
+    ));
+    info.wire_api = codex_model_provider_info::WireApi::Gemini;
+    let capabilities = super::ProviderCapabilities::from_config(&info);
+    assert!(!capabilities.namespace_tools);
+    assert!(!capabilities.image_generation);
+    assert!(!capabilities.web_search);
+    assert_eq!(
+        capabilities.remote_compaction,
+        codex_model_provider_info::RemoteCompactionSupport::Unsupported
+    );
+}

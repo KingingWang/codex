@@ -93,16 +93,18 @@ env_key_instructions = "请设置 MY_LLM_API_KEY 环境变量为你的 API Key"
 # "responses"（默认）— 使用 OpenAI Responses API（/v1/responses）
 # "chat"             — 使用 Chat Completions API（/v1/chat/completions）
 # "anthropic"        — 使用 Anthropic Messages API（/v1/messages）
+# "gemini"           — 使用 Google 原生 GenerateContent API（/v1beta/models/{model}:generateContent）
 #
 # 大多数第三方兼容端点（如 vLLM、Ollama、OneAPI、LiteLLM 等）
 # 只支持 Chat Completions API，请设置为 "chat"。
 # Anthropic 或 Anthropic 兼容网关请设置为 "anthropic"。
+# Google Gemini 或 Gemini 兼容网关请设置为 "gemini"。
 wire_api = "chat"
 
 # ----------------------------------------------------------
 # 流式模式：chat_stream
 # ----------------------------------------------------------
-# 在 wire_api = "chat" 或 "anthropic" 时生效。
+# 在 wire_api = "chat"、"anthropic" 或 "gemini" 时生效。
 # false（默认）— 非流式请求，等待完整响应后一次性返回
 # true         — 使用 SSE 流式传输，逐 token 实时输出
 #
@@ -247,14 +249,32 @@ chat_stream = true
 # http_headers = { "X-Project" = "codex" }
 ```
 
-#### 场景 6：本地 Ollama
+#### 场景 6：Google Gemini 原生 API
+
+适用于 Google AI Studio 或兼容 Google GenerateContent 协议的网关。`base_url` 需要包含版本前缀；客户端会自动追加 `models/{model}:generateContent`，或在 `chat_stream = true` 时追加 `models/{model}:streamGenerateContent?alt=sse`。
+
+```toml
+model_provider = "gemini"
+model = "gemini-3-flash-preview"
+
+[model_providers.gemini]
+name = "Gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+env_key = "GEMINI_API_KEY"
+wire_api = "gemini"
+chat_stream = true
+```
+
+详细说明见 [docs/gemini.md](docs/gemini.md)。
+
+#### 场景 7：本地 Ollama
 
 ```toml
 model_provider = "ollama"
 model = "qwen2.5-coder:32b"
 ```
 
-#### 场景 7：本地 LM Studio
+#### 场景 8：本地 LM Studio
 
 ```toml
 model_provider = "lmstudio"
@@ -290,10 +310,10 @@ codex --local-provider ollama --model qwen2.5-coder:32b
 |------|------|--------|------|
 | `model_provider` | string | — | 选择使用的提供商 ID |
 | `model` | string | — | 模型名称 |
-| `base_url` | string | — | API 基础 URL；Responses/Chat 通常填到 `/v1`，Anthropic 填 provider 根地址 |
+| `base_url` | string | — | API 基础 URL；Responses/Chat 通常填到 `/v1`，Anthropic 填 provider 根地址，Gemini 填到 `/v1beta` |
 | `env_key` | string | — | 存储 API Key 的环境变量名 |
-| `wire_api` | string | `"responses"` | 协议：`"responses"`、`"chat"` 或 `"anthropic"` |
-| `chat_stream` | bool | `false` | 是否启用 SSE 流式（`chat` / `anthropic` 协议有效） |
+| `wire_api` | string | `"responses"` | 协议：`"responses"`、`"chat"`、`"anthropic"` 或 `"gemini"` |
+| `chat_stream` | bool | `false` | 是否启用 SSE 流式（`chat` / `anthropic` / `gemini` 协议有效） |
 | `request_max_retries` | int | `4` | HTTP 请求最大重试次数 |
 | `stream_max_retries` | int | `5` | 流式重连最大次数 |
 | `stream_idle_timeout_ms` | int | `300000` | 流式空闲超时（毫秒） |
@@ -325,6 +345,22 @@ codex
 ```
 
 每次请求会写入类似 `anthropic-stream-<unix_nanos>.json` 或 `anthropic-nonstream-<unix_nanos>.json` 的文件，可对比连续 turn 的前缀是否发生漂移。注意 dump 中可能包含提示词、代码片段、图片 base64 和工具参数，请只写入受信任目录并按敏感数据处理。
+
+---
+
+## Gemini 支持说明
+
+新增 Google 原生 GenerateContent 协议适配，可通过 `wire_api = "gemini"` 使用。
+
+- `base_url` 需要填到版本前缀（例如 `https://generativelanguage.googleapis.com/v1beta`）。
+- 非流式请求路径为 `models/{model}:generateContent`；`chat_stream = true` 时为 `models/{model}:streamGenerateContent?alt=sse`。
+- 默认把已解析的 bearer key 改写为 `x-goog-api-key`；显式配置 `Authorization` 可保留 OAuth 或网关 bearer 认证。
+- 与其他协议一样携带 `x-session-id`、`x-session-affinity`、`x-codex-window-id`，子会话还会携带 `x-parent-session-id`。
+- 错误重试复用现有 provider/request/stream 重试逻辑；`continuationToken` 会从断点续传，而不是重放已生成内容。
+- Gemini implicit cache 不需要 OpenAI `promptCacheKey` 或 Anthropic `cache_control`；请求保持系统前缀、工具定义和历史内容稳定，并回传 `cachedContentTokenCount`。
+- 工具 schema 使用 `parametersJsonSchema`，并处理 Gemini 不接受的旧版 JSON Schema、递归 `$ref`、工具签名和模型版本差异。
+
+详细说明见 [docs/gemini.md](docs/gemini.md)。
 
 ---
 
