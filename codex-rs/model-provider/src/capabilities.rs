@@ -3,6 +3,7 @@
 use codex_api::is_azure_responses_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::RemoteCompactionSupport;
+use codex_model_provider_info::WireApi;
 
 /// Optional provider-backed features that Codex may expose at runtime.
 ///
@@ -34,6 +35,17 @@ impl Default for ProviderCapabilities {
 
 impl ProviderCapabilities {
     pub(crate) fn from_config(info: &ModelProviderInfo) -> Self {
+        if info.wire_api == WireApi::Gemini {
+            // This adapter implements function tools, not OpenAI hosted tools,
+            // compaction endpoints, or the Responses namespace dialect.
+            return Self {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: false,
+                external_web_access: false,
+                remote_compaction: RemoteCompactionSupport::Unsupported,
+            };
+        }
         let defaults = Self {
             // Tool namespaces are an OpenAI Responses dialect. Third-party
             // gateways typically flatten or reject them (for example two MCP

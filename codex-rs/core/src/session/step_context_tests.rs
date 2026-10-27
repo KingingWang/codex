@@ -102,6 +102,7 @@ async fn incremental_tools_gate_requires_responses_wire_api() {
         (WireApi::Responses, true, false, false),
         (WireApi::Chat, true, true, false),
         (WireApi::Anthropic, true, true, false),
+        (WireApi::Gemini, true, true, false),
     ];
     for (wire_api, use_responses_lite, feature_enabled, expected) in cases {
         let (session, mut turn) = make_session_and_context().await;
