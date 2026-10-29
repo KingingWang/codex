@@ -85,8 +85,8 @@ Settings:
 -- request 8 (turn) --
 15:message/developer:
     Catalog update: retain earlier tools unless explicitly removed.
-16:additional_tools/developer (1; hash=d436d651bf8b57b0):
-        - namespace/functions: Use these echo tools.; hash=8b9887e764d8cfd4
+16:additional_tools/developer (1; hash=765a16d02790ba8a):
+        - namespace/functions; hash=eeeb59e3b0ff8b3c
           - function/cwd
           - function/echo
 17:message/developer:
@@ -95,15 +95,11 @@ Settings:
 18:message/user:
     Continue with the echo tools in the functions namespace.
 -- request 9 (turn) --
-19:message/developer:
-    Catalog functions: Keep {name} and {instructions} literal.
-20:message/user:
+19:message/user:
     Continue with updated echo instructions.
 -- request 10 (turn) --
-21:message/developer:
-    Cleared functions.
-22:message/user:
+20:message/user:
     Continue after clearing echo instructions.
 -- request 11 (turn) --
-23:message/user:
+21:message/user:
     Continue with the same cleared instructions.

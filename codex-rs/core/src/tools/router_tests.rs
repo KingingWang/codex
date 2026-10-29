@@ -230,7 +230,10 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
     );
     assert_eq!(call.call_id, "call-namespace");
     assert_eq!(call.encrypted_function_args, Some(Vec::new()));
-    assert_eq!(call.direct_source(), ToolCallSource::Direct);
+    assert_eq!(
+        call.direct_source(Some("agent_tools")),
+        ToolCallSource::Direct
+    );
     match call.payload {
         ToolPayload::Function { arguments } => {
             assert_eq!(arguments, "{}");
@@ -273,28 +276,30 @@ async fn build_custom_tool_call_uses_namespace_for_registry_name() -> anyhow::Re
 }
 
 #[test]
-fn direct_collaboration_messages_are_plaintext_unless_arguments_are_encrypted() {
-    let base_call = |encrypted_function_args| ToolCall {
-        tool_name: ToolName::namespaced("collaboration", "spawn_agent"),
-        call_id: "call-message".to_string(),
-        payload: ToolPayload::Function {
-            arguments: r#"{"message":"task"}"#.to_string(),
-        },
-        encrypted_function_args,
-    };
-
-    assert_eq!(
-        base_call(None).direct_source(),
-        ToolCallSource::DirectPlaintextMessage
-    );
-    assert_eq!(
-        base_call(Some(Vec::new())).direct_source(),
-        ToolCallSource::DirectPlaintextMessage
-    );
-    assert_eq!(
-        base_call(Some(vec!["message".to_string()])).direct_source(),
-        ToolCallSource::Direct
-    );
+fn direct_v2_messages_use_the_configured_plaintext_namespace() {
+    for namespace in [Some("agent_tools"), Some("custom_agents"), None] {
+        for name in ["spawn_agent", "send_message", "followup_task"] {
+            for encrypted_function_args in [None, Some(Vec::new()), Some(vec!["message".into()])] {
+                let call = ToolCall {
+                    tool_name: ToolName::new(namespace.map(str::to_owned), name)
+                        .with_default_namespace(),
+                    call_id: "call-message".to_string(),
+                    payload: ToolPayload::Function {
+                        arguments: r#"{"message":"task"}"#.to_string(),
+                    },
+                    encrypted_function_args,
+                };
+                assert_eq!(
+                    call.direct_source(namespace),
+                    ToolCallSource::DirectPlaintextMessage
+                );
+                assert_eq!(
+                    call.direct_source(Some("other_tools")),
+                    ToolCallSource::Direct
+                );
+            }
+        }
+    }
 }
 
 #[test]

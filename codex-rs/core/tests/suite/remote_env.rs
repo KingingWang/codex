@@ -3011,7 +3011,7 @@ async fn deferred_executor_stays_pending_after_materialization() -> Result<()> {
 }
 
 #[test_case(false, "multi_agent_v1"; "v1")]
-#[test_case(true, "collaboration"; "v2")]
+#[test_case(true, "agent_tools"; "v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
     multi_agent_v2: bool,

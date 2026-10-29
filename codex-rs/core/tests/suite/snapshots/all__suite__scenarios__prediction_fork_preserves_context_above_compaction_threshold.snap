@@ -16,7 +16,7 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=696793f2090ba3e3):
+00:additional_tools/developer (3; hash=ded22a443c796bf3):
         - namespace/functions; hash=eb439da1f745d8d5
           - custom/exec
           - function/wait
@@ -25,7 +25,7 @@ Settings:
           - function/new_context
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=8c17237101a4ce2d
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -88,7 +88,7 @@ Settings:
 
     You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
     `send_message` calls may be read by a human, so ensure they are legible. Always put proper spaces between words and/or numbers.
-    <OMITTED 17 LINES; ~246 TOKENS; hash=780031e2df907944>
+    <OMITTED 17 LINES; ~239 TOKENS; hash=8b6c7c6c40b09db7>
     - All agents use the same current working directory.
     - As a result, edits made by one agent are immediately visible to all other agents.
 

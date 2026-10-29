@@ -104,11 +104,7 @@ pub(crate) async fn pending_subagent_scenario(
         .and(path("/v1/responses"))
         .respond_with(move |request: &wiremock::Request| {
             let body: Value = request.body_json().expect("model request body");
-            let namespace = if v1 {
-                "multi_agent_v1"
-            } else {
-                "collaboration"
-            };
+            let namespace = if v1 { "multi_agent_v1" } else { "agent_tools" };
             let tool = |id, namespace, name, args: Value| {
                 ev_function_call_with_namespace(id, namespace, name, &args.to_string())
             };

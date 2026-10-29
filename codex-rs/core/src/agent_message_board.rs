@@ -57,7 +57,12 @@ pub fn install_agent_message_board(
     codex_agent_message_board_extension::install(
         registry,
         MULTI_AGENT_V2_NAMESPACE_DESCRIPTION,
-        |config: &Config| config.multi_agent_v2.tool_namespace.clone(),
+        |config: &Config| {
+            config
+                .multi_agent_v2
+                .effective_tool_namespace()
+                .map(str::to_owned)
+        },
         move |input: &ThreadStartInput<'_, Config>, tree, caller| {
             let config = input.config;
             let connection = input.thread_store.get::<LocalBoardConnection>();

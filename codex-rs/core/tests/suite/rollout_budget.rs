@@ -26,7 +26,7 @@ use std::time::Duration;
 use test_case::test_case;
 use tokio::time::timeout;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agent_tools";
 
 fn rollout_budget() -> RolloutBudgetConfig {
     RolloutBudgetConfig {
