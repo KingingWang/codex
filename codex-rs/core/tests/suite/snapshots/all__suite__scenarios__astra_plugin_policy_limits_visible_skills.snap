@@ -55,19 +55,11 @@ Settings:
         A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list ...ed into an absolute path using the skill roots table. [hash=ca27c3957f42502b]
         ### Skill roots
         - `r0` = `<SKILLS_ROOT>`
-        - `r1` = `<SKILLS_ROOT>`
-        - `r2` = `<PLUGINS_CACHE>/openai-curated-remote`
+        - `r1` = `<PLUGINS_CACHE>/openai-curated-remote`
         ### Available skills
-        - calendar:agenda: Plan a team agenda (file: r2/calendar/local/skills/agenda/SKILL.md)
-        - codez-computer-use: Use when a task needs to read or operate a native desktop app's own UI or the OS v...in agent only. (file: r1/codez-computer-use/SKILL.md) [hash=65e91e279712c14d]
-        - d2-diagrams: Creates professional diagrams as code with D2 (d2lang.com) and renders them to SVG — arch...xcalidraw JSON files. (file: r1/d2-diagrams/SKILL.md) [hash=b817fc15aa61ccd4]
-        - diagram-design: Create technical and product diagrams — architecture, IT current-state, flowchart, seq...l sketchy variant. (file: r1/diagram-design/SKILL.md) [hash=f1ac78bba00b536c]
+        - calendar:agenda: Plan a team agenda (file: r1/calendar/local/skills/agenda/SKILL.md)
         - final-check: Review a final brief (file: r0/final-check/SKILL.md)
-        - find-skills: Helps users discover and install agent skills when they ask questions like "how do I do X...an installable skill. (file: r1/find-skills/SKILL.md) [hash=c78de2e2bcabf454]
-        - officecli: Create, analyze, proofread, and modify Office documents (.docx, .xlsx, .pptx) using the off...odify Office documents. (file: r1/officecli/SKILL.md) [hash=45e2d24d8e628acc]
         - outline: Draft a project outline (file: r0/outline/SKILL.md)
-        - plantuml-skill: Use when user requests diagrams, flowcharts, sequence diagrams, class diagrams, compon...install required). (file: r1/plantuml-skill/SKILL.md) [hash=7dc42c256b0f6ca5]
-        - yuque: Provides Yuque (Skylark) document and knowledge-base operations via ali-mcpcli. Use when the us...luence, Google Docs, etc.). (file: r1/yuque/SKILL.md) [hash=b87f935dd8821391]
         </skills_instructions>
     [02] <permissions instructions>
         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`...ll commands are permitted. Network access is enabled. [hash=c134061cebb94a1b]

@@ -192,7 +192,8 @@ fn credential_export_errors_distinguish_configuration_failures_from_retryable_au
                 "{CREDENTIAL_EXPORT_CONFIG_ERROR_PREFIX} invalid credentials JSON"
             ))),
             false,
-            false,
+            // Fork: generic `InvalidRequest` errors are intentionally retryable (331ab629c8).
+            true,
         ),
         (
             ApiError::Transport(TransportError::Build(
