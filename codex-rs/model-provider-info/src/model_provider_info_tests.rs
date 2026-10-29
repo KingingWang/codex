@@ -659,6 +659,10 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
     );
 }
 
+/// Ignored in this fork: the built-in GCP/Vertex provider is not bundled, so a
+/// configured `gcp` entry is merged as a custom provider instead of overriding a
+/// built-in one.
+#[ignore = "fork: GCP is not a built-in provider, so there is no built-in entry to override"]
 #[test]
 fn test_merge_configured_model_providers_applies_gcp_transport_overrides() {
     let auth = provider_auth_for_test();
@@ -693,6 +697,10 @@ fn test_merge_configured_model_providers_applies_gcp_transport_overrides() {
     );
 }
 
+/// Ignored in this fork: the built-in GCP/Vertex provider is not bundled, so a
+/// configured `gcp` entry is merged as a custom provider instead of overriding a
+/// built-in one.
+#[ignore = "fork: GCP is not a built-in provider, so there is no built-in entry to override"]
 #[test]
 fn test_merge_configured_model_providers_applies_gcp_endpoint_override() {
     let configured_model_providers = std::collections::HashMap::from([(

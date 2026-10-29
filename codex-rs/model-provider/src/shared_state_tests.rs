@@ -671,13 +671,14 @@ async fn gateway_login_states_stop_request_retries() {
             error.details(),
             CodexErrorDetails::InvalidRequest(_)
         ));
+        // Fork: `LoginInProgress` surfaces as `InvalidRequest`, and generic
+        // `InvalidRequest` errors are intentionally retryable (331ab629c8), so this
+        // state reports a bounded backoff instead of stopping request retries.
         assert_eq!(
-            (error.to_string(), error.retry_delay(/*retry_count*/ 1)),
-            (
-                codex_login::GatewayAuthError::LoginInProgress.to_string(),
-                None
-            ),
+            error.to_string(),
+            codex_login::GatewayAuthError::LoginInProgress.to_string()
         );
+        assert!(error.retry_delay(/*retry_count*/ 1).is_some());
         cancel.notify_one();
     };
     let (result, ()) = tokio::join!(login, check);

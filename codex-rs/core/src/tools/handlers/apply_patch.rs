@@ -435,12 +435,16 @@ impl CoreToolRuntime for ApplyPatchHandler {
         &self,
         invocation: &ToolInvocation,
     ) -> Result<ToolEnvironments, FunctionCallError> {
-        let ToolPayload::Custom { input } = &invocation.payload else {
+        // Fork: apply_patch also arrives as a JSON function tool call on wire
+        // protocols without freeform/custom tool support (chat completions,
+        // Anthropic, Gemini), so reuse the same payload extraction as `handle`
+        // instead of requiring `ToolPayload::Custom`.
+        let Some(input) = apply_patch_payload_command(&invocation.payload) else {
             return Err(FunctionCallError::Fatal(
                 "expected apply_patch input".to_string(),
             ));
         };
-        let args = codex_apply_patch::parse_patch(input).map_err(|err| {
+        let args = codex_apply_patch::parse_patch(&input).map_err(|err| {
             FunctionCallError::RespondToModel(format!("apply_patch verification failed: {err}"))
         })?;
         let environment_id =

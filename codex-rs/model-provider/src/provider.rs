@@ -970,7 +970,10 @@ mod tests {
             .recover_from_unauthorized()
             .await
             .expect_err("non-aws command should be rejected");
-        assert_eq!(error.retry_delay(/*retry_count*/ 1), None);
+        // Fork: this configuration error surfaces as `InvalidRequest`, and generic
+        // `InvalidRequest` errors are intentionally retryable (331ab629c8), so it
+        // reports a bounded backoff instead of being terminal.
+        assert!(error.retry_delay(/*retry_count*/ 1).is_some());
         assert_eq!(error.to_string(), "AWS auth refresh command must be `aws`");
 
         let (first_result, second_result) = tokio::join!(

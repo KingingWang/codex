@@ -134,7 +134,9 @@ async fn vertex_requests_use_command_auth_with_namespaces_and_tool_search(
         test.codex.multi_agent_version(),
         Some(MultiAgentVersion::V2)
     );
-    assert!(tools.iter().any(|tool| tool["name"] == "collaboration"));
+    // Fork: the default multi-agent V2 tool namespace is `agent_tools`; a configured
+    // legacy `collaboration` namespace is migrated to it.
+    assert!(tools.iter().any(|tool| tool["name"] == "agent_tools"));
     let namespace = tools.iter().find(|tool| tool["name"] == "records");
     assert_eq!(
         namespace,
