@@ -682,6 +682,7 @@ other non-default provider fields are not supported"
             aws: None,
             capabilities: None,
             wire_api: WireApi::Responses,
+            chat_stream: false,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -692,6 +693,7 @@ other non-default provider fields are not supported"
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         }
     }

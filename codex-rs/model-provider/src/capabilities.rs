@@ -40,6 +40,7 @@ impl ProviderCapabilities {
             // compaction endpoints, or the Responses namespace dialect.
             return Self {
                 namespace_tools: false,
+                reasoning_summaries: false,
                 image_generation: false,
                 web_search: false,
                 external_web_access: false,

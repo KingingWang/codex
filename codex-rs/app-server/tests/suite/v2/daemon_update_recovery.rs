@@ -749,7 +749,7 @@ async fn managed_shutdown_records_interrupted_turn(outcome: &str) -> Result<()> 
         .next()
         .context("collaboration instructions")?;
     assert_eq!(
-        agent_tools.contains("# Plan Mode"),
+        collaboration.contains("# Plan Mode"),
         mode == "plan",
         "{input}"
     );

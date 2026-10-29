@@ -380,6 +380,11 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::Retryable { .. } => "transient error".to_string(),
         ApiError::RateLimit(_) => "HTTP 429 rate limit".to_string(),
         ApiError::InvalidRequest { .. } => "invalid request".to_string(),
+        ApiError::ModelNotFound {
+            status: Some(status),
+            ..
+        } => format!("HTTP {status} model not found"),
+        ApiError::ModelNotFound { .. } => "model not found".to_string(),
         ApiError::InvalidPrompt { .. } => "invalid prompt".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
