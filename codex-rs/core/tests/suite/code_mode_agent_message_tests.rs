@@ -1,5 +1,6 @@
 //! Exec-spawned tasks reach the child model as attributed plaintext.
 
+use anyhow::Context;
 use anyhow::Result;
 use codex_features::Feature;
 use codex_protocol::openai_models::ToolMode;
@@ -19,10 +20,13 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use test_case::test_case;
 use wiremock::matchers::header;
 
+#[test_case(false; "websocket")]
+#[test_case(true; "grpc")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_spawn_delivers_plaintext() -> Result<()> {
+async fn code_mode_spawn_delivers_plaintext(use_grpc: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -32,18 +36,22 @@ async fn code_mode_spawn_delivers_plaintext() -> Result<()> {
             model.tool_mode = Some(ToolMode::CodeMode);
             model.use_responses_lite = true;
         })
-        .with_config(|config| {
+        .with_config(move |config| {
             for feature in [
                 Feature::Collab,
                 Feature::MultiAgentV2,
                 Feature::CodeMode,
-                Feature::CodeModeHostGrpc,
+                Feature::CodeModeHost,
             ] {
                 config
                     .features
                     .enable(feature)
                     .expect("enable test feature");
             }
+            config
+                .features
+                .set_enabled(Feature::CodeModeHostGrpc, use_grpc)
+                .expect("select code-mode transport");
             config.multi_agent_v2.non_code_mode_only = false;
         })
         .build_with_auto_env(&server)
@@ -59,13 +67,13 @@ async fn code_mode_spawn_delivers_plaintext() -> Result<()> {
             ev_custom_tool_call(
                 "spawn-worker",
                 "exec",
-                r#"text(await tools.collaboration__spawn_agent({task_name: "worker", message: "Summarize the three stories.", fork_turns: "all"}));"#,
+                r#"text(await tools.agent_tools__spawn_agent({task_name: "worker", message: "Summarize the three stories.", fork_turns: "all"}));"#,
             ),
             ev_completed("spawn"),
         ]),
     )
     .await;
-    mount_sse_once_match(
+    let root_requests = mount_sse_once_match(
         &server,
         header("thread-id", root_header.as_str()),
         sse(vec![
@@ -86,7 +94,18 @@ async fn code_mode_spawn_delivers_plaintext() -> Result<()> {
     )
     .await;
     test.submit_turn("Delegate the summary task.").await?;
-    let child_id = created.try_recv()?;
+    let child_id = created.try_recv().with_context(|| {
+        let outputs = root_requests
+            .requests()
+            .iter()
+            .flat_map(|request| {
+                let mut outputs = request.inputs_of_type("function_call_output");
+                outputs.extend(request.inputs_of_type("custom_tool_call_output"));
+                outputs
+            })
+            .collect::<Vec<_>>();
+        format!("Code Mode did not create a child; exec outputs: {outputs:?}")
+    })?;
     let child = test.thread_manager.get_thread(child_id).await?;
     wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 

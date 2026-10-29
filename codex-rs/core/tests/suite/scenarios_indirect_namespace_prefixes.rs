@@ -72,14 +72,14 @@ async fn catalog_namespace_prefixes_follow_the_selected_model(
         ),
         (
             "prefixes-cleared",
-            json!({"functions": "", "collaboration": ""}),
+            json!({"functions": "", "agent_tools": ""}),
             "",
         ),
         (
             "gpt-5.5",
             json!({
                 "functions": "  Functions context.  ",
-                "collaboration": "Agents context.",
+                "agent_tools": "Agents context.",
             }),
             "Reports context.",
         ),
@@ -105,10 +105,10 @@ async fn catalog_namespace_prefixes_follow_the_selected_model(
     let test = builder.build_with_auto_env(&server).await?;
     wait_for_mcp_server(&test.codex, "reports.one").await?;
     let script = r#"
-const descriptions = ["view_image", "collaboration__list_agents", "mcp__reports_one__echo"]
+const descriptions = ["view_image", "agent_tools__list_agents", "mcp__reports_one__echo"]
   .map(name => ALL_TOOLS.find(t => t.name === name).description);
 const report = await tools.mcp__reports_one__echo({message: "ping"});
-const agents = await tools.collaboration__list_agents({});
+const agents = await tools.agent_tools__list_agents({});
 text({descriptions, echo: report.structuredContent.echo, agent: agents.agents[0].agent_name});
 "#;
     let mock = responses::mount_sse_sequence(

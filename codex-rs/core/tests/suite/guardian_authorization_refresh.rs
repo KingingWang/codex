@@ -70,7 +70,7 @@ async fn guardian_refreshes_subagent_authorization(change: Change) -> Result<()>
             body: sse(vec![
                 ev_response_created("root-spawn"),
                 ev_function_call_with_namespace(
-                    "spawn-worker", "collaboration", "spawn_agent",
+                    "spawn-worker", "agent_tools", "spawn_agent",
                     &json!({"task_name": "worker", "message": "Write the requested marker once."}).to_string(),
                 ),
             ]),

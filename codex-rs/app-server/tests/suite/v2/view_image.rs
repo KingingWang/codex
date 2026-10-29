@@ -76,7 +76,7 @@ async fn fresh_context_subagent_inherits_disabled_view_image_and_mcp_tools() -> 
             responses::ev_response_created("parent-spawn"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &serde_json::to_string(&json!({
                     "message": CHILD_PROMPT,

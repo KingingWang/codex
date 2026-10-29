@@ -712,7 +712,7 @@ async fn input_interrupts_wait_agent_and_is_sent_in_follow_up_request(input: Wai
     const WAIT_CALL_ID: &str = "wait-call";
     const INITIAL_PROMPT: &str = "wait for an agent";
     const STEER_PROMPT: &str = "stop waiting and continue";
-    const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+    const MULTI_AGENT_V2_NAMESPACE: &str = "agent_tools";
 
     let (release_wait, wait_gate) = oneshot::channel();
     let first_chunks = vec![
@@ -2341,10 +2341,7 @@ async fn terminal_compaction_error_does_not_retry_pending_input(
     wait_for_event(codex, |event| {
         match event {
             EventMsg::Error(error) => {
-                assert_eq!(
-                    error.codex_error_info,
-                    Some(CodexErrorInfo::InvalidPrompt)
-                );
+                assert_eq!(error.codex_error_info, Some(CodexErrorInfo::InvalidPrompt));
                 errors.push(error.clone());
             }
             EventMsg::TurnComplete(completed) => {

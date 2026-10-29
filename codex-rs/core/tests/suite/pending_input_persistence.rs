@@ -639,7 +639,7 @@ async fn cancelled_spawn_discards_provisional_child(caller: SpawnCaller) -> anyh
             json!({"message":"child startup task", "task_name":"worker", "fork_context":true}),
         ),
         SpawnCaller::NativeV2 => (
-            "collaboration",
+            "agent_tools",
             json!({"message":"child startup task", "task_name":"worker", "fork_turns":"all"}),
         ),
     };

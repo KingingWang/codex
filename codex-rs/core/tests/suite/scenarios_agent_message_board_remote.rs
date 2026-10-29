@@ -140,13 +140,13 @@ async fn remote_board_uses_the_existing_tools_and_session_identity() -> anyhow::
             responses::sse(vec![
                 responses::ev_function_call_with_namespace(
                     "remote-post",
-                    "collaboration",
+                    "agent_tools",
                     "post",
                     &json!({"new_channel_name":"design", "text":"A remote decision."}).to_string(),
                 ),
                 responses::ev_function_call_with_namespace(
                     "await-notification",
-                    "collaboration",
+                    "agent_tools",
                     "wait_agent",
                     "{}",
                 ),
@@ -323,7 +323,7 @@ async fn remote_board_effective_permissions_and_denials(code_mode: bool) -> anyh
                 responses::ev_custom_tool_call(
                     call_id,
                     "exec",
-                    &format!("text(await tools.collaboration__{tool_name}({arguments}));"),
+                    &format!("text(await tools.agent_tools__{tool_name}({arguments}));"),
                 ),
                 responses::ev_completed(call_id),
             ])

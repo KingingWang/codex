@@ -259,7 +259,7 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usiz
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
-const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
+const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "agent_tools";
 
 pub(crate) const HARD_MIN_MULTI_AGENT_V2_TIMEOUT_MS: i64 = 0;
 pub(crate) const HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS: i64 =
@@ -1409,6 +1409,15 @@ pub struct MultiAgentV2Config {
 }
 
 impl MultiAgentV2Config {
+    /// The OpenAI-reserved collaboration namespace requires encrypted messages.
+    /// Migrate legacy configurations to our plaintext tool namespace.
+    pub(crate) fn effective_tool_namespace(&self) -> Option<&str> {
+        match self.tool_namespace.as_deref() {
+            Some("collaboration") => Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE),
+            namespace => namespace,
+        }
+    }
+
     fn defaults_for_max_concurrency(max_concurrent_threads_per_session: usize) -> Self {
         Self {
             max_concurrent_threads_per_session,
@@ -2914,7 +2923,14 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let tool_namespace = base
         .and_then(|config| config.tool_namespace.as_ref())
         .cloned()
-        .or(default.tool_namespace);
+        .or(default.tool_namespace)
+        .map(|namespace| {
+            if namespace == "collaboration" {
+                DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE.to_string()
+            } else {
+                namespace
+            }
+        });
     let non_code_mode_only = base
         .and_then(|config| config.non_code_mode_only)
         .unwrap_or(default.non_code_mode_only);

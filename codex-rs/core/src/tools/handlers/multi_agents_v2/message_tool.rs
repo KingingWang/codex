@@ -51,7 +51,6 @@ pub(super) async fn handle_message_string_tool(
         session,
         turn,
         call_id,
-        source,
         ..
     } = invocation;
     let receiver_thread_id = resolve_agent_target(&session, &turn, &target).await?;
@@ -66,7 +65,7 @@ pub(super) async fn handle_message_string_tool(
             target: AgentTarget::Id(receiver_thread_id),
             resume_config,
             input: AgentInput::Message {
-                message: agent_message_from_tool(message, &source),
+                message: AgentMessage::Plaintext(message),
                 mode,
             },
             start_options: TurnStartOptions {

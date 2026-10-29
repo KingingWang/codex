@@ -760,7 +760,10 @@ fn required_child_management_tool_names(
             &["send_input", "wait_agent", "resume_agent", "close_agent"],
         ),
         MultiAgentVersion::V2 => (
-            turn_context.config.multi_agent_v2.tool_namespace.as_deref(),
+            turn_context
+                .config
+                .multi_agent_v2
+                .effective_tool_namespace(),
             if turn_context.config.multi_agent_v2.disable_direct_message {
                 &["interrupt_agent", "list_agents"]
             } else {
@@ -1497,7 +1500,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             } else {
                 ToolExposure::Direct
             };
-            let tool_namespace = turn_context.config.multi_agent_v2.tool_namespace.as_deref();
+            let tool_namespace = turn_context
+                .config
+                .multi_agent_v2
+                .effective_tool_namespace();
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =

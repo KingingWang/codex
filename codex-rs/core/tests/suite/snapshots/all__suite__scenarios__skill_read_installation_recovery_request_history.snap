@@ -1,13 +1,12 @@
 ---
 source: core/tests/suite/scenarios.rs
-assertion_line: 1456
 expression: "context_snapshot::format_context_snapshot(\"Astra reads Cloud instructions, discovers an omitted deployment installation, and reads its instructions from env-04.\",\n&bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>(),\n&ContextSnapshotOptions::default().rewrite_known_segments(),)"
 ---
 Scenario: Astra reads Cloud instructions, discovers an omitted deployment installation, and reads its instructions from env-04.
 
 ## Window 1
 -- request 1 (request) --
-00:additional_tools/developer (3; hash=e075a43448be3246):
+00:additional_tools/developer (3; hash=0f5d92f4fb98aabc):
         - namespace/functions; hash=bbcd688349ca7e12
           - custom/exec
           - function/wait
@@ -15,7 +14,7 @@ Scenario: Astra reads Cloud instructions, discovers an omitted deployment instal
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=8c17237101a4ce2d
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents

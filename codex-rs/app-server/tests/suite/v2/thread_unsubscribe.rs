@@ -657,7 +657,7 @@ async fn v2_child_idle_eviction_preserves_mail_and_followup_context() -> Result<
             responses::sse(vec![
                 responses::ev_function_call_with_namespace(
                     &call_id,
-                    "collaboration",
+                    "agent_tools",
                     tool,
                     &args.to_string(),
                 ),

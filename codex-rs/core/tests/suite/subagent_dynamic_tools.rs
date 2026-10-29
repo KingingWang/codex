@@ -51,7 +51,7 @@ async fn fresh_v2_subagent_can_call_parent_dynamic_tool_when_enabled() -> Result
             ev_response_created("root-spawn"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &spawn_args.to_string(),
             ),

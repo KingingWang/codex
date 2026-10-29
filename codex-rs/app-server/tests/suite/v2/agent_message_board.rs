@@ -16,7 +16,7 @@ use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
-#[test_case::test_case(None, "collaboration"; "default_namespace")]
+#[test_case::test_case(None, "agent_tools"; "default_namespace")]
 #[test_case::test_case(Some("agents"), "agents"; "configured_namespace")]
 #[tokio::test]
 async fn board_tools_share_multi_agent_namespace(
