@@ -409,7 +409,7 @@ pub(super) async fn code_mode_guardian_request_history() -> Result<Vec<Responses
                 ev_response_created("root-spawn"),
                 ev_function_call_with_namespace(
                     SPAWN_CALL_ID,
-                    "collaboration",
+                    "agent_tools",
                     "spawn_agent",
                     &json!({"message": INITIAL_TASK, "task_name": "worker"}).to_string(),
                 ),
@@ -829,7 +829,7 @@ async fn run_guardian_subagent_review(
             ev_response_created("root-spawn-response"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({ "message": INITIAL_TASK, "task_name": "worker" }).to_string(),
             ),
@@ -1097,7 +1097,7 @@ async fn run_guardian_subagent_review(
     .await;
     let mut followup_call = ev_function_call_with_namespace(
         FOLLOWUP_CALL_ID,
-        "collaboration",
+        "agent_tools",
         "followup_task",
         &json!({ "target": "worker", "message": FORWARDED_AGENT_MESSAGE }).to_string(),
     );

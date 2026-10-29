@@ -369,8 +369,8 @@ impl Session {
         let v2_namespace = turn_context
             .config
             .multi_agent_v2
-            .tool_namespace
-            .clone()
+            .effective_tool_namespace()
+            .map(str::to_owned)
             .map(ContentItemNamespace::from)
             .unwrap_or(ContentItemNamespace::Functions);
         let mut multi_agent_mode = MultiAgentModeState::new(
@@ -396,7 +396,11 @@ impl Session {
                 .expose_spawn_agent_model_overrides
                 .then(|| {
                     ToolName::new(
-                        turn_context.config.multi_agent_v2.tool_namespace.clone(),
+                        turn_context
+                            .config
+                            .multi_agent_v2
+                            .effective_tool_namespace()
+                            .map(str::to_owned),
                         "spawn_agent",
                     )
                 }),

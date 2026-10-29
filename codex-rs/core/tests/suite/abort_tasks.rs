@@ -84,7 +84,7 @@ async fn root_turn_suspension_preserves_unfinished_turn_history(fail_child_write
             ev_response_created("spawn_response"),
             ev_function_call_with_namespace(
                 "spawn_worker",
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({
                     "message": "keep working until shutdown",

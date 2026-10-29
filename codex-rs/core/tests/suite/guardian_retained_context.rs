@@ -830,7 +830,7 @@ async fn standalone_fork_retains_inherited_user_instructions(
         vec![
             sse(vec![
                 ev_function_call_with_namespace(
-                    "spawn", "collaboration", "spawn_agent",
+                    "spawn", "agent_tools", "spawn_agent",
                     &json!({"task_name": "worker", "message": "Inspect the project.", "fork_turns": "all"}).to_string(),
                 ),
                 ev_completed("spawn-response"),
@@ -1056,7 +1056,7 @@ async fn forked_parent_instructions_do_not_become_local_authorization(
         sse(vec![
             ev_function_call_with_namespace(
                 "spawn",
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({
                     "task_name": "worker",
@@ -1318,7 +1318,7 @@ async fn retained_answers_cross_real_session_boundaries(
             sse(vec![
                 ev_function_call_with_namespace(
                     "spawn",
-                    "collaboration",
+                    "agent_tools",
                     "spawn_agent",
                     &arguments.to_string(),
                 ),

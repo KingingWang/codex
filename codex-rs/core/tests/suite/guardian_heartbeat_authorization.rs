@@ -39,7 +39,7 @@ async fn heartbeat_keeps_user_restriction_after_status_questions(
         sse(vec![
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({"task_name": "worker", "message": INITIAL_TASK, "fork_turns": "none"})
                     .to_string(),
@@ -225,7 +225,7 @@ async fn heartbeat_root_projection_uses_latest_turn_skills(
             vec![
                 ev_function_call_with_namespace(
                     SPAWN_CALL_ID,
-                    "collaboration",
+                    "agent_tools",
                     "spawn_agent",
                     &json!({"task_name": "worker", "message": INITIAL_TASK}).to_string(),
                 ),

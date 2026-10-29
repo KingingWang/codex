@@ -54,8 +54,8 @@ async fn bedrock_catalog_selects_v2_by_default(
     let request = mock.single_request();
     for tool in ["spawn_agent", "followup_task"] {
         assert!(
-            request.tool_by_name("collaboration", tool).is_some(),
-            "default Bedrock catalog should expose collaboration.{tool}",
+            request.tool_by_name("agent_tools", tool).is_some(),
+            "default Bedrock catalog should expose agent_tools.{tool}",
         );
     }
     Ok(())

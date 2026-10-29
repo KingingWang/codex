@@ -373,7 +373,7 @@ async fn multi_agent_v2_tools_emit_collaborator_analytics() -> Result<()> {
                 responses::ev_response_created(&response_id),
                 responses::ev_function_call_with_namespace(
                     &format!("call-{index}"),
-                    "collaboration",
+                    "agent_tools",
                     tool,
                     &args.to_string(),
                 ),

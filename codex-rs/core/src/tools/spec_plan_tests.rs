@@ -63,7 +63,7 @@ use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::spec_plan::append_source_tools;
 use crate::tools::spec_plan::build_core_tool_registry;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agent_tools";
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -3005,7 +3005,21 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_encrypted() {
+async fn multi_agent_v2_legacy_namespace_registers_plaintext_tools() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.tool_namespace = Some("collaboration".to_string());
+        });
+    })
+    .await;
+    plan.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    plan.assert_visible_lacks(&["collaboration"]);
+    assert!(plan.can_manage_children);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_message_schemas_are_plaintext() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
@@ -3031,7 +3045,7 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
             properties
                 .get("message")
                 .and_then(|schema| schema.encrypted),
-            Some(true)
+            None
         );
     }
 }
@@ -3057,7 +3071,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
         ]
     );
     plan.assert_visible_lacks(&["clock"]);
-    plan.assert_registered_lacks(&["collaboration.wait_agent", "clock.sleep"]);
+    plan.assert_registered_lacks(&["agent_tools.wait_agent", "clock.sleep"]);
     assert!(plan.can_manage_children);
 }
 

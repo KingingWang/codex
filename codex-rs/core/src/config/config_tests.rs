@@ -13084,6 +13084,31 @@ default_wait_timeout_ms = 2500
 }
 
 #[tokio::test]
+async fn multi_agent_v2_migrates_the_reserved_collaboration_namespace() -> std::io::Result<()> {
+    for namespace in ["", "tool_namespace = \"collaboration\""] {
+        let codex_home = TempDir::new()?;
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!("[features.multi_agent_v2]\nenabled = true\n{namespace}\n"),
+        )?;
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .build()
+            .await?;
+        assert_eq!(
+            config.multi_agent_v2.tool_namespace.as_deref(),
+            Some("agent_tools")
+        );
+        assert_eq!(
+            config.multi_agent_v2.effective_tool_namespace(),
+            Some("agent_tools")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn multi_agent_v2_rejects_invalid_tool_namespace() -> std::io::Result<()> {
     for (namespace, expected_message) in [
         (

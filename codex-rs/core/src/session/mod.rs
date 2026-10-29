@@ -4209,8 +4209,8 @@ impl Session {
                             turn_context
                                 .config
                                 .multi_agent_v2
-                                .tool_namespace
-                                .clone()
+                                .effective_tool_namespace()
+                                .map(str::to_owned)
                                 .map(ContentItemNamespace::from)
                                 .unwrap_or(ContentItemNamespace::Functions),
                         ));

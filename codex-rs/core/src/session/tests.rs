@@ -2794,7 +2794,7 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     let mut expected_item = communication.to_model_input_item();
     let mut expected = serde_json::to_value(&expected_item).unwrap();
     expected["internal_chat_message_metadata_passthrough"] = json!({
-        "content_item_metadata": [{"harness_injected": true, "source_tool_namespace": "collaboration"}],
+        "content_item_metadata": [{"harness_injected": true, "source_tool_namespace": "agent_tools"}],
     });
     expected_item = serde_json::from_value(expected).unwrap();
     expected_item.set_turn_id_if_missing(&turn_context.sub_id);

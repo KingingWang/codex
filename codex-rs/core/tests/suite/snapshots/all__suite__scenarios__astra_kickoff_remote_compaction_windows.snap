@@ -16,7 +16,7 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+00:additional_tools/developer (3; hash=4dd9a20404179d87):
         - namespace/functions; hash=fada4a476a3754dd
           - custom/exec
           - function/wait
@@ -24,7 +24,7 @@ Settings:
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=8c17237101a4ce2d
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -55,12 +55,20 @@ Settings:
         A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list ...ed into an absolute path using the skill roots table. [hash=ca27c3957f42502b]
         ### Skill roots
         - `r0` = `<SKILLS_ROOT>`
-        - `r1` = `<PLUGINS_CACHE>/test`
+        - `r1` = `<SKILLS_ROOT>`
+        - `r2` = `<PLUGINS_CACHE>/test`
         ### Available skills
-        - calendar:agenda: Plan a team agenda (file: r1/calendar/local/skills/agenda/SKILL.md)
+        - calendar:agenda: Plan a team agenda (file: r2/calendar/local/skills/agenda/SKILL.md)
+        - codez-computer-use: Use when a task needs to read or operate a native desktop app's own UI or the OS v...in agent only. (file: r1/codez-computer-use/SKILL.md) [hash=65e91e279712c14d]
+        - d2-diagrams: Creates professional diagrams as code with D2 (d2lang.com) and renders them to SVG — arch...xcalidraw JSON files. (file: r1/d2-diagrams/SKILL.md) [hash=b817fc15aa61ccd4]
+        - diagram-design: Create technical and product diagrams — architecture, IT current-state, flowchart, seq...l sketchy variant. (file: r1/diagram-design/SKILL.md) [hash=f1ac78bba00b536c]
         - final-check: Review a final brief (file: r0/final-check/SKILL.md)
-        - notes:summarize: Summarize team notes (file: r1/notes/local/skills/summarize/SKILL.md)
+        - find-skills: Helps users discover and install agent skills when they ask questions like "how do I do X...an installable skill. (file: r1/find-skills/SKILL.md) [hash=c78de2e2bcabf454]
+        - notes:summarize: Summarize team notes (file: r2/notes/local/skills/summarize/SKILL.md)
+        - officecli: Create, analyze, proofread, and modify Office documents (.docx, .xlsx, .pptx) using the off...odify Office documents. (file: r1/officecli/SKILL.md) [hash=45e2d24d8e628acc]
         - outline: Draft a project outline (file: r0/outline/SKILL.md)
+        - plantuml-skill: Use when user requests diagrams, flowcharts, sequence diagrams, class diagrams, compon...install required). (file: r1/plantuml-skill/SKILL.md) [hash=7dc42c256b0f6ca5]
+        - yuque: Provides Yuque (Skylark) document and knowledge-base operations via ali-mcpcli. Use when the us...luence, Google Docs, etc.). (file: r1/yuque/SKILL.md) [hash=b87f935dd8821391]
         </skills_instructions>
     [02] <permissions instructions>
         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
@@ -104,7 +112,7 @@ Settings:
 
     You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
     `send_message` calls may be read by a human, so ensure they are legible. Always put proper spaces between words and/or numbers.
-    <OMITTED 17 LINES; ~246 TOKENS; hash=780031e2df907944>
+    <OMITTED 17 LINES; ~239 TOKENS; hash=8b6c7c6c40b09db7>
     - All agents use the same current working directory.
     - As a result, edits made by one agent are immediately visible to all other agents.
 
@@ -188,7 +196,7 @@ Settings:
 ## Window 2 (after request 3: input diverged at item 02)
 Settings: same as window 1
 -- request 4 (turn) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
+00:additional_tools/developer (3; hash=4dd9a20404179d87):
         - namespace/functions; hash=fada4a476a3754dd
           - custom/exec
           - function/wait
@@ -196,7 +204,7 @@ Settings: same as window 1
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=8c17237101a4ce2d
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -229,12 +237,20 @@ Settings: same as window 1
         A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list ...ed into an absolute path using the skill roots table. [hash=ca27c3957f42502b]
         ### Skill roots
         - `r0` = `<SKILLS_ROOT>`
-        - `r1` = `<PLUGINS_CACHE>/test`
+        - `r1` = `<SKILLS_ROOT>`
+        - `r2` = `<PLUGINS_CACHE>/test`
         ### Available skills
-        - calendar:agenda: Plan a team agenda (file: r1/calendar/local/skills/agenda/SKILL.md)
+        - calendar:agenda: Plan a team agenda (file: r2/calendar/local/skills/agenda/SKILL.md)
+        - codez-computer-use: Use when a task needs to read or operate a native desktop app's own UI or the OS v...in agent only. (file: r1/codez-computer-use/SKILL.md) [hash=65e91e279712c14d]
+        - d2-diagrams: Creates professional diagrams as code with D2 (d2lang.com) and renders them to SVG — arch...xcalidraw JSON files. (file: r1/d2-diagrams/SKILL.md) [hash=b817fc15aa61ccd4]
+        - diagram-design: Create technical and product diagrams — architecture, IT current-state, flowchart, seq...l sketchy variant. (file: r1/diagram-design/SKILL.md) [hash=f1ac78bba00b536c]
         - final-check: Review a final brief (file: r0/final-check/SKILL.md)
-        - notes:summarize: Summarize team notes (file: r1/notes/local/skills/summarize/SKILL.md)
+        - find-skills: Helps users discover and install agent skills when they ask questions like "how do I do X...an installable skill. (file: r1/find-skills/SKILL.md) [hash=c78de2e2bcabf454]
+        - notes:summarize: Summarize team notes (file: r2/notes/local/skills/summarize/SKILL.md)
+        - officecli: Create, analyze, proofread, and modify Office documents (.docx, .xlsx, .pptx) using the off...odify Office documents. (file: r1/officecli/SKILL.md) [hash=45e2d24d8e628acc]
         - outline: Draft a project outline (file: r0/outline/SKILL.md)
+        - plantuml-skill: Use when user requests diagrams, flowcharts, sequence diagrams, class diagrams, compon...install required). (file: r1/plantuml-skill/SKILL.md) [hash=7dc42c256b0f6ca5]
+        - yuque: Provides Yuque (Skylark) document and knowledge-base operations via ali-mcpcli. Use when the us...luence, Google Docs, etc.). (file: r1/yuque/SKILL.md) [hash=b87f935dd8821391]
         </skills_instructions>
     [02] <permissions instructions>
         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
@@ -278,7 +294,7 @@ Settings: same as window 1
 
     You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
     `send_message` calls may be read by a human, so ensure they are legible. Always put proper spaces between words and/or numbers.
-    <OMITTED 17 LINES; ~246 TOKENS; hash=780031e2df907944>
+    <OMITTED 17 LINES; ~239 TOKENS; hash=8b6c7c6c40b09db7>
     - All agents use the same current working directory.
     - As a result, edits made by one agent are immediately visible to all other agents.
 

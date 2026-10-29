@@ -306,8 +306,7 @@ impl LocalAgentControl {
                     .config()
                     .await
                     .multi_agent_v2
-                    .tool_namespace
-                    .as_deref(),
+                    .effective_tool_namespace(),
             )
         {
             // A handoff can change the selection without adding a new root user message.
