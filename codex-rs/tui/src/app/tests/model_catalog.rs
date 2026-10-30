@@ -418,12 +418,11 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
         ("gpt-5.6-luna", "gpt-6-luna", "openai", all_model_presets()),
         ("gpt-5.6-terra", "gpt-6-sol", "openai", all_model_presets()),
         ("gpt-5.6-sol", "gpt-6-sol", "openai", all_model_presets()),
-        (
-            "openai.gpt-5.4",
-            "openai.gpt-6-sol",
-            "amazon-bedrock",
-            bedrock_model_presets(),
-        ),
+        // Fork: the `amazon-bedrock` migration case is dropped here because the fork does
+        // not bundle third-party providers, so `model_provider = "amazon-bedrock"` cannot
+        // resolve unless the user declares it under `model_providers` in config.toml.
+        // `bedrock_model_presets()` is still exercised by the pure prompt tests below,
+        // which pass the provider id as a string and never build a Config.
     ] {
         let codex_home = tempdir()?;
         std::fs::write(
@@ -541,9 +540,6 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
 
     Our latest Sol is more intelligent and more efficient so your usage limits go further. This model is a great daily driver for complex tasks, especially coding.
 
-    GPT-5.4 on Amazon Bedrock is no longer offered in Codex
-
-    Codex now uses GPT-6 Sol on Amazon Bedrock in place of GPT-5.4 on Amazon Bedrock. Switch to GPT-6 Sol on Amazon Bedrock to continue.
     ");
     Ok(())
 }
