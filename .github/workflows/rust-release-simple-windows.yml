@@ -59,6 +59,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 0.166 起 V8 使用 Git 源码依赖，Chromium 子模块中的 ICU 快照路径会超过 MAX_PATH。
+      - name: Enable Git long paths for V8 submodules
+        shell: bash
+        run: git config --global core.longpaths true
+
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
