@@ -35,17 +35,20 @@ async fn http_policy_capacity_preserves_retry_advice_and_terminal_behavior() {
                 retry_after: advice,
             }));
             assert_eq!(
-                (
-                    error.to_codex_protocol_error(),
-                    error.retry_after(),
-                    error.retry_delay(/*retry_count*/ 1)
-                ),
-                (
-                    expected.clone(),
-                    advice,
-                    advice.map(|_| Duration::from_secs(3))
-                )
+                (error.to_codex_protocol_error(), error.retry_after()),
+                (expected.clone(), advice)
             );
+            if expected == CodexErrorInfo::ServerOverloaded && advice.is_none() {
+                // Fork: a 503 `server_is_overloaded` without server advice stays
+                // stream-retryable with a bounded local backoff instead of being
+                // terminal, so only assert that some delay is produced.
+                assert!(error.retry_delay(/*retry_count*/ 1).is_some());
+            } else {
+                assert_eq!(
+                    error.retry_delay(/*retry_count*/ 1),
+                    advice.map(|_| Duration::from_secs(3))
+                );
+            }
         }
     }
 }
