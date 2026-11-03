@@ -382,8 +382,16 @@ pub(crate) fn build_gemini_request(
         let mut thinking = json!({"includeThoughts": true});
         if let Some(effort) = effort {
             let slug = model.slug.strip_prefix("models/").unwrap_or(&model.slug);
-            if slug.starts_with("gemini-3") {
-                // Pro 3.0/3.1 exposes low/high, Flash exposes the full ladder.
+            if slug.starts_with("gemini-2.5") {
+                let budget = match effort {
+                    ReasoningEffort::None if !slug.contains("pro") => 0,
+                    ReasoningEffort::None | ReasoningEffort::Minimal | ReasoningEffort::Low => 1024,
+                    ReasoningEffort::Medium => 8192,
+                    _ => 24576,
+                };
+                thinking["thinkingBudget"] = json!(budget);
+            } else if slug.starts_with("gemini-") && !legacy {
+                // Gemini 3+ exposes thinkingLevel (Pro exposes low/high, Flash exposes the full ladder).
                 let level = match effort {
                     ReasoningEffort::None | ReasoningEffort::Minimal if slug.contains("flash") => {
                         "minimal"
@@ -395,14 +403,6 @@ pub(crate) fn build_gemini_request(
                     _ => "high",
                 };
                 thinking["thinkingLevel"] = json!(level);
-            } else if slug.starts_with("gemini-2.5") {
-                let budget = match effort {
-                    ReasoningEffort::None if !slug.contains("pro") => 0,
-                    ReasoningEffort::None | ReasoningEffort::Minimal | ReasoningEffort::Low => 1024,
-                    ReasoningEffort::Medium => 8192,
-                    _ => 24576,
-                };
-                thinking["thinkingBudget"] = json!(budget);
             }
         }
         generation["thinkingConfig"] = thinking;
