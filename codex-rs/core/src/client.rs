@@ -419,6 +419,7 @@ fn api_error_code(err: &ApiError) -> String {
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
         ApiError::BioPolicy { .. } => "bio policy violation".to_string(),
         ApiError::FlexUnavailable => "flex capacity unavailable".to_string(),
+        ApiError::PolicyCapacityUnavailable { .. } => "policy capacity unavailable".to_string(),
         ApiError::ServerOverloaded { .. } => "HTTP 529 server overloaded".to_string(),
         ApiError::RateLimitExceeded { .. } => "HTTP 429 rate limit exceeded".to_string(),
         ApiError::ContentFilter => "content filter".to_string(),
@@ -915,6 +916,9 @@ impl ModelClient {
             // resolved against the previous provider.
             api_key_cyber_access_programs:
                 cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
+            // Runtime auth is validated against one provider identity and base URL,
+            // so a provider switch must not inherit the previous runtime owner.
+            runtime_auth: None,
         }
     }
 
@@ -2931,11 +2935,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            let transport = self.client.build_api_transport(
-                &client_setup.api_provider,
-                "/chat/completions",
-                client_setup.redirect_policy,
-            )?;
+            let transport = client_setup.build_api_transport("/chat/completions")?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2971,14 +2971,14 @@ impl ModelClientSession {
 
             match stream_result {
                 Ok(stream) => {
-                    let (stream, _) = map_response_stream(
+                    return Ok(map_response_stream(
                         stream,
                         session_telemetry.clone(),
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
                         Vec::new(),
-                    );
-                    return Ok(stream);
+                        /*last_response_tx*/ None,
+                    ));
                 }
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
@@ -3133,11 +3133,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            let transport = self.client.build_api_transport(
-                &client_setup.api_provider,
-                &path,
-                client_setup.redirect_policy,
-            )?;
+            let transport = client_setup.build_api_transport(&path)?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -3198,14 +3194,14 @@ impl ModelClientSession {
 
             match stream_result {
                 Ok(stream) => {
-                    let (stream, _) = map_response_stream(
+                    return Ok(map_response_stream(
                         stream,
                         session_telemetry.clone(),
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
                         Vec::new(),
-                    );
-                    return Ok(stream);
+                        /*last_response_tx*/ None,
+                    ));
                 }
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },

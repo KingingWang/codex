@@ -568,7 +568,7 @@ impl ThreadHistoryBuilder {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| self.next_item_id());
-            self.push_item_in_current_turn(ThreadItem::UserMessage {
+            self.push_item_in_current_turn(ThreadItemPayload::UserMessage {
                 id,
                 client_id: None,
                 content: vec![UserInput::Text {
@@ -5615,14 +5615,14 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(
             turns[0].items,
-            vec![ThreadItem::UserMessage {
+            vec![ThreadItem::untimed(ThreadItemPayload::UserMessage {
                 id: "amsg_1".into(),
                 client_id: None,
                 content: vec![UserInput::Text {
                     text: "Message Type: NEW_TASK\nTask name: /root/probe\nSender: /root\nPayload:\nZEBRA task text".into(),
                     text_elements: Vec::new(),
                 }],
-            }]
+            })]
         );
     }
 

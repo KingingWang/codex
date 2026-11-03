@@ -52,6 +52,9 @@ fn responses_provider(server_uri: &str, stream_max_retries: u64) -> ModelProvide
         supports_websockets: false,
         supports_standalone_web_search: false,
         freeform_tool_support: FreeformToolSupport::Auto,
+        project_id: None,
+        location: None,
+        credential_file: None,
         include_internal_metadata: false,
     }
 }

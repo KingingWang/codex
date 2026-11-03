@@ -63,9 +63,9 @@ impl AuthProvider for GeminiAuth {
         Ok(())
     }
 
-    fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
-        Box::pin(async {
-            let mut headers = self.inner.resolve_auth_headers().await?;
+    fn apply_auth_headers(&self, headers: HeaderMap) -> AuthHeadersFuture<'_> {
+        Box::pin(async move {
+            let mut headers = self.inner.apply_auth_headers(headers).await?;
             rewrite_headers(&mut headers, self.preserve_bearer);
             Ok(headers)
         })

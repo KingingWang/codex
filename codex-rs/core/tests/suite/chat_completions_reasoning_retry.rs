@@ -112,6 +112,9 @@ async fn reasoning_only_chat_completions_response_is_retried_until_success() {
         supports_websockets: false,
         supports_standalone_web_search: false,
         freeform_tool_support: FreeformToolSupport::Auto,
+        project_id: None,
+        location: None,
+        credential_file: None,
         include_internal_metadata: false,
     };
 

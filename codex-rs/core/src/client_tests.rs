@@ -302,7 +302,8 @@ async fn tool_search_stream_mapping_preserves_wire_continuation_baseline(
         None,
     );
     let temp = TempDir::new()?;
-    let (mut stream, last_response) = super::map_response_events(
+    let (last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
+    let mut stream = super::map_response_events(
         None,
         futures::stream::iter([
             Ok(ResponseEvent::OutputItemAdded(added_item)),
@@ -317,6 +318,7 @@ async fn tool_search_stream_mapping_preserves_wire_continuation_baseline(
         test_session_telemetry(),
         started_inference_attempt(&temp)?,
         client.state.provider.clone(),
+        Some(last_response_tx),
     );
     let mut delivered_added = Vec::new();
     let mut delivered_done = Vec::new();
@@ -329,7 +331,7 @@ async fn tool_search_stream_mapping_preserves_wire_continuation_baseline(
     }
     assert_eq!(delivered_added, vec![expected_added]);
     assert_eq!(delivered_done, vec![expected_done.clone()]);
-    let last_response = last_response.await?;
+    let last_response = last_response_rx.await?;
     assert_eq!(last_response.items_added, vec![wire_item]);
 
     if normalize {

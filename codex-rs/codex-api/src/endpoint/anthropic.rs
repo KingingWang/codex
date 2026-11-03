@@ -246,6 +246,7 @@ impl<T: HttpTransport> AnthropicClient<T> {
         });
 
         Ok(ResponseStream {
+            routing_affinity: None,
             rx_event,
             upstream_request_id: None,
             interrupt: None,

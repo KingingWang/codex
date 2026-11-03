@@ -194,6 +194,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
         });
 
         Ok(ResponseStream {
+            routing_affinity: None,
             rx_event,
             upstream_request_id: None,
             interrupt: None,

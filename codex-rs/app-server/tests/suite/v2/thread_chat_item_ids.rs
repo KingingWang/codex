@@ -5,7 +5,7 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadHistoryMode;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadTurnsListParams;
@@ -167,15 +167,17 @@ async fn chat_round_trips_keep_all_items_in_stored_turns_list(mode: ChatMode) ->
     let items = &data[0].items;
     let reasoning = items
         .iter()
-        .filter_map(|item| match item {
-            ThreadItem::Reasoning { id, summary, .. } => Some((id.as_str(), summary.as_slice())),
+        .filter_map(|item| match &item.payload {
+            ThreadItemPayload::Reasoning { id, summary, .. } => {
+                Some((id.as_str(), summary.as_slice()))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     let messages = items
         .iter()
-        .filter_map(|item| match item {
-            ThreadItem::AgentMessage { id, text, .. } => Some((id.as_str(), text.as_str())),
+        .filter_map(|item| match &item.payload {
+            ThreadItemPayload::AgentMessage { id, text, .. } => Some((id.as_str(), text.as_str())),
             _ => None,
         })
         .collect::<Vec<_>>();

@@ -492,6 +492,7 @@ pub(crate) fn spawn_gemini_stream(
         }
     });
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id,
         interrupt: None,
@@ -507,6 +508,7 @@ pub(crate) fn response_stream(
         send_events(&tx, Ok(events)).await;
     });
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id,
         interrupt: None,
