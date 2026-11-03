@@ -325,6 +325,17 @@ fn gemini_reasoning_uses_model_specific_native_configuration() {
         request.generation_config.unwrap()["thinkingConfig"]["thinkingLevel"],
         "high"
     );
+    model.slug = "gemini-4-argon".into();
+    let request = build_gemini_request(
+        &Prompt::default(),
+        &model,
+        Some(ReasoningEffort::XHigh),
+        "/root",
+    )
+    .unwrap();
+    let config = request.generation_config.unwrap();
+    assert_eq!(config["thinkingConfig"]["thinkingLevel"], "high");
+    assert_eq!(config["thinkingConfig"]["includeThoughts"], true);
     model.slug = "gemini-2.5-pro".into();
     let request = build_gemini_request(
         &Prompt::default(),

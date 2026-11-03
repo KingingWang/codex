@@ -287,9 +287,9 @@ impl GeminiEvents {
                 }
                 if !text.is_empty() {
                     if thought {
-                        events.push(ResponseEvent::ReasoningContentDelta {
+                        events.push(ResponseEvent::ReasoningSummaryDelta {
                             delta: text,
-                            content_index: 0,
+                            summary_index: 0,
                         });
                     } else {
                         self.visible_output = true;
@@ -535,7 +535,7 @@ mod tests {
             ]}}]
         }))).unwrap();
         assert!(events.iter().any(|event| matches!(event,
-            ResponseEvent::ReasoningContentDelta { delta, .. } if delta == "thinking")));
+            ResponseEvent::ReasoningSummaryDelta { delta, summary_index: 0 } if delta == "thinking")));
         assert!(
             !events
                 .iter()
