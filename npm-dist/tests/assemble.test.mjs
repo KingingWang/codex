@@ -76,6 +76,7 @@ test("builds valid package metadata from release artifacts", (t) => {
         target: platform.target,
         variant: "codex",
         entrypoint: `bin/codex${exe}`,
+        execServer: `bin/codex-exec-server${exe}`,
         resourcesDir: "codex-resources",
         pathDir: "codex-path",
       }),
@@ -83,6 +84,7 @@ test("builds valid package metadata from release artifacts", (t) => {
     const executables = [
       `bin/codex${exe}`,
       `bin/codex-code-mode-host${exe}`,
+      `bin/codex-exec-server${exe}`,
       `codex-path/rg${exe}`,
     ];
     if (isWindows) {
@@ -154,6 +156,12 @@ test("builds valid package metadata from release artifacts", (t) => {
     assert.equal(manifest.target, platform.target);
     const entrypoint = platform.os[0] === "win32" ? "bin/codex.exe" : "bin/codex";
     assert.equal(manifest.entrypoint, entrypoint);
+    assert.equal("execServer" in manifest, false);
+    const execServer =
+      platform.os[0] === "win32"
+        ? "bin/codex-exec-server.exe"
+        : "bin/codex-exec-server";
+    assert.throws(() => statSync(join(packageDir, execServer)));
     if (platform.os[0] !== "win32") {
       assert.notEqual(
         statSync(join(packageDir, entrypoint)).mode & 0o111,

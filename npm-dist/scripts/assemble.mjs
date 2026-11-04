@@ -219,6 +219,16 @@ function stagePackage(platform, packageDir, artifactsDir) {
 
   const manifestPath = join(packageDir, "codex-package.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  // Match upstream codex-cli/scripts/build_npm_package.py: standalone
+  // exec-server duplicates `codex exec-server` and exceeds the npm registry
+  // tarball size limit when bundled alongside `codex`.
+  for (const name of ["codex-exec-server", "codex-exec-server.exe"]) {
+    rmSync(join(packageDir, "bin", name), { force: true });
+  }
+  if ("execServer" in manifest) {
+    delete manifest.execServer;
+    writeJson(manifestPath, JSON.stringify(manifest));
+  }
   const expectedEntrypoint =
     platform.os[0] === "win32" ? "bin/codex.exe" : "bin/codex";
   if (
