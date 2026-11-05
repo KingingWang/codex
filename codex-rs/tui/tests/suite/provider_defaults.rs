@@ -93,14 +93,9 @@ async fn history_lookup_uses_server_provider_with_local_and_embedded_servers() -
                 ]);
             }
             let mut terminal = PtyCodex::start_cli(&cwd, home, &args)?;
-            let (expected, excluded) = if action == "resume" && last && explicit {
-                // The explicit provider selects the saved chat, but the daemon independently
-                // checks whether its configured provider can activate that chat.
-                (
-                    "This chat uses openai, but your current provider is server-provider.",
-                    "Server provider history",
-                )
-            } else if embedded || explicit {
+            // Fork (Codez): the daemon keeps a saved chat's own provider route, so an explicit
+            // client provider no longer has to match the daemon's selection to resume it.
+            let (expected, excluded) = if embedded || explicit {
                 ("Client provider history", "Server provider history")
             } else {
                 ("Server provider history", "Client provider history")

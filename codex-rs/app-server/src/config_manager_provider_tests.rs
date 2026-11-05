@@ -262,11 +262,12 @@ async fn catalog_reload_uses_latest_model_provider() -> Result<()> {
     Ok(())
 }
 
-/// Invocation overrides and selected profiles still define the current provider.
+/// Invocation overrides and selected profiles define a retained route that stays admissible while
+/// its definition exists, even when the default selection points somewhere else.
 #[test_case("model_provider", "gateway"; "explicit_provider")]
 #[test_case("profile", "gateway-profile"; "selected_profile")]
 #[tokio::test]
-async fn input_provider_check_uses_effective_selection(key: &str, value: &str) -> Result<()> {
+async fn input_provider_check_keeps_retained_selection(key: &str, value: &str) -> Result<()> {
     let home = tempdir()?;
     std::fs::write(
         home.path().join("config.toml"),
@@ -305,17 +306,27 @@ name = "Gateway"
         .await?;
     let default_manager =
         ConfigManager::without_managed_config_for_tests(home.path().to_path_buf());
+    // Fork (Codez): the `openai` default selection no longer rejects a thread that retained
+    // `gateway`; per-model catalog providers make the default a fallback, not this thread's route.
+    default_manager
+        .check_thread_model_provider_for_input(&current)
+        .await?;
+    // A retained route whose definition disappeared still rejects with structured data.
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = \"openai\"\n",
+    )?;
     let error = default_manager
         .check_thread_model_provider_for_input(&current)
         .await
         .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert_eq!(
         error
             .get_ref()
             .and_then(|error| error.downcast_ref::<ModelProviderError>()),
-        Some(&ModelProviderError::ModelProviderMismatch {
+        Some(&ModelProviderError::ModelProviderNotConfigured {
             model_provider: "gateway".into(),
-            current_model_provider: "openai".into(),
         })
     );
     Ok(())
