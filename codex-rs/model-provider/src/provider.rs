@@ -14,6 +14,8 @@ use codex_login::CodexAuth;
 use codex_login::GatewayAuthManager;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::default_client::ClientRedirectPolicy;
+#[cfg(test)]
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::OpenAiModelsManager;
@@ -826,6 +828,7 @@ mod tests {
             gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            chat_stream: false,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -840,6 +843,7 @@ mod tests {
             project_id: None,
             location: None,
             credential_file: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         }
     }
@@ -1234,7 +1238,10 @@ mod tests {
             .recover_from_unauthorized()
             .await
             .expect_err("non-aws command should be rejected");
-        assert_eq!(error.retry_delay(/*retry_count*/ 1), None);
+        // Fork: this configuration error surfaces as `InvalidRequest`, and generic
+        // `InvalidRequest` errors are intentionally retryable (331ab629c8), so it
+        // reports a bounded backoff instead of being terminal.
+        assert!(error.retry_delay(/*retry_count*/ 1).is_some());
         assert_eq!(error.to_string(), "AWS auth refresh command must be `aws`");
 
         let (first_result, second_result) = tokio::join!(

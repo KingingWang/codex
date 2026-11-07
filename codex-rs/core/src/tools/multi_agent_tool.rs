@@ -1,9 +1,10 @@
 //! Applies captured Multi-Agent V2 catalog overrides and namespaces to tool specifications.
-//! Parameter schemas retain harness-owned encryption annotations; execution is unchanged.
+//! V2 messages remain plaintext even when a model catalog advertises encrypted parameters.
 
 use crate::session::session::Session;
 use crate::tools::context::ToolInvocation;
 use crate::tools::registry::CoreToolRuntime;
+use codex_tools::AdditionalProperties;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -29,18 +30,16 @@ pub(super) fn multi_agent_v2_handler(
         if let ToolSpec::Function(tool) = handler.spec()
             && let Some(properties) = tool.parameters.properties
         {
-            // Argument transport requires these markers even without server encryption config.
-            for (name, schema) in *properties {
-                if schema.encrypted == Some(true) {
-                    let property = parameters
-                        .properties
-                        .as_mut()
-                        .and_then(|properties| properties.get_mut(&name))
-                        .ok_or("schema omits an encrypted parameter")?;
-                    property.encrypted = Some(true);
-                }
+            if properties.contains_key("message")
+                && !parameters
+                    .properties
+                    .as_ref()
+                    .is_some_and(|properties| properties.contains_key("message"))
+            {
+                return Err("schema omits the message parameter");
             }
         }
+        clear_encryption_annotations(&mut parameters);
         Ok(parameters)
     });
     if let Some(Err(reason)) = &parameters_override {
@@ -56,6 +55,36 @@ pub(super) fn multi_agent_v2_handler(
         description_override: description_override.map(str::to_owned),
         parameters_override,
     })
+}
+
+fn clear_encryption_annotations(schema: &mut JsonSchema) {
+    schema.encrypted = None;
+    for properties in [
+        &mut schema.properties,
+        &mut schema.defs,
+        &mut schema.definitions,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for child in properties.values_mut() {
+            clear_encryption_annotations(child);
+        }
+    }
+    if let Some(items) = &mut schema.items {
+        clear_encryption_annotations(items);
+    }
+    if let Some(AdditionalProperties::Schema(child)) = &mut schema.additional_properties {
+        clear_encryption_annotations(child);
+    }
+    for variants in [&mut schema.any_of, &mut schema.one_of, &mut schema.all_of]
+        .into_iter()
+        .flatten()
+    {
+        for child in variants.iter_mut() {
+            clear_encryption_annotations(child);
+        }
+    }
 }
 
 struct MultiAgentV2ToolOverrides {
@@ -129,5 +158,48 @@ impl CoreToolRuntime for MultiAgentV2ToolOverrides {
         &self,
     ) -> Option<Box<dyn crate::tools::registry::ToolArgumentDiffConsumer>> {
         self.handler.create_diff_consumer()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clear_encryption_annotations;
+    use codex_tools::JsonSchema;
+    use serde_json::json;
+
+    #[test]
+    fn catalog_encryption_annotations_are_removed_without_changing_instance_data() {
+        let mut schema: JsonSchema = serde_json::from_value(json!({
+            "type": "object",
+            "encrypted": true,
+            "properties": {
+                "message": {"type": "string", "encrypted": true},
+                "items": {"type": "array", "items": {"type": "string", "encrypted": true}}
+            },
+            "additionalProperties": {"type": "string", "encrypted": true},
+            "anyOf": [{"type": "object", "encrypted": true}],
+            "oneOf": [{"type": "object", "encrypted": true}],
+            "allOf": [{"type": "object", "encrypted": true}],
+            "$defs": {"message": {"type": "string", "encrypted": true}},
+            "definitions": {"message": {"type": "string", "encrypted": true}},
+            "enum": [{"encrypted": true}]
+        }))
+        .expect("valid catalog schema");
+        clear_encryption_annotations(&mut schema);
+        let value = serde_json::to_value(schema).expect("serialize schema");
+        for pointer in [
+            "/encrypted",
+            "/properties/message/encrypted",
+            "/properties/items/items/encrypted",
+            "/additionalProperties/encrypted",
+            "/anyOf/0/encrypted",
+            "/oneOf/0/encrypted",
+            "/allOf/0/encrypted",
+            "/$defs/message/encrypted",
+            "/definitions/message/encrypted",
+        ] {
+            assert!(value.pointer(pointer).is_none(), "{pointer}");
+        }
+        assert_eq!(value["enum"], json!([{"encrypted": true}]));
     }
 }

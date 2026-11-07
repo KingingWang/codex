@@ -355,11 +355,14 @@ async fn credential_export_reuses_cache_and_coalesces_refreshes() -> io::Result<
     }
     let (credentials, refresh) = tokio::join!(credentials, refresh);
     assert_eq!(credentials?, rotated);
-    assert_eq!(
+    // Fork: this recovery error surfaces as `InvalidRequest`, and generic
+    // `InvalidRequest` errors are intentionally retryable (331ab629c8), so it reports
+    // a bounded backoff instead of being terminal.
+    assert!(
         refresh
             .expect_err("queued login recovery must still run")
-            .retry_delay(/*retry_count*/ 1),
-        None
+            .retry_delay(/*retry_count*/ 1)
+            .is_some()
     );
     assert!(exporter.cached.lock().await.is_none());
 

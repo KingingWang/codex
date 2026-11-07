@@ -11,7 +11,9 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
@@ -61,7 +63,7 @@ use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::spec_plan::append_source_tools;
 use crate::tools::spec_plan::build_core_tool_registry;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agent_tools";
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -310,6 +312,19 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
+fn update_provider(turn: &mut TurnContext, update: impl FnOnce(&mut ModelProviderInfo)) {
+    let mut provider_info = turn.config.model_provider.clone();
+    update(&mut provider_info);
+    update_config(turn, |config| config.model_provider = provider_info.clone());
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn declare_apply_patch_tool_type(turn: &mut TurnContext, tool_type: ApplyPatchToolType) {
+    update_turn_settings_for_test(turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).apply_patch_tool_type = Some(tool_type);
+    });
+}
+
 struct TestNamespaceExtensionTool {
     namespace: &'static str,
     tool_name: &'static str,
@@ -496,6 +511,116 @@ fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
         }
         _ => false,
     }
+}
+
+#[tokio::test]
+async fn apply_patch_function_tool_type_produces_function_spec() {
+    let plan = probe(|turn| {
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
+                Some(ApplyPatchToolType::Function);
+        });
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    let ToolSpec::Function(tool) = plan.visible_spec("apply_patch") else {
+        panic!("apply_patch should be a function tool");
+    };
+    assert_eq!(tool.name, "apply_patch");
+    assert!(has_parameter(plan.visible_spec("apply_patch"), "input"));
+}
+
+/// A Responses provider carries freeform tools natively, so the catalog's
+/// freeform declaration reaches the model unchanged.
+#[tokio::test]
+async fn apply_patch_freeform_is_kept_on_a_responses_provider() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Responses);
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    let ToolSpec::Freeform(tool) = plan.visible_spec("apply_patch") else {
+        panic!("apply_patch should stay a freeform tool");
+    };
+    assert_eq!(tool.name, "apply_patch");
+}
+
+/// The Chat Completions protocol has no freeform tools, so the declaration is
+/// lowered to the function form rather than dropped during serialization.
+#[tokio::test]
+async fn apply_patch_freeform_is_lowered_on_a_chat_provider() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Chat);
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    let ToolSpec::Function(tool) = plan.visible_spec("apply_patch") else {
+        panic!("apply_patch should be lowered to a function tool");
+    };
+    assert_eq!(tool.name, "apply_patch");
+    assert!(has_parameter(plan.visible_spec("apply_patch"), "input"));
+}
+
+/// The Anthropic Messages protocol cannot carry freeform tools either.
+#[tokio::test]
+async fn apply_patch_freeform_is_lowered_on_an_anthropic_provider() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Anthropic);
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    assert!(matches!(
+        plan.visible_spec("apply_patch"),
+        ToolSpec::Function(_)
+    ));
+}
+
+/// A Responses gateway that rejects native custom tools gets the lowered form
+/// even though its wire protocol could otherwise carry it.
+#[tokio::test]
+async fn apply_patch_freeform_is_lowered_when_the_provider_rejects_custom_tools() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| {
+            provider.wire_api = WireApi::Responses;
+            provider.freeform_tool_support = FreeformToolSupport::Unsupported;
+        });
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    assert!(matches!(
+        plan.visible_spec("apply_patch"),
+        ToolSpec::Function(_)
+    ));
+}
+
+/// `model_apply_patch_tool_type` cannot force a form the wire protocol has no
+/// representation for: an explicit freeform request on a Chat Completions
+/// provider is still lowered, because honoring it would drop the tool.
+#[tokio::test]
+async fn explicit_freeform_request_is_still_lowered_when_the_wire_cannot_carry_it() {
+    let plan = probe(|turn| {
+        update_provider(turn, |provider| provider.wire_api = WireApi::Chat);
+        update_config(turn, |config| {
+            config.model_apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+        });
+        declare_apply_patch_tool_type(turn, ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    assert!(matches!(
+        plan.visible_spec("apply_patch"),
+        ToolSpec::Function(_)
+    ));
 }
 
 #[tokio::test]
@@ -776,6 +901,27 @@ async fn reviewer_tool_policy_require_managed_secondary_environments() {
             expected_tools
         );
     }
+}
+
+#[tokio::test]
+async fn view_image_follows_model_image_input_support() {
+    // Baseline: image-capable models keep `view_image` when the feature is enabled.
+    let image_capable = probe(|turn| {
+        set_feature(turn, Feature::ViewImage, /*enabled*/ true);
+    })
+    .await;
+    image_capable.assert_visible_contains(&["view_image"]);
+
+    // Text-only models never see the tool, even with the feature enabled.
+    let text_only = probe(|turn| {
+        set_feature(turn, Feature::ViewImage, /*enabled*/ true);
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).input_modalities = vec![InputModality::Text];
+        });
+    })
+    .await;
+    text_only.assert_registered_lacks(&["view_image"]);
+    text_only.assert_visible_lacks(&["view_image"]);
 }
 
 #[tokio::test]
@@ -2877,7 +3023,21 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_encrypted() {
+async fn multi_agent_v2_legacy_namespace_registers_plaintext_tools() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.tool_namespace = Some("collaboration".to_string());
+        });
+    })
+    .await;
+    plan.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    plan.assert_visible_lacks(&["collaboration"]);
+    assert!(plan.can_manage_children);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_message_schemas_are_plaintext() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
@@ -2903,7 +3063,7 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
             properties
                 .get("message")
                 .and_then(|schema| schema.encrypted),
-            Some(true)
+            None
         );
     }
 }
@@ -2929,7 +3089,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
         ]
     );
     plan.assert_visible_lacks(&["clock"]);
-    plan.assert_registered_lacks(&["collaboration.wait_agent", "clock.sleep"]);
+    plan.assert_registered_lacks(&["agent_tools.wait_agent", "clock.sleep"]);
     assert!(plan.can_manage_children);
 }
 
@@ -3413,6 +3573,24 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
     bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
+
+    let bedrock_with_injected_web_run = probe_with(
+        |turn| {
+            set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
+            set_web_search_mode(turn, WebSearchMode::Live);
+            use_bedrock_provider(turn);
+        },
+        ToolPlanInputs {
+            extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                namespace: "web",
+                tool_name: "run",
+            })],
+            ..Default::default()
+        },
+    )
+    .await;
+    bedrock_with_injected_web_run.assert_visible_lacks(&["web"]);
+    bedrock_with_injected_web_run.assert_visible_contains(&["web_search"]);
 }
 
 #[path = "spec_plan_strict_third_party_tests.rs"]

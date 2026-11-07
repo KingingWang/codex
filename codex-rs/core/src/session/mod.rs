@@ -128,6 +128,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
@@ -4358,8 +4359,8 @@ impl Session {
                             turn_context
                                 .config
                                 .multi_agent_v2
-                                .tool_namespace
-                                .clone()
+                                .effective_tool_namespace()
+                                .map(str::to_owned)
                                 .map(ContentItemNamespace::from)
                                 .unwrap_or(ContentItemNamespace::Functions),
                         ));
@@ -4420,6 +4421,37 @@ impl Session {
         .await;
         drop(boundary);
         self.send_raw_response_items(turn_context, items).await;
+        // Surface the incoming inter-agent message in thread views. Raw
+        // response items are not part of transcript projections, so also emit
+        // a user-message turn item: in this thread the sending agent acts as
+        // the user that triggered or extended the turn. The displayed text is
+        // the same flattened envelope plus payload the model receives.
+        if let ResponseItem::AgentMessage { id, content, .. } = &items[0] {
+            let text: String = content
+                .iter()
+                .map(|part| match part {
+                    AgentMessageInputContent::InputText { text } => text.as_str(),
+                    AgentMessageInputContent::EncryptedContent { encrypted_content } => {
+                        encrypted_content.as_str()
+                    }
+                })
+                .collect();
+            if !text.trim().is_empty() {
+                let item = TurnItem::UserMessage(UserMessageItem {
+                    id: id
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    client_id: None,
+                    content: vec![UserInput::Text {
+                        text,
+                        text_elements: Vec::new(),
+                    }],
+                });
+                self.emit_turn_item_started(turn_context, &item).await;
+                self.emit_turn_item_completed(turn_context, item).await;
+            }
+        }
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -5655,6 +5687,26 @@ impl Session {
         self.send_event(turn_context, event).await;
     }
 
+    /// Variant of [`notify_stream_error`] for Chat Completions / Anthropic
+    /// retry notifications. The underlying error is passed as already-rendered
+    /// `additional_details` + optional `http_status_code`, avoiding the need
+    /// to clone a (non-`Clone`) `CodexErr`.
+    pub(crate) async fn notify_stream_retry(
+        &self,
+        turn_context: &TurnContext,
+        message: impl Into<String>,
+        additional_details: String,
+        http_status_code: Option<u16>,
+    ) {
+        let codex_error_info = CodexErrorInfo::ResponseStreamDisconnected { http_status_code };
+        let event = EventMsg::StreamError(StreamErrorEvent {
+            message: message.into(),
+            codex_error_info: Some(codex_error_info),
+            additional_details: Some(additional_details),
+        });
+        self.send_event(turn_context, event).await;
+    }
+
     pub(crate) async fn record_memory_citation_for_turn(&self, sub_id: &str) {
         let turn_state = self
             .input_queue
@@ -5840,3 +5892,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "world_state_item_tests.rs"]
 mod world_state_item_tests;
+
+#[cfg(test)]
+#[path = "step_context_tests.rs"]
+mod step_context_tests;

@@ -120,6 +120,9 @@ async fn model_switch_program_pair(
         .with_config(move |config| {
             config.model_catalog = Some(models.clone());
             config.model_provider = provider;
+            // Fork: generic HTTP 400s are stream-retryable; pin the budget to zero so the
+            // previous-model rejection still drives the immediate compaction fallback.
+            config.model_provider.stream_max_retries = Some(0);
             set_test_compact_prompt(config);
         });
     let initial = builder.build_with_auto_env(&server).await?;

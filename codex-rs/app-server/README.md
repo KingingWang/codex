@@ -333,16 +333,20 @@ be loaded. This covers turn start/steer, review, compaction, manual queue start,
 updates. Realtime connections use separate routing configuration and are not checked here.
 Interrupt, realtime stop, and goal pause/clear remain available.
 
-Resume and input RPCs also reject a thread whose saved provider differs from the current
-configured provider, including profile and app-server launch overrides. The JSON-RPC error's
-`data` contains `ModelProviderError`: `modelProviderMismatch` has `modelProvider` and
-`currentModelProvider`, `modelProviderNotConfigured` identifies a missing provider, and
-`modelProviderPolicyConflict` identifies a mandatory-policy conflict. Clients can still use
-`thread/read` to display history and disable the composer with the error's explanation.
-Changing the resume request's provider does not bypass validation of the saved provider;
-switch the configured provider back to continue the chat. Input is also rejected when the
-current provider configuration cannot be loaded. Older clients retain their normal error
-fallback for unrecognized structured error variants.
+Resume and input RPCs keep a thread's saved provider route. This fork does not require that route
+to equal the current configured provider, including profile and app-server launch overrides,
+because Codex core routes a turn through the model catalog provider whenever the model declares
+one and treats `model_provider` as the fallback for models that do not. Saved and requested
+providers are still rejected when managed requirements conflict or when current configuration no
+longer defines them. The JSON-RPC error's `data` contains `ModelProviderError`:
+`modelProviderNotConfigured` identifies a missing provider and `modelProviderPolicyConflict`
+identifies a mandatory-policy conflict. `modelProviderMismatch` (`modelProvider` and
+`currentModelProvider`) remains in the schema for clients built against upstream, but this fork no
+longer emits it. Clients can still use `thread/read` to display history and disable the composer
+with the error's explanation. Changing the resume request's provider does not bypass validation of
+the saved provider. Input is also rejected when the current provider configuration cannot be
+loaded. Older clients retain their normal error fallback for unrecognized structured error
+variants.
 
 ## Managed network requirements
 

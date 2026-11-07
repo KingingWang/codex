@@ -66,6 +66,8 @@ use codex_features::Feature;
 use codex_features::SleepToolMode;
 use codex_login::AuthManager;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_model_provider_info::FreeformToolSupport;
+use codex_model_provider_info::WireApi;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::account::PlanType;
@@ -75,6 +77,7 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
@@ -156,6 +159,7 @@ pub(crate) fn build_tool_router(
         apps_enabled,
         &mcp.config().mcp_server_catalog,
         model_info.supports_search_tool,
+        !namespace_tools_enabled(turn_context),
         session.services.mcp_manager.shared_definitions(),
         &mut registry,
     );
@@ -762,7 +766,10 @@ fn required_child_management_tool_names(
             &["send_input", "wait_agent", "resume_agent", "close_agent"],
         ),
         MultiAgentVersion::V2 => (
-            turn_context.config.multi_agent_v2.tool_namespace.as_deref(),
+            turn_context
+                .config
+                .multi_agent_v2
+                .effective_tool_namespace(),
             if turn_context.config.multi_agent_v2.disable_direct_message {
                 &["interrupt_agent", "list_agents"]
             } else {
@@ -821,6 +828,17 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
                 .auth_manager
                 .as_deref()
                 .is_some_and(AuthManager::current_auth_uses_codex_backend))
+}
+
+/// `view_image` is only useful when the model can consume images, so hide it
+/// from models whose catalog entry lacks the image input modality.
+fn view_image_available(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+    turn_context
+        .config
+        .features
+        .get()
+        .enabled(Feature::ViewImage)
+        && model_info.input_modalities.contains(&InputModality::Image)
 }
 
 fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOptions {
@@ -1206,8 +1224,19 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
     add_collaboration_tools(context, registry);
 }
 
+fn namespace_tools_enabled(turn_context: &TurnContext) -> bool {
+    turn_context.provider.capabilities().namespace_tools
+}
+
 fn standalone_web_search_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
-    turn_context.provider.capabilities().web_search
+    let provider = turn_context.provider.info();
+    let provider_supports_standalone_web_search = provider.is_openai()
+        || provider.uses_openai_actor_authorization()
+        || provider.supports_standalone_web_search;
+
+    namespace_tools_enabled(turn_context)
+        && provider_supports_standalone_web_search
+        && turn_context.provider.capabilities().web_search
         && (model_info.use_responses_lite
             || turn_context
                 .config
@@ -1424,9 +1453,32 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         ));
     }
 
-    if context.model_info.apply_patch_tool_type.is_some() {
+    if let Some(declared_apply_patch_tool_type) = &context.model_info.apply_patch_tool_type {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
-        registry.add(ApplyPatchHandler::new(include_environment_id));
+        // Lower a freeform declaration the provider cannot carry: the Chat Completions
+        // and Anthropic protocols have no freeform tools, and a Responses gateway may
+        // still reject them. Registering the freeform form anyway would let it be
+        // dropped silently during serialization, leaving the model without
+        // `apply_patch` while its instructions still tell it to use that tool.
+        //
+        // `model_info` is already the merged view of the catalog entry, the
+        // `model_apply_patch_tool_type` config override, and any step-settings edit, so
+        // it stays the only source of truth here. An explicit request for a form this
+        // wire protocol cannot represent is lowered too, because honoring it would
+        // reproduce the silent drop.
+        let provider = context.turn_context.provider.info();
+        let carries_freeform = provider.wire_api == WireApi::Responses
+            && provider.freeform_tool_support != FreeformToolSupport::Unsupported;
+        let apply_patch_tool_type = match declared_apply_patch_tool_type {
+            ApplyPatchToolType::Freeform if !carries_freeform => ApplyPatchToolType::Function,
+            ApplyPatchToolType::Freeform | ApplyPatchToolType::Function => {
+                declared_apply_patch_tool_type.clone()
+            }
+        };
+        registry.add(ApplyPatchHandler::new(
+            apply_patch_tool_type,
+            include_environment_id,
+        ));
     }
 
     if context
@@ -1438,7 +1490,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(TestSyncHandler);
     }
 
-    if features.enabled(Feature::ViewImage) {
+    if view_image_available(turn_context, context.model_info) {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         registry.add(ViewImageHandler::new(ViewImageToolOptions {
             can_request_original_image_detail: can_request_original_image_detail(
@@ -1466,7 +1518,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             } else {
                 ToolExposure::Direct
             };
-            let tool_namespace = turn_context.config.multi_agent_v2.tool_namespace.as_deref();
+            let tool_namespace = turn_context
+                .config
+                .multi_agent_v2
+                .effective_tool_namespace();
             let native_review = if turn_context
                 .config
                 .features

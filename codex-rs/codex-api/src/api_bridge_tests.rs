@@ -35,17 +35,20 @@ async fn http_policy_capacity_preserves_retry_advice_and_terminal_behavior() {
                 retry_after: advice,
             }));
             assert_eq!(
-                (
-                    error.to_codex_protocol_error(),
-                    error.retry_after(),
-                    error.retry_delay(/*retry_count*/ 1)
-                ),
-                (
-                    expected.clone(),
-                    advice,
-                    advice.map(|_| Duration::from_secs(3))
-                )
+                (error.to_codex_protocol_error(), error.retry_after()),
+                (expected.clone(), advice)
             );
+            if expected == CodexErrorInfo::ServerOverloaded && advice.is_none() {
+                // Fork: a 503 `server_is_overloaded` without server advice stays
+                // stream-retryable with a bounded local backoff instead of being
+                // terminal, so only assert that some delay is produced.
+                assert!(error.retry_delay(/*retry_count*/ 1).is_some());
+            } else {
+                assert_eq!(
+                    error.retry_delay(/*retry_count*/ 1),
+                    advice.map(|_| Duration::from_secs(3))
+                );
+            }
         }
     }
 }
@@ -113,7 +116,8 @@ async fn map_api_error_preserves_retry_delay() {
     }
 }
 
-/// Mapping a new error category preserves elapsed advice without making hard failures retryable.
+/// Mapping a new error category preserves elapsed advice. Fork: quota and usage-limit 429
+/// bodies stay retryable, so only policy failures remain terminal here.
 #[tokio::test(start_paused = true)]
 async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
     use std::time::Duration;
@@ -123,8 +127,8 @@ async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
     for (status, code, retryable) in [
         (503, "server_is_overloaded", true),
         (429, "rate_limit_exceeded", true),
-        (429, "insufficient_quota", false),
-        (429, "usage_limit_reached", false),
+        (429, "insufficient_quota", true),
+        (429, "usage_limit_reached", true),
         (400, "cyber_policy", false),
     ] {
         let error = map_api_error(ApiError::Transport(TransportError::Http {
@@ -144,7 +148,7 @@ async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
             retryable.then_some(Duration::from_secs(6)),
             "{code}",
         );
-        if status == 429 && retryable {
+        if code == "rate_limit_exceeded" {
             assert_eq!(
                 (
                     error.to_codex_protocol_error(),
@@ -172,7 +176,7 @@ fn map_http_error_classifies_provider_codes() {
             503,
             "server_is_overloaded",
             CodexErrorInfo::ServerOverloaded,
-            false,
+            true,
         ),
         (503, "slow_down", CodexErrorInfo::RateLimitExceeded, true),
         (
@@ -554,6 +558,53 @@ fn map_api_error_keeps_other_400_errors_generic() {
         };
         assert_eq!(message, &body);
     }
+}
+
+/// Fork: a plain 429 keeps its retry-limit identity but stays retryable, preferring Retry-After.
+#[test]
+fn map_api_error_keeps_plain_429_retryable_with_server_advice() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("retry-after", http::HeaderValue::from_static("7"));
+    let advised = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        retry_after: None,
+        url: None,
+        headers: Some(headers),
+        body: Some(r#"{"error":{"message":"Too many requests"}}"#.to_string()),
+    }));
+
+    assert!(matches!(
+        advised.details(),
+        CodexErrorDetails::RetryLimit(error)
+            if error.status == http::StatusCode::TOO_MANY_REQUESTS
+    ));
+    assert_eq!(
+        advised.to_codex_protocol_error(),
+        CodexErrorInfo::ResponseTooManyFailedAttempts {
+            http_status_code: Some(429),
+        }
+    );
+    // Server advice is captured as a deadline, so the remaining delay is
+    // at most the advised 7 seconds and shrinks as time passes.
+    for delay in [
+        advised.server_retry_delay().expect("server advice"),
+        advised.retry_delay(/*retry_count*/ 1).expect("retryable"),
+    ] {
+        assert!(
+            (6..=7).contains(&delay.as_secs()),
+            "advised delay should be about 7 seconds, got {delay:?}"
+        );
+    }
+
+    let unadvised = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        retry_after: None,
+        url: None,
+        headers: None,
+        body: Some("too many requests".to_string()),
+    }));
+    assert_eq!(unadvised.server_retry_delay(), None);
+    assert!(unadvised.retry_delay(/*retry_count*/ 1).is_some());
 }
 
 #[test]

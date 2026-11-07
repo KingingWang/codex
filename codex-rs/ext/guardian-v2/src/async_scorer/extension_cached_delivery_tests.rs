@@ -150,7 +150,7 @@ async fn confirmed_root_delivery_invalidates_root_and_worker_cached_approvals() 
         sse(vec![
             ev_function_call_with_namespace(
                 "spawn-worker",
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({"message": "Inspect the deployment.", "task_name": "worker"}).to_string(),
             ),

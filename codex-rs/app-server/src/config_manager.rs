@@ -430,7 +430,7 @@ impl ConfigManager {
         Ok(CloudStartupConfig { bootstrap, config })
     }
 
-    /// Admits resumed threads and input only on the currently selected provider.
+    /// Admits resumed threads and input on the thread's own retained provider route.
     pub(crate) async fn check_thread_model_provider_for_input(
         &self,
         current: &Config,
@@ -439,12 +439,22 @@ impl ConfigManager {
         let configured = self
             .load_latest_config(Some(current.cwd.to_path_buf()))
             .await?;
-        if current.model_provider_id != configured.model_provider_id {
+        // Fork (Codez): the retained route stays authoritative, so the currently selected default
+        // provider no longer gates input. Codex core resolves the per-turn provider from the model
+        // catalog entry whenever the model declares one (`TurnContext`: "If the model catalog entry
+        // specifies a provider, use it instead of the session-level provider"), which makes
+        // `model_provider` a fallback for models without their own provider. Requiring it to equal
+        // the thread identity rejected every chat whose model routes to another configured
+        // provider. A provider whose definition disappeared is still rejected, and managed
+        // requirements keep their own conflict check above.
+        if !configured
+            .model_providers
+            .contains_key(&current.model_provider_id)
+        {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                ModelProviderError::ModelProviderMismatch {
+                std::io::ErrorKind::NotFound,
+                ModelProviderError::ModelProviderNotConfigured {
                     model_provider: current.model_provider_id.clone(),
-                    current_model_provider: configured.model_provider_id,
                 },
             ));
         }
@@ -550,11 +560,6 @@ impl ConfigManager {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         });
-        // Resolve the selection before the saved provider is applied as a resume override.
-        let current_provider = self
-            .load_latest_config(typesafe_overrides.cwd.clone().or_else(|| cwd.clone()))
-            .await
-            .map(|config| config.model_provider_id);
         self.load_with_validation(
             &self.current_cli_overrides(),
             request_overrides,
@@ -565,7 +570,11 @@ impl ConfigManager {
                     .as_deref()
                     .or(config.model_provider.as_deref())
                     .unwrap_or("openai");
-                // Validate the saved route even when a client sends a provider override.
+                // Validate the saved route even when a client sends a provider override. Managed
+                // requirements and missing definitions still reject; fork (Codez) drops the
+                // upstream rule that the saved provider must equal the current selection, because
+                // per-model catalog providers make the default selection a fallback rather than
+                // the route a retained thread actually uses.
                 for provider in [
                     saved_provider.unwrap_or(requested_provider),
                     requested_provider,
@@ -589,21 +598,6 @@ impl ConfigManager {
                             std::io::ErrorKind::NotFound,
                             ModelProviderError::ModelProviderNotConfigured {
                                 model_provider: provider.to_owned(),
-                            },
-                        ));
-                    }
-                }
-                let current_provider = current_provider?;
-                for provider in [
-                    saved_provider.unwrap_or(requested_provider),
-                    requested_provider,
-                ] {
-                    if provider != current_provider {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            ModelProviderError::ModelProviderMismatch {
-                                model_provider: provider.to_owned(),
-                                current_model_provider: current_provider,
                             },
                         ));
                     }

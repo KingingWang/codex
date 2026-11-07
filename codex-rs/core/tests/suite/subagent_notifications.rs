@@ -93,8 +93,6 @@ use wiremock::MockServer;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-use super::direct_tool_metadata::tool_call_metadata;
-
 #[path = "spawn_settings_tests.rs"]
 mod spawn_settings_tests;
 
@@ -106,7 +104,7 @@ mod code_mode_agent_message_tests;
 
 const SPAWN_CALL_ID: &str = "spawn-call-1";
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agent_tools";
 const TURN_0_FORK_PROMPT: &str = "seed fork context";
 const TURN_1_PROMPT: &str = "spawn a child and continue";
 const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
@@ -2301,10 +2299,10 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
     Ok(())
 }
 
-#[test_case(None, None, Some(ReasoningEffort::Ultra), Some("medium"), false, ThreadHistoryMode::Legacy; "encrypted")]
+#[test_case(None, None, Some(ReasoningEffort::Ultra), Some("medium"), false, ThreadHistoryMode::Legacy; "legacy metadata stays plaintext")]
 #[test_case(None, None, Some(ReasoningEffort::Ultra), Some("medium"), true, ThreadHistoryMode::Paginated; "plaintext")]
-#[test_case(Some("gpt-5.6-luna"), None, Some(ReasoningEffort::Ultra), Some("medium"), false, ThreadHistoryMode::Legacy; "luna encrypted leaf")]
-#[test_case(Some("gpt-5.5"), Some(ReasoningEffort::High), Some(ReasoningEffort::Ultra), Some("high"), false, ThreadHistoryMode::Paginated; "legacy encrypted leaf")]
+#[test_case(Some("gpt-5.6-luna"), None, Some(ReasoningEffort::Ultra), Some("medium"), false, ThreadHistoryMode::Legacy; "luna plaintext leaf")]
+#[test_case(Some("gpt-5.5"), Some(ReasoningEffort::High), Some(ReasoningEffort::Ultra), Some("high"), false, ThreadHistoryMode::Paginated; "legacy plaintext leaf")]
 #[test_case(None, None, Some(ReasoningEffort::Persistent), Some("disabled"), false, ThreadHistoryMode::Paginated; "inherited persistent effort")]
 #[test_case(None, None, None, None, false, ThreadHistoryMode::Legacy; "unknown model without effort default")]
 #[tokio::test]
@@ -2313,7 +2311,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
     reasoning_effort: Option<ReasoningEffort>,
     parent_reasoning_effort: Option<ReasoningEffort>,
     expected_reasoning_effort: Option<&str>,
-    plaintext: bool,
+    omit_encrypted_metadata: bool,
     history_mode: ThreadHistoryMode,
 ) -> Result<()> {
     let output: &'static Mutex<Vec<u8>> = Box::leak(Box::new(Mutex::new(Vec::new())));
@@ -2330,11 +2328,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
     );
 
     let server = start_mock_server().await;
-    let message = if plaintext {
-        "plaintext delegated task"
-    } else {
-        "opaque-encrypted-message"
-    };
+    let message = "plaintext delegated task";
     let mut spawn_args = json!({
         "message": message,
         "task_name": "worker",
@@ -2355,8 +2349,8 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
         "spawn_agent",
         &spawn_args,
     );
-    if plaintext {
-        spawn_event["item"]["encrypted_function_args"] = json!([]);
+    if !omit_encrypted_metadata {
+        spawn_event["item"]["encrypted_function_args"] = json!(["message"]);
     }
     mount_sse_once_match(
         &server,
@@ -2408,7 +2402,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
                 .features
                 .enable(Feature::MultiAgentV2)
                 .expect("test config should allow feature update");
-            if plaintext {
+            if omit_encrypted_metadata {
                 config
                     .features
                     .enable(Feature::ExecutedToolCallMetadata)
@@ -2478,25 +2472,12 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
         ),
         expected_settings,
     );
-    let content = if plaintext {
-        vec![json!({
-            "type": "input_text",
-            "text": format!(
-                "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n{message}"
-            ),
-        })]
-    } else {
-        vec![
-            json!({
-                "type": "input_text",
-                "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n",
-            }),
-            json!({
-                "type": "encrypted_content",
-                "encrypted_content": message,
-            }),
-        ]
-    };
+    let content = vec![json!({
+        "type": "input_text",
+        "text": format!(
+            "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n{message}"
+        ),
+    })];
     assert_eq!(
         strip_response_item_ids_from_json(strip_metadata_from_json(Value::Array(
             child_request.inputs_of_type("agent_message"),
@@ -2544,7 +2525,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
             );
         }
     }
-    if plaintext {
+    if omit_encrypted_metadata {
         let parent_request = parent_request_log
             .requests()
             .into_iter()
@@ -2555,23 +2536,11 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
                     .any(|item| item["call_id"] == SPAWN_CALL_ID)
             })
             .expect("parent request with spawn result");
-        assert!(
-            parent_request.input().iter().any(|item| {
-                item["call_id"].as_str() == Some(SPAWN_CALL_ID)
-                    && item["encrypted_function_args"] == json!([])
-            }),
-            "plaintext function-call metadata should survive replay"
-        );
-        assert_eq!(
-            tool_call_metadata(parent_request.function_call_output(SPAWN_CALL_ID)),
-            json!({
-                "executed_tool_calls": [{
-                    "name": "collaboration__spawn_agent",
-                    "arguments": serde_json::from_str::<Value>(&spawn_args)?,
-                }],
-                "tool_calls_complete": true,
-            }),
-        );
+        assert!(parent_request.input().iter().any(|item| {
+            item["call_id"].as_str() == Some(SPAWN_CALL_ID)
+                && item["arguments"].is_string()
+                && item["encrypted_function_args"].is_null()
+        }));
     }
 
     let child_thread_id = test
@@ -2599,8 +2568,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
         .expect("spawn send event");
     assert!(send.contains(&format!("sender_thread_id={root_thread_id}")));
     assert!(send.contains(&format!("receiver_thread_id={child_thread_id}")));
-    let logged_message = if plaintext { "[plaintext]" } else { message };
-    assert!(send.contains(&format!("content=\"{logged_message}\"")));
+    assert!(send.contains("content=\"[plaintext]\""));
 
     let communication_id = log_field(send, "communication_id").expect("communication ID");
     logs.lines()
@@ -2641,7 +2609,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
 ) -> Result<()> {
     let server = start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
-        "message": "opaque-encrypted-message",
+        "message": "plaintext delegated task",
         "task_name": "worker",
     }))?;
     mount_sse_once_match(

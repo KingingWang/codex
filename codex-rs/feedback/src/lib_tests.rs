@@ -133,6 +133,10 @@ async fn upload_test_feedback(
         .await
 }
 
+/// Ignored in this fork: `UPLOAD_TIMEOUT` is shortened to 10s because external
+/// feedback collection is disabled, so this scenario's twelve seconds of deliberate
+/// network waits can no longer finish inside the deadline.
+#[ignore = "fork: UPLOAD_TIMEOUT is 10s, so the 12s slow-report scenario cannot finish"]
 #[tokio::test]
 async fn feedback_upload_allows_slow_reports() {
     let server = MockServer::start().await;

@@ -12,6 +12,7 @@ pub(crate) fn initialize(path: &Path) -> io::Result<()> {
     open_capture_file(path).map(drop)
 }
 
+#[allow(dead_code)]
 pub(crate) fn append_payload(path: &Path, payload: &TrackEventsRequest) -> io::Result<()> {
     let mut line = serde_json::to_vec(payload)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;

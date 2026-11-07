@@ -214,6 +214,9 @@ async fn strict_tool_collisions_do_not_duplicate_unrelated_compaction_errors() -
     let mut builder = test_codex().with_config(|config| {
         config.tool_registry.error_on_tool_collisions = true;
         config.model_auto_compact_token_limit = Some(0);
+        // Fork: generic HTTP 400s are stream-retryable; pin the budget to zero so this
+        // test keeps asserting the single-request compaction failure.
+        config.model_provider.stream_max_retries = Some(0);
     });
     let test = builder.build_with_auto_env(&server).await?;
 

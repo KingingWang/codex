@@ -675,7 +675,7 @@ enabled_tools = []
             responses::sse(vec![
                 responses::ev_function_call_with_namespace(
                     &call_id,
-                    "collaboration",
+                    "agent_tools",
                     tool,
                     &args.to_string(),
                 ),

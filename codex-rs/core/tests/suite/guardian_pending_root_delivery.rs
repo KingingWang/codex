@@ -50,7 +50,7 @@ async fn confirmed_root_delivery_refreshes_pending_worker_allow(
         sse(vec![
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({"message": INITIAL_TASK, "task_name": "worker"}).to_string(),
             ),

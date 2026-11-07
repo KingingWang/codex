@@ -1,0 +1,1477 @@
+#![allow(clippy::field_reassign_with_default, clippy::needless_update)]
+
+use super::*;
+use codex_api::AnthropicContentBlock;
+use codex_api::AnthropicImageSource;
+use codex_api::AnthropicMessageContent;
+use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelInfo;
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
+use pretty_assertions::assert_eq;
+use serde_json::json;
+use std::collections::BTreeMap;
+
+#[test]
+fn build_tools_passes_function_apply_patch_and_skips_freeform() {
+    let (tools, _) = build_tools(&[
+        crate::tools::handlers::apply_patch_spec::create_apply_patch_json_tool(
+            /*include_environment_id*/ false,
+        ),
+        crate::tools::handlers::apply_patch_spec::create_apply_patch_freeform_tool(
+            /*include_environment_id*/ false,
+        ),
+    ])
+    .expect("build tools");
+
+    // Anthropic tools carry JSON-schema inputs like Chat Completions function
+    // tools, so only the function-shaped apply_patch survives.
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "apply_patch");
+    assert!(
+        tools[0].input_schema["properties"]["input"].is_object(),
+        "apply_patch should expose an `input` string parameter"
+    );
+}
+
+fn test_model_info() -> ModelInfo {
+    serde_json::from_value(json!({
+        "slug": "claude-3-7-sonnet",
+        "display_name": "Claude 3.7 Sonnet",
+        "description": null,
+        "supported_reasoning_levels": [],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 1,
+        "availability_nux": null,
+        "upgrade": null,
+        "base_instructions": "base",
+        "model_messages": null,
+        "supports_reasoning_summary_parameter": false,
+        "default_reasoning_summary": "auto",
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {
+            "mode": "bytes",
+            "limit": 10000
+        },
+        "supports_parallel_tool_calls": true,
+        "supports_image_detail_original": false,
+        "context_window": null,
+        "auto_compact_token_limit": null,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+        "input_modalities": ["text", "image"],
+        "supports_search_tool": false
+    }))
+    .expect("valid ModelInfo fixture")
+}
+
+fn user_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn assistant_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn function_call(name: &str, call_id: &str, args: &str) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        namespace: None,
+        name: name.to_string(),
+        arguments: args.to_string(),
+        encrypted_function_args: None,
+        call_id: call_id.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn developer_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn function_output(call_id: &str, body: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text(body.to_string()),
+            success: None,
+        },
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn agent_message(author: &str, content: Vec<AgentMessageInputContent>) -> ResponseItem {
+    ResponseItem::AgentMessage {
+        id: None,
+        author: author.to_string(),
+        recipient: "/root".to_string(),
+        content,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn shell_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "shell".to_string(),
+        description: "Execute a shell command".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(BTreeMap::new(), None, Some(false.into())),
+        output_schema: None,
+    })
+}
+
+fn read_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "read_file".to_string(),
+        description: "Read a file".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(BTreeMap::new(), None, Some(false.into())),
+        output_schema: None,
+    })
+}
+
+#[test]
+fn empty_prompt_yields_empty_request() {
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: String::new(),
+        ..Default::default()
+    };
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    assert_eq!(req.messages.len(), 0);
+    assert!(req.tools.is_empty());
+    assert_eq!(req.system, None);
+    assert_eq!(req.model, "claude-3-7-sonnet");
+}
+
+#[test]
+fn system_block_is_cached() {
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: "You are helpful.".to_string(),
+        ..Default::default()
+    };
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    let system = req.system.as_ref().expect("system block present");
+    assert_eq!(system.len(), 1);
+    match &system[0] {
+        AnthropicSystemBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "You are helpful.");
+            assert!(
+                cache_control.is_some(),
+                "system block must carry cache marker"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_tool_carries_cache_marker() {
+    let mut prompt = Prompt::default();
+    prompt.tools = vec![shell_tool(), read_tool()].into();
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    assert_eq!(req.tools.len(), 2);
+    assert_eq!(req.tools[0].name, "read_file");
+    assert_eq!(req.tools[1].name, "shell");
+    // Matches Claude Code: no tool carries cache_control. The system-block
+    // marker alone is sufficient for Anthropic to auto-discover the tools
+    // prefix.
+    assert!(
+        req.tools[0].cache_control.is_none(),
+        "tool must not carry cache_control"
+    );
+    assert!(
+        req.tools[1].cache_control.is_none(),
+        "tool must not carry cache_control"
+    );
+}
+
+#[test]
+fn user_assistant_pair_with_history_marker() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("turn 1 question"),
+        assistant_message("turn 1 answer"),
+        user_message("turn 2 question"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    assert_eq!(req.messages.len(), 3);
+
+    // Single-marker strategy: only the LAST user-role message carries
+    // a marker. Earlier user messages and assistant messages are NOT
+    // marked — placing more than one marker shifts cache_control bytes
+    // between turns and breaks the gateway's prefix lookup.
+    let first_user_blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    match first_user_blocks.last().unwrap() {
+        AnthropicContentBlock::Text { cache_control, .. } => {
+            assert!(
+                cache_control.is_none(),
+                "first user message must NOT carry a marker — only the trailing user does"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+
+    let assistant_blocks = match &req.messages[1].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    match assistant_blocks.last().unwrap() {
+        AnthropicContentBlock::Text { cache_control, .. } => {
+            assert!(
+                cache_control.is_none(),
+                "assistant message must NOT carry a cache marker"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+
+    // Trailing user message (turn 2) carries the marker.
+    let last_blocks = match &req.messages[2].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    match last_blocks.last().unwrap() {
+        AnthropicContentBlock::Text { cache_control, .. } => {
+            assert!(
+                cache_control.is_some(),
+                "trailing user must carry cache marker"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+}
+
+#[test]
+fn function_call_and_output_round_trip() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("run ls"),
+        function_call("shell", "toolu_1", r#"{"cmd":"ls"}"#),
+        function_output("toolu_1", "file1\nfile2"),
+        assistant_message("done"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    // Expected sequence:
+    //   user("run ls")
+    //   assistant(tool_use)
+    //   user(tool_result)
+    //   assistant(text "done")  ← trailing message (carries cache marker)
+    assert_eq!(req.messages.len(), 4);
+
+    let assistant_call = &req.messages[1];
+    assert_eq!(assistant_call.role, "assistant");
+    let blocks = match &assistant_call.content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    match &blocks[0] {
+        AnthropicContentBlock::ToolUse { id, name, .. } => {
+            assert_eq!(id, "toolu_1");
+            assert_eq!(name, "shell");
+        }
+        other => panic!("expected ToolUse, got {other:?}"),
+    }
+
+    let tool_result_user = &req.messages[2];
+    assert_eq!(tool_result_user.role, "user");
+    let blocks = match &tool_result_user.content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    match &blocks[0] {
+        AnthropicContentBlock::ToolResult { tool_use_id, .. } => {
+            assert_eq!(tool_use_id, "toolu_1");
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+}
+
+#[test]
+fn agent_messages_are_preserved_for_anthropic_requests() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        agent_message(
+            "/root/worker",
+            vec![AgentMessageInputContent::InputText {
+                text: "Message Type: MESSAGE\nPayload:\nreply".to_string(),
+            }],
+        ),
+        agent_message(
+            "/root",
+            vec![
+                AgentMessageInputContent::InputText {
+                    text: "Message Type: NEW_TASK\nPayload:\n".to_string(),
+                },
+                AgentMessageInputContent::EncryptedContent {
+                    encrypted_content: "inspect the diff".to_string(),
+                },
+            ],
+        ),
+    ];
+    let req = build_anthropic_request_with_agent_path(&prompt, &test_model_info(), "/root")
+        .expect("build anthropic request");
+
+    assert_eq!(req.messages.len(), 2);
+    assert_eq!(req.messages[0].role, "user");
+    assert_eq!(req.messages[1].role, "assistant");
+    let user_blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(blocks) => blocks,
+        _ => panic!("expected user blocks"),
+    };
+    assert_eq!(
+        user_blocks,
+        &[AnthropicContentBlock::Text {
+            text: "Message Type: MESSAGE\nPayload:\nreply".to_string(),
+            cache_control: Some(AnthropicCacheControl::ephemeral()),
+        }]
+    );
+    let assistant_blocks = match &req.messages[1].content {
+        AnthropicMessageContent::Blocks(blocks) => blocks,
+        _ => panic!("expected assistant blocks"),
+    };
+    assert_eq!(
+        assistant_blocks,
+        &[AnthropicContentBlock::Text {
+            text: "Message Type: NEW_TASK\nPayload:\ninspect the diff".to_string(),
+            cache_control: None,
+        }]
+    );
+}
+
+fn reasoning_item(
+    summary: Option<&str>,
+    content: Option<&str>,
+    signature: Option<&str>,
+) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: None,
+        summary: summary
+            .map(|text| {
+                vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: text.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        content: content.map(|text| {
+            vec![ReasoningItemContent::ReasoningText {
+                text: text.to_string(),
+            }]
+        }),
+        encrypted_content: signature.map(str::to_string),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+/// Signed thinking replays from the `summary` channel, which is where the
+/// fork's anthropic provider records it so clients that render completed
+/// reasoning items can display it. Reasoning items written by earlier builds
+/// carry the text on `content` and must still replay, and an unsigned thinking
+/// block is dropped because the upstream API rejects it.
+#[test]
+fn signed_thinking_replays_from_summary_then_legacy_content() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("question"),
+        reasoning_item(Some("thought from summary"), None, Some("sig-1")),
+        assistant_message("answer one"),
+        reasoning_item(None, Some("thought from content"), Some("sig-2")),
+        assistant_message("answer two"),
+        reasoning_item(Some("unsigned thought"), None, None),
+        assistant_message("answer three"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    let thinking_blocks: Vec<(String, Option<String>)> = req
+        .messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            AnthropicMessageContent::Blocks(blocks) => Some(blocks.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            AnthropicContentBlock::Thinking {
+                thinking,
+                signature,
+            } => Some((thinking.clone(), signature.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thinking_blocks,
+        vec![
+            (
+                "thought from summary".to_string(),
+                Some("sig-1".to_string())
+            ),
+            (
+                "thought from content".to_string(),
+                Some("sig-2".to_string())
+            ),
+        ]
+    );
+}
+
+#[test]
+fn data_url_image_becomes_base64_source() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image: codex_protocol::models::ImageReference::Inline {
+                image_url: "data:image/png;base64,iVBORw0K".to_string(),
+            },
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    let blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    match &blocks[0] {
+        AnthropicContentBlock::Image { source, .. } => match source {
+            AnthropicImageSource::Base64 { media_type, data } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(data, "iVBORw0K");
+            }
+            other => panic!("expected base64 source, got {other:?}"),
+        },
+        other => panic!("expected Image block, got {other:?}"),
+    }
+}
+
+/// Cache hit invariant under content-hash caching (which is how Anthropic's
+/// caching actually works): the historical message CONTENT (modulo
+/// cache_control field placement) must remain byte-identical across turns.
+/// The marker shifts with the trailing pair, but the underlying message
+/// bytes — text, tool_use input, tool_result content — must never drift.
+#[test]
+fn history_content_stable_across_turns_modulo_cache_control() {
+    let model_info = test_model_info();
+
+    // Turn N: user → assistant tool_use → user(tool_result_1).
+    let mut prompt_n = Prompt::default();
+    prompt_n.input = vec![
+        user_message("turn 1 question"),
+        function_call("shell", "toolu_1", r#"{"cmd":"ls"}"#),
+        function_output("toolu_1", "file1\nfile2"),
+    ];
+
+    // Turn N+1: same as N, plus an asst tool_use_2 and tool_result_2.
+    let mut prompt_next = Prompt::default();
+    prompt_next.input = vec![
+        user_message("turn 1 question"),
+        function_call("shell", "toolu_1", r#"{"cmd":"ls"}"#),
+        function_output("toolu_1", "file1\nfile2"),
+        function_call("shell", "toolu_2", r#"{"cmd":"pwd"}"#),
+        function_output("toolu_2", "/tmp"),
+    ];
+
+    let req_n = build_anthropic_request(&prompt_n, &model_info).unwrap();
+    let req_next = build_anthropic_request(&prompt_next, &model_info).unwrap();
+
+    // Strip cache_control from the first 3 messages and assert content
+    // bytes match. Anthropic's cache hashes the prompt content, so as long
+    // as historical content stays stable, the prefix hash matches and the
+    // prior turn's cache entry can be discovered.
+    fn strip_cache(msg: &AnthropicMessage) -> AnthropicMessage {
+        let blocks = match &msg.content {
+            AnthropicMessageContent::Blocks(b) => b
+                .iter()
+                .map(|block| match block.clone() {
+                    AnthropicContentBlock::Text { text, .. } => AnthropicContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    },
+                    AnthropicContentBlock::Image { source, .. } => AnthropicContentBlock::Image {
+                        source,
+                        cache_control: None,
+                    },
+                    AnthropicContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => AnthropicContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        cache_control: None,
+                    },
+                    AnthropicContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
+                    } => AnthropicContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        cache_control: None,
+                    },
+                    other => other,
+                })
+                .collect(),
+            other => panic!("expected blocks, got {other:?}"),
+        };
+        AnthropicMessage {
+            role: msg.role.clone(),
+            content: AnthropicMessageContent::Blocks(blocks),
+        }
+    }
+
+    for i in 0..3 {
+        let n = strip_cache(&req_n.messages[i]);
+        let next = strip_cache(&req_next.messages[i]);
+        assert_eq!(
+            n, next,
+            "message {i} content must be stable across turns (modulo cache_control)"
+        );
+    }
+}
+
+/// Critical regression test: two consecutive turns of the SAME conversation
+/// must produce byte-identical prefixes for everything up to (and including)
+/// the previous turn's trailing message. This is what makes Anthropic prompt
+/// caching hit across turns — a single byte of drift in the early prefix
+/// invalidates everything that follows.
+#[test]
+fn consecutive_turns_share_byte_identical_prefix() {
+    let model_info = test_model_info();
+    let tools = vec![shell_tool(), read_tool()];
+    let base = "You are helpful.".to_string();
+
+    // Turn N: user → assistant tool_use → tool_result. This is the request the
+    // server receives *after* the tool ran and we're feeding the result back.
+    let mut prompt_n = Prompt::default();
+    prompt_n.base_instructions = BaseInstructions {
+        text: base.clone(),
+        ..Default::default()
+    };
+    prompt_n.tools = tools.clone().into();
+    prompt_n.input = vec![
+        user_message("list files"),
+        function_call("shell", "toolu_1", r#"{"cmd":"ls"}"#),
+        function_output("toolu_1", "file1\nfile2"),
+    ];
+
+    // Turn N+1: same as N, plus the assistant's text reply and the user's
+    // follow-up. The first three items must serialize byte-identically to N.
+    let mut prompt_next = Prompt::default();
+    prompt_next.base_instructions = BaseInstructions {
+        text: base,
+        ..Default::default()
+    };
+    prompt_next.tools = tools.into();
+    prompt_next.input = vec![
+        user_message("list files"),
+        function_call("shell", "toolu_1", r#"{"cmd":"ls"}"#),
+        function_output("toolu_1", "file1\nfile2"),
+        assistant_message("here are the files: file1, file2"),
+        user_message("thanks"),
+    ];
+
+    let req_n = build_anthropic_request(&prompt_n, &model_info).unwrap();
+    let req_next = build_anthropic_request(&prompt_next, &model_info).unwrap();
+
+    // System block must be identical.
+    assert_eq!(req_n.system, req_next.system, "system block must match");
+    // Tools must be identical (sort order included).
+    assert_eq!(req_n.tools, req_next.tools, "tool list must match");
+
+    // The first three messages of req_next correspond to req_n's three
+    // messages, EXCEPT the cache_control marker placement: req_n marks its
+    // trailing message (tool_result), req_next does NOT — it marks the new
+    // trailing user. We strip cache_control before comparing, since Anthropic
+    // hashes the prompt content, not the directive.
+    assert_eq!(req_n.messages.len(), 3);
+    assert!(req_next.messages.len() >= 3);
+
+    fn strip_cache(msg: &AnthropicMessage) -> AnthropicMessage {
+        let blocks = match &msg.content {
+            AnthropicMessageContent::Blocks(b) => b
+                .iter()
+                .map(|block| match block.clone() {
+                    AnthropicContentBlock::Text { text, .. } => AnthropicContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    },
+                    AnthropicContentBlock::Image { source, .. } => AnthropicContentBlock::Image {
+                        source,
+                        cache_control: None,
+                    },
+                    AnthropicContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => AnthropicContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        cache_control: None,
+                    },
+                    AnthropicContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
+                    } => AnthropicContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        cache_control: None,
+                    },
+                    other => other,
+                })
+                .collect(),
+            other => panic!("expected blocks, got {other:?}"),
+        };
+        AnthropicMessage {
+            role: msg.role.clone(),
+            content: AnthropicMessageContent::Blocks(blocks),
+        }
+    }
+
+    for i in 0..3 {
+        let n = strip_cache(&req_n.messages[i]);
+        let next = strip_cache(&req_next.messages[i]);
+        assert_eq!(
+            n, next,
+            "message {i} must serialize identically across turns (modulo cache_control)"
+        );
+    }
+}
+
+#[test]
+fn cache_markers_stay_under_breakpoint_limit() {
+    // The Anthropic API caps cache breakpoints at 4 per request. Verify we
+    // never exceed that even when both system tiers, tools, and history are
+    // all in play.
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: "You are helpful.".to_string(),
+        ..Default::default()
+    };
+    prompt.tools = vec![shell_tool(), read_tool()].into();
+    prompt.input = vec![
+        user_message(
+            "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nstyle\n</INSTRUCTIONS>",
+        ),
+        user_message("hello"),
+        assistant_message("hi"),
+        user_message("again"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    let mut count = 0;
+    count += req
+        .system
+        .as_ref()
+        .map(|s| {
+            s.iter()
+                .filter(|b| match b {
+                    AnthropicSystemBlock::Text { cache_control, .. } => cache_control.is_some(),
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    count += req
+        .tools
+        .iter()
+        .filter(|t| t.cache_control.is_some())
+        .count();
+    for msg in &req.messages {
+        if let AnthropicMessageContent::Blocks(blocks) = &msg.content {
+            count += blocks
+                .iter()
+                .filter(|b| match b {
+                    AnthropicContentBlock::Text { cache_control, .. }
+                    | AnthropicContentBlock::Image { cache_control, .. }
+                    | AnthropicContentBlock::ToolUse { cache_control, .. }
+                    | AnthropicContentBlock::ToolResult { cache_control, .. } => {
+                        cache_control.is_some()
+                    }
+                    _ => false,
+                })
+                .count();
+        }
+    }
+    // Worst case: system base + system tail + one message-level marker.
+    assert_eq!(count, 3, "expected the tiered strategy's 3 markers");
+    assert!(
+        count <= 4,
+        "expected at most 4 cache markers, found {count}"
+    );
+}
+
+/// Single-marker invariant: only the LAST user-role message carries a
+/// cache marker. Earlier user messages, assistant messages, tool_use,
+/// and tool_result messages all stay marker-free. This matches the
+/// Anthropic prompt-caching reference's multi-turn example and lets the
+/// gateway auto-discover older cache prefixes via byte-naive walk-back.
+#[test]
+fn only_last_user_message_carries_history_marker() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("session bootstrap"),
+        assistant_message("got it"),
+        user_message("trailing"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    let user_marker_count = req
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .filter(|m| {
+            let AnthropicMessageContent::Blocks(blocks) = &m.content else {
+                return false;
+            };
+            matches!(
+                blocks.last(),
+                Some(AnthropicContentBlock::Text {
+                    cache_control: Some(_),
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(
+        user_marker_count, 1,
+        "exactly one user-role message must carry the cache marker"
+    );
+
+    // The marker must be on the trailing user message, not an earlier one.
+    let last_user = req
+        .messages
+        .iter()
+        .rposition(|m| m.role == "user")
+        .expect("a trailing user message must exist");
+    let blocks = match &req.messages[last_user].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    match blocks.last().unwrap() {
+        AnthropicContentBlock::Text { cache_control, .. } => {
+            assert!(
+                cache_control.is_some(),
+                "trailing user message must carry the cache marker"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+}
+
+/// Single-message prompts get exactly one message-level marker (the trailing
+/// one). Adding a second on the same message would waste a breakpoint without
+/// improving cache hits.
+#[test]
+fn single_message_gets_one_marker() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![user_message("only message")];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    assert_eq!(req.messages.len(), 1);
+    let blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    let marker_count = blocks
+        .iter()
+        .filter(|b| match b {
+            AnthropicContentBlock::Text { cache_control, .. } => cache_control.is_some(),
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        marker_count, 1,
+        "single message must carry exactly one marker"
+    );
+}
+
+/// Byte-stability regression: across consecutive turns, every message
+/// must serialize byte-identically when `cache_control` is stripped.
+/// That is the invariant the gateway's prefix lookup relies on — if
+/// turn N+1 ever changes any non-`cache_control` bytes within a message
+/// from a previous turn, the cache lookup at that prefix misses.
+///
+/// `cache_control` itself necessarily moves with the trailing user
+/// marker, so we strip it before comparing. What we're guarding here is
+/// content drift introduced by the converter (role re-routing, ordering,
+/// json field changes, etc.).
+#[test]
+fn earlier_messages_stay_byte_stable_across_turns() {
+    let model = test_model_info();
+
+    let mut turn_n = Prompt::default();
+    turn_n.input = vec![
+        user_message("turn 1 question"),
+        assistant_message("turn 1 answer"),
+    ];
+    let req_n = build_anthropic_request(&turn_n, &model).unwrap();
+
+    let mut turn_n_plus_1 = Prompt::default();
+    turn_n_plus_1.input = vec![
+        user_message("turn 1 question"),
+        assistant_message("turn 1 answer"),
+        user_message("turn 2 question"),
+    ];
+    let req_n1 = build_anthropic_request(&turn_n_plus_1, &model).unwrap();
+
+    fn strip_cc(m: &AnthropicMessage) -> serde_json::Value {
+        let mut v = serde_json::to_value(m).unwrap();
+        if let Some(content) = v.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for block in content {
+                if let Some(obj) = block.as_object_mut() {
+                    obj.remove("cache_control");
+                }
+            }
+        }
+        v
+    }
+
+    for i in 0..req_n.messages.len() {
+        let prev = strip_cc(&req_n.messages[i]);
+        let next = strip_cc(&req_n1.messages[i]);
+        assert_eq!(
+            prev, next,
+            "message at index {i} must be byte-identical across turns once cache_control is stripped"
+        );
+    }
+
+    // Sanity: the trailing-user marker DID move between turns. The marker
+    // on req_n's last message is gone in req_n1 (it's no longer trailing).
+    let last_n = req_n.messages.last().unwrap();
+    let last_n1 = req_n1.messages.last().unwrap();
+    let last_n_text_first = match &last_n.content {
+        AnthropicMessageContent::Blocks(b) => b.first(),
+        _ => None,
+    }
+    .and_then(|b| match b {
+        AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    });
+    let last_n1_text_first = match &last_n1.content {
+        AnthropicMessageContent::Blocks(b) => b.first(),
+        _ => None,
+    }
+    .and_then(|b| match b {
+        AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    });
+    assert_ne!(
+        last_n_text_first, last_n1_text_first,
+        "trailing message must differ between turns (turn N+1 added new user input)"
+    );
+}
+
+/// Anthropic has no developer/system message role. Rather than dropping that
+/// content (which silently lost subagent spawn instructions and
+/// dynamic_context output), it is re-routed into the user stream. The cache
+/// marker must skip re-routed blocks whenever a stable user block is
+/// available in the same message.
+#[test]
+fn developer_messages_are_rerouted_into_user_stream() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        developer_message("You are a review subagent."),
+        user_message("review the diff"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(req.messages.len(), 1);
+    let blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(
+        blocks.len(),
+        2,
+        "developer content must survive alongside the user text"
+    );
+    match &blocks[0] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "You are a review subagent.");
+            assert!(
+                cache_control.is_none(),
+                "re-routed developer content must not carry the marker when a stable user block follows"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    match &blocks[1] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "review the diff");
+            assert!(
+                cache_control.is_some(),
+                "marker must land on the last stable user-origin block"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+}
+
+/// dynamic_context_script output is re-appended to EVERY sampling request and
+/// can drift between requests. It rides at the tail of the user stream,
+/// AFTER the message-level cache marker, so the cached prefix (everything up
+/// to the marker) stays byte-identical even while the developer payload
+/// changes. This is what lets the SYSTEM/TOOLS/MESSAGE cache anchors survive
+/// across turns even though the developer payload is unstable.
+#[test]
+fn trailing_developer_drift_keeps_marker_on_stable_prefix() {
+    let mut prompt_a = Prompt::default();
+    prompt_a.input = vec![
+        user_message("real bootstrap"),
+        assistant_message("ok"),
+        user_message("trailing"),
+        developer_message("dynamic context A"),
+    ];
+    let mut prompt_b = Prompt::default();
+    prompt_b.input = vec![
+        user_message("real bootstrap"),
+        assistant_message("ok"),
+        user_message("trailing"),
+        developer_message("entirely different B content"),
+    ];
+
+    let req_a = build_anthropic_request(&prompt_a, &test_model_info()).unwrap();
+    let req_b = build_anthropic_request(&prompt_b, &test_model_info()).unwrap();
+
+    // [user bootstrap][assistant ok][user trailing + developer tail].
+    assert_eq!(req_a.messages.len(), 3);
+    assert_eq!(req_b.messages.len(), 3);
+    // The stable prefix messages are byte-identical (no markers live on
+    // them), so the prior turn's cached prefix still matches.
+    assert_eq!(req_a.messages[0], req_b.messages[0]);
+    assert_eq!(req_a.messages[1], req_b.messages[1]);
+
+    let tail_a = match &req_a.messages[2].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    let tail_b = match &req_b.messages[2].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(tail_a.len(), 2);
+    assert_eq!(tail_b.len(), 2);
+    // The stable block (marker included) is byte-identical across requests.
+    assert_eq!(tail_a[0], tail_b[0]);
+    match &tail_a[0] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "trailing");
+            assert!(
+                cache_control.is_some(),
+                "marker must sit on the last stable block, before the drifting tail"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    // The drifted developer payload differs but stays unmarked, so it never
+    // becomes part of a cached prefix.
+    assert_ne!(tail_a[1], tail_b[1]);
+    match &tail_a[1] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "dynamic context A");
+            assert!(
+                cache_control.is_none(),
+                "drifting re-routed content must never carry the marker"
+            );
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+}
+
+/// When the trailing user message is ENTIRELY re-routed developer content,
+/// the marker walks back to the previous stable user block instead of
+/// anchoring on bytes that can drift on every request.
+#[test]
+fn all_developer_trailing_message_moves_marker_to_previous_user_message() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("stable input"),
+        assistant_message("ok"),
+        developer_message("dynamic context"),
+    ];
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+    assert_eq!(req.messages.len(), 3);
+
+    match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => match &b[0] {
+            AnthropicContentBlock::Text {
+                text,
+                cache_control,
+            } => {
+                assert_eq!(text, "stable input");
+                assert!(
+                    cache_control.is_some(),
+                    "marker must walk back to the last stable user block"
+                );
+            }
+            other => panic!("unexpected block: {other:?}"),
+        },
+        _ => panic!("expected blocks"),
+    }
+    match &req.messages[2].content {
+        AnthropicMessageContent::Blocks(b) => match &b[0] {
+            AnthropicContentBlock::Text { cache_control, .. } => {
+                assert!(
+                    cache_control.is_none(),
+                    "an all-re-routed message must not carry the marker"
+                );
+            }
+            other => panic!("unexpected block: {other:?}"),
+        },
+        _ => panic!("expected blocks"),
+    }
+}
+
+/// A recorded (stable) developer message in the middle of history is
+/// included deterministically, so turn N+1's prefix stays byte-identical
+/// modulo cache_control — the invariant the gateway's prefix lookup relies
+/// on.
+#[test]
+fn stable_developer_message_keeps_prefix_byte_identical() {
+    let mut turn_n = Prompt::default();
+    turn_n.input = vec![
+        user_message("question"),
+        developer_message("approved action: run ls"),
+    ];
+    let mut turn_n1 = Prompt::default();
+    turn_n1.input = vec![
+        user_message("question"),
+        developer_message("approved action: run ls"),
+        assistant_message("done"),
+        user_message("next"),
+    ];
+
+    let req_n = build_anthropic_request(&turn_n, &test_model_info()).unwrap();
+    let req_n1 = build_anthropic_request(&turn_n1, &test_model_info()).unwrap();
+
+    fn strip_cc(m: &AnthropicMessage) -> serde_json::Value {
+        let mut v = serde_json::to_value(m).unwrap();
+        if let Some(content) = v.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for block in content {
+                if let Some(obj) = block.as_object_mut() {
+                    obj.remove("cache_control");
+                }
+            }
+        }
+        v
+    }
+
+    assert_eq!(strip_cc(&req_n.messages[0]), strip_cc(&req_n1.messages[0]));
+
+    // Turn N's marker sits on the stable user block (blocks[0]), NOT on the
+    // trailing re-routed developer block.
+    let blocks = match &req_n.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(blocks.len(), 2);
+    match &blocks[0] {
+        AnthropicContentBlock::Text { cache_control, .. } => {
+            assert!(cache_control.is_some());
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    match &blocks[1] {
+        AnthropicContentBlock::Text {
+            text,
+            cache_control,
+        } => {
+            assert_eq!(text, "approved action: run ls");
+            assert!(cache_control.is_none());
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+}
+
+/// AGENTS.md fragments are large (often thousands of tokens) and stable for
+/// the whole session. Routing them through the user message stream means the
+/// system cache can never grow past "You are helpful." Lifting them into the
+/// system block grows the system-tail cache by the AGENTS.md size every
+/// turn, which is what lets subsequent turns hit a much larger system+tools
+/// cache when deeper message-level entries expire.
+#[test]
+fn agents_md_fragment_is_lifted_into_system_block() {
+    let agents_md_text =
+        "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\nuse rust\n</INSTRUCTIONS>"
+            .to_string();
+
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: "You are helpful.".to_string(),
+        ..Default::default()
+    };
+    prompt.input = vec![
+        user_message(&agents_md_text),
+        ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>"
+                    .to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        user_message("review the diff"),
+    ];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    // System is tiered: block 0 = base instructions (session-stable cache
+    // anchor), block 1 = the lifted fragment with its boundaries preserved.
+    // Both carry cache markers (Claude Code's two-tier system pattern).
+    let system = req.system.as_ref().expect("system block present");
+    assert_eq!(system.len(), 2);
+    let AnthropicSystemBlock::Text {
+        text,
+        cache_control,
+    } = &system[0];
+    assert_eq!(
+        text, "You are helpful.",
+        "block 0 must keep the base instructions"
+    );
+    assert!(
+        cache_control.is_some(),
+        "base-instructions block must carry a cache marker"
+    );
+    let AnthropicSystemBlock::Text {
+        text,
+        cache_control,
+    } = &system[1];
+    assert_eq!(
+        text, &agents_md_text,
+        "the lifted fragment must be its own block, not concatenated into the base"
+    );
+    assert!(
+        cache_control.is_some(),
+        "system tail block must carry a cache marker"
+    );
+
+    // Messages must NO LONGER contain the AGENTS.md text — only the env
+    // context block and the actual user prompt remain.
+    let all_message_text: String = req
+        .messages
+        .iter()
+        .flat_map(|m| match &m.content {
+            AnthropicMessageContent::Blocks(b) => b.clone(),
+            _ => Vec::new(),
+        })
+        .filter_map(|b| match b {
+            AnthropicContentBlock::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        !all_message_text.contains("# AGENTS.md instructions for"),
+        "AGENTS.md must be lifted out of messages, but found in: {all_message_text:?}"
+    );
+    assert!(
+        all_message_text.contains("<environment_context>"),
+        "non-AGENTS user content must be preserved in messages"
+    );
+    assert!(
+        all_message_text.contains("review the diff"),
+        "actual user prompt must be preserved in messages"
+    );
+}
+
+/// When AGENTS.md and other content live in the SAME `ResponseItem::Message`
+/// (multiple ContentItems), only the AGENTS.md block is lifted. The other
+/// blocks stay in the message — which becomes m_0 with one less block.
+#[test]
+fn agents_md_lifts_only_matching_block_from_mixed_message() {
+    let agents_md_text =
+        "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nfollow style guide\n</INSTRUCTIONS>"
+            .to_string();
+
+    let mut prompt = Prompt::default();
+    prompt.input = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: agents_md_text.clone(),
+            },
+            ContentItem::InputText {
+                text: "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"
+                    .to_string(),
+            },
+            ContentItem::InputText {
+                text: "actual question".to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    // Lifted into system.
+    let system = req.system.as_ref().expect("system");
+    // Block 0 is the (default) base instructions; the lifted fragment is the
+    // tail block with its boundaries preserved.
+    let AnthropicSystemBlock::Text { text, .. } = system.last().expect("system tail block");
+    assert_eq!(text, &agents_md_text);
+
+    // m_0 still exists with the remaining 2 blocks.
+    assert_eq!(req.messages.len(), 1);
+    let blocks = match &req.messages[0].content {
+        AnthropicMessageContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(blocks.len(), 2, "AGENTS block lifted, two blocks remain");
+    let texts: Vec<&String> = blocks
+        .iter()
+        .filter_map(|b| match b {
+            AnthropicContentBlock::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t.contains("<environment_context>")));
+    assert!(texts.iter().any(|t| t.as_str() == "actual question"));
+}
+
+/// Host-provided instructions carry no directory, so the fragment header has
+/// no ` for <dir>` suffix. The canonical start marker is
+/// `# AGENTS.md instructions`; the directory-less variant must be lifted too.
+#[test]
+fn agents_md_fragment_without_directory_is_lifted() {
+    let agents_md_text =
+        "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nhost rules\n</INSTRUCTIONS>".to_string();
+
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: String::new(),
+        ..Default::default()
+    };
+    prompt.input = vec![user_message(&agents_md_text), user_message("do the task")];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    let system = req.system.as_ref().expect("system block present");
+    assert_eq!(system.len(), 1);
+    let AnthropicSystemBlock::Text {
+        text,
+        cache_control,
+    } = &system[0];
+    assert_eq!(text, &agents_md_text);
+    assert!(cache_control.is_some());
+
+    let all_message_text: String = req
+        .messages
+        .iter()
+        .flat_map(|m| match &m.content {
+            AnthropicMessageContent::Blocks(b) => b.clone(),
+            _ => Vec::new(),
+        })
+        .filter_map(|b| match b {
+            AnthropicContentBlock::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    assert_eq!(
+        all_message_text, "do the task",
+        "the lifted fragment must leave the message stream"
+    );
+}
+
+fn custom_tool_call(name: &str, call_id: &str, input: &str) -> ResponseItem {
+    ResponseItem::CustomToolCall {
+        encrypted_content: None,
+        id: None,
+        status: None,
+        call_id: call_id.to_string(),
+        name: name.to_string(),
+        namespace: None,
+        input: input.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn first_tool_use_input(
+    req: &codex_api::AnthropicRequest,
+    message_index: usize,
+) -> &serde_json::Value {
+    let blocks = match &req.messages[message_index].content {
+        AnthropicMessageContent::Blocks(blocks) => blocks,
+        AnthropicMessageContent::Text(text) => panic!("expected blocks, got text {text:?}"),
+    };
+    match &blocks[0] {
+        AnthropicContentBlock::ToolUse { input, .. } => input,
+        other => panic!("expected ToolUse, got {other:?}"),
+    }
+}
+
+/// Anthropic rejects the entire request with
+/// `tool_use.input: Input should be a valid dictionary` when `input` is not a
+/// JSON object, so freeform patch text must be wrapped in an object.
+#[test]
+fn freeform_tool_input_is_sent_as_object() {
+    let patch = "*** Begin Patch\n*** End Patch";
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("patch it"),
+        custom_tool_call("apply_patch", "toolu_patch", patch),
+    ];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(
+        first_tool_use_input(&req, 1),
+        &json!({ "input": patch }),
+        "freeform input must be an object"
+    );
+}
+
+#[test]
+fn non_object_function_arguments_are_sent_as_object() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("run ls"),
+        function_call("shell", "toolu_1", "ls -l"),
+    ];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(first_tool_use_input(&req, 1), &json!({ "cmd": "ls -l" }));
+}
+
+#[test]
+fn empty_function_arguments_are_sent_as_empty_object() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![user_message("go"), function_call("shell", "toolu_1", "")];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(first_tool_use_input(&req, 1), &json!({}));
+}
+
+#[test]
+fn object_function_arguments_are_preserved() {
+    let mut prompt = Prompt::default();
+    prompt.input = vec![
+        user_message("run ls"),
+        function_call("shell", "toolu_1", r#"{"cmd":["ls","-l"]}"#),
+    ];
+
+    let req = build_anthropic_request(&prompt, &test_model_info()).unwrap();
+
+    assert_eq!(
+        first_tool_use_input(&req, 1),
+        &json!({ "cmd": ["ls", "-l"] })
+    );
+}
+
+/// Anthropic reads tools exclusively from `prompt.tools`. A prompt that still
+/// carries the full catalog (the incremental-tools gate keeps it there for
+/// `WireApi::Anthropic`) must convert with the declarations intact, even when
+/// the history already contains tool_use / tool_result blocks.
+#[test]
+fn request_keeps_full_tool_catalog_with_tool_use_history() {
+    let mut prompt = Prompt::default();
+    prompt.base_instructions = BaseInstructions {
+        text: "base".to_string(),
+        ..Default::default()
+    };
+    prompt.input = vec![
+        user_message("run ls"),
+        function_call("shell", "toolu_1", "{}"),
+        function_output("toolu_1", "ok"),
+    ];
+    prompt.tools = vec![shell_tool()].into();
+
+    let req = build_anthropic_request(&prompt, &test_model_info())
+        .expect("tool_use history with a declared catalog must build");
+
+    assert_eq!(req.tools.len(), 1);
+    assert_eq!(req.tools[0].name, "shell");
+    assert!(req.system.is_some(), "base instructions should survive");
+    let has_tool_use = req.messages.iter().any(|message| match &message.content {
+        AnthropicMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|block| matches!(block, AnthropicContentBlock::ToolUse { .. })),
+        _ => false,
+    });
+    assert!(has_tool_use, "tool_use history should survive conversion");
+}

@@ -39,7 +39,7 @@ async fn codex_err_debug_preserves_legacy_shape() {
 #[test]
 fn retryability_preserves_error_details_distinctions() {
     let errors = [
-        (CodexErr::ServerOverloaded, false),
+        (CodexErr::ServerOverloaded, true),
         (CodexErr::new(CodexErrorDetails::ContentFilter), true),
         (
             CodexErr::new(CodexErrorDetails::RateLimitExceeded("retry later".into())),
@@ -50,8 +50,26 @@ fn retryability_preserves_error_details_distinctions() {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 request_id: None,
             }),
-            false,
+            true,
         ),
+        // Fork: quota / usage-limit / flex 429 bodies stay retryable at the stream layer.
+        (CodexErr::QuotaExceeded, true),
+        (CodexErr::UsageNotIncluded, true),
+        (
+            CodexErr::UsageLimitReached(UsageLimitReachedError {
+                plan_type: None,
+                resets_at: None,
+                limit_window_minutes: None,
+                rate_limits: None,
+                promo_message: None,
+                rate_limit_reached_type: None,
+            }),
+            true,
+        ),
+        (CodexErr::new(CodexErrorDetails::FlexUnavailable), true),
+        // Fork: generic HTTP 400 `InvalidRequest` failures stay retryable at the stream
+        // layer; gateways often surface transient capacity/routing problems as plain 400s.
+        (CodexErr::InvalidRequest("bad request".into()), true),
         (
             CodexErr::UnexpectedStatus(UnexpectedResponseError {
                 status: StatusCode::TOO_MANY_REQUESTS,
@@ -104,13 +122,44 @@ fn retry_delay_distinguishes_server_advice_backoff_and_terminal_errors() {
         (Some(advice), Some(advice), Some(advice)),
     );
 
-    let error = CodexErr::QuotaExceeded.with_retry_after(retry_after);
+    let error = CodexErr::ContextWindowExceeded.with_retry_after(retry_after);
     assert_eq!(
         (
             error.retry_delay(/*retry_count*/ 1),
             error.server_retry_delay(),
         ),
         (None, Some(advice)),
+    );
+}
+
+/// Fork: a 429 retry limit stays retryable, prefers server advice, and bounds local backoff.
+#[test]
+fn retry_limit_backoff_honors_server_advice_and_stays_bounded() {
+    let rate_limited = || {
+        CodexErr::RetryLimit(RetryLimitReachedError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            request_id: None,
+        })
+    };
+
+    let first = rate_limited()
+        .retry_delay(/*retry_count*/ 1)
+        .expect("429 retry limit should be retryable");
+    assert!((180..=220).contains(&first.as_millis()), "{first:?}");
+
+    let capped = rate_limited()
+        .retry_delay(/*retry_count*/ 64)
+        .expect("429 retry limit should be retryable");
+    assert_eq!(capped, Duration::from_secs(60));
+
+    let advice = RetryAfter::from_delay(Duration::from_secs(7)).expect("retry deadline");
+    let advised = rate_limited().with_retry_after(advice);
+    let retry_delay = advised.retry_delay(/*retry_count*/ 1).expect("retryable");
+    let server_delay = advised.server_retry_delay().expect("server advice");
+    assert!((6..=7).contains(&retry_delay.as_secs()), "{retry_delay:?}");
+    assert!(
+        (6..=7).contains(&server_delay.as_secs()),
+        "{server_delay:?}"
     );
 }
 

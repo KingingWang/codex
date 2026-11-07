@@ -106,6 +106,8 @@ async fn resume_lists_all_providers_and_fork_keeps_provider_filter() -> Result<(
                         })?;
                 }
             } else {
+                // Fork (Codez): the daemon keeps a saved chat's own provider route, so an explicit
+                // client provider no longer has to match the daemon's selection to fork it.
                 let (expected, excluded) = if embedded || explicit {
                     ("Client provider history", "Server provider history")
                 } else {

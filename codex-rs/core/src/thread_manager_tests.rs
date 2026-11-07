@@ -340,6 +340,7 @@ async fn fixed_thread_text_supersedes_the_live_provider_and_isolated_helpers_rej
 
 /// A thread opt-out wins over a shared client without disabling its siblings.
 #[tokio::test]
+#[ignore = "fork: analytics egress is disabled for internal deployment"]
 async fn thread_analytics_opt_out_overrides_shared_client() {
     let server = MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))

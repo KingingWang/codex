@@ -85,6 +85,7 @@ fn runtimes_by_name(
         apps_enabled,
         &ResolvedMcpCatalog::default(),
         search_tool_enabled,
+        /*flatten_mcp_namespaces*/ false,
     )
 }
 
@@ -94,6 +95,7 @@ fn runtimes_by_name_with_catalog(
     apps_enabled: bool,
     mcp_server_catalog: &ResolvedMcpCatalog,
     search_tool_enabled: bool,
+    flatten_mcp_namespaces: bool,
 ) -> HashMap<ToolName, ToolExposure> {
     let mut handlers = HashMap::new();
     let mut registry = ToolRegistry::default();
@@ -103,6 +105,7 @@ fn runtimes_by_name_with_catalog(
         apps_enabled,
         mcp_server_catalog,
         search_tool_enabled,
+        flatten_mcp_namespaces,
         &mut handlers,
         &SharedMcpDefinitions::default(),
         &mut registry,
@@ -180,6 +183,7 @@ async fn agent_plugin_budget_hides_only_overflow_agent_tools() {
 
     let runtimes = runtimes_by_name_with_catalog(
         &tools, &config, /*apps_enabled*/ false, &catalog, /*search_tool_enabled*/ false,
+        /*flatten_mcp_namespaces*/ false,
     );
     let agent_exposures = tools[..40]
         .iter()
@@ -254,6 +258,7 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
         /*apps_enabled*/ true,
         &catalog,
         /*search_tool_enabled*/ false,
+        /*flatten_mcp_namespaces*/ false,
         &mut handlers,
         &SharedMcpDefinitions::default(),
         &mut allowed_registry,
@@ -271,6 +276,7 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
         /*apps_enabled*/ false,
         &catalog,
         /*search_tool_enabled*/ false,
+        /*flatten_mcp_namespaces*/ false,
         &mut handlers,
         &SharedMcpDefinitions::default(),
         &mut disabled_registry,
@@ -282,6 +288,7 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
         /*apps_enabled*/ true,
         &catalog,
         /*search_tool_enabled*/ false,
+        /*flatten_mcp_namespaces*/ false,
         &mut handlers,
         &SharedMcpDefinitions::default(),
         &mut restricted_registry,
@@ -293,6 +300,7 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
         /*apps_enabled*/ true,
         &catalog,
         /*search_tool_enabled*/ true,
+        /*flatten_mcp_namespaces*/ false,
         &mut handlers,
         &SharedMcpDefinitions::default(),
         &mut restored_registry,
@@ -438,6 +446,7 @@ async fn app_tool_registration_uses_trusted_catalog_metadata_and_preserves_sourc
         /*apps_enabled*/ true,
         &ResolvedMcpCatalog::default(),
         /*search_tool_enabled*/ false,
+        /*flatten_mcp_namespaces*/ false,
         &mut handlers,
         &SharedMcpDefinitions::default(),
         &mut registry,
@@ -553,4 +562,52 @@ async fn defers_apps_and_non_app_mcp_tools() {
         runtimes,
         expected_runtimes(&mcp_tools, ToolExposure::Deferred)
     );
+}
+
+#[tokio::test]
+async fn flattens_namespaced_mcp_tools_for_namespace_incapable_providers() {
+    let config = test_config().await;
+    // The kimi-k3 regression: two MCP servers both expose `js`; after
+    // flattening, the registry keys them by distinct flat names in the
+    // default namespace.
+    let mcp_tools = vec![
+        make_mcp_tool(
+            "node_repl",
+            "js",
+            "mcp__node_repl",
+            "js",
+            /*connector_id*/ None,
+            /*connector_name*/ None,
+        ),
+        make_mcp_tool(
+            "cua_repl",
+            "js",
+            "mcp__cua_repl",
+            "js",
+            /*connector_id*/ None,
+            /*connector_name*/ None,
+        ),
+    ];
+    let runtimes = runtimes_by_name_with_catalog(
+        &mcp_tools,
+        &config,
+        /*apps_enabled*/ false,
+        &ResolvedMcpCatalog::default(),
+        /*search_tool_enabled*/ false,
+        /*flatten_mcp_namespaces*/ true,
+    );
+
+    let expected: HashMap<ToolName, ToolExposure> = [
+        (
+            ToolName::namespaced("functions", "mcp__node_repl__js"),
+            ToolExposure::Direct,
+        ),
+        (
+            ToolName::namespaced("functions", "mcp__cua_repl__js"),
+            ToolExposure::Direct,
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(runtimes, expected);
 }

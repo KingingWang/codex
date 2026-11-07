@@ -7,6 +7,7 @@ use codex_core::ResponseEvent;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_otel::SessionTelemetry;
@@ -82,6 +83,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -96,6 +98,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -232,6 +235,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -246,6 +250,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -363,6 +368,7 @@ async fn responses_respects_model_info_overrides_from_config() {
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -377,6 +383,7 @@ async fn responses_respects_model_info_overrides_from_config() {
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 

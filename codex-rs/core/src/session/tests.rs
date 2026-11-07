@@ -2858,7 +2858,7 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     let mut expected_item = communication.to_model_input_item();
     let mut expected = serde_json::to_value(&expected_item).unwrap();
     expected["internal_chat_message_metadata_passthrough"] = json!({
-        "content_item_metadata": [{"harness_injected": true, "source_tool_namespace": "collaboration"}],
+        "content_item_metadata": [{"harness_injected": true, "source_tool_namespace": "agent_tools"}],
     });
     expected_item = serde_json::from_value(expected).unwrap();
     expected_item.set_turn_id_if_missing(&turn_context.sub_id);
@@ -3103,6 +3103,79 @@ async fn annotated_history_uses_explicit_model_without_a_step(
         ));
     }
     assert_eq!(session.clone_history().await.annotated_items(), &expected);
+}
+
+#[tokio::test]
+async fn record_inter_agent_communication_emits_user_message_turn_item() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let communication = InterAgentCommunication::new_encrypted(
+        AgentPath::root(),
+        AgentPath::root().join("probe").expect("probe path"),
+        Vec::new(),
+        "ZEBRA task text".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let ResponseItem::AgentMessage { content, .. } = communication.to_model_input_item() else {
+        panic!("expected an agent message input item");
+    };
+    let expected_text = content
+        .iter()
+        .map(|part| match part {
+            AgentMessageInputContent::InputText { text } => text.clone(),
+            AgentMessageInputContent::EncryptedContent { encrypted_content } => {
+                encrypted_content.clone()
+            }
+        })
+        .collect::<String>();
+    assert!(expected_text.contains("ZEBRA task text"));
+
+    session
+        .record_inter_agent_communication(&turn_context, turn_context.model_info(), communication)
+        .await;
+
+    let raw_response = rx.recv().await.expect("raw response item event");
+    assert!(matches!(raw_response.msg, EventMsg::RawResponseItem(_)));
+
+    let started = rx.recv().await.expect("started user message event");
+    let EventMsg::ItemStarted(ItemStartedEvent {
+        item: TurnItem::UserMessage(started_item),
+        ..
+    }) = &started.msg
+    else {
+        panic!(
+            "expected a started user message item, got {:?}",
+            started.msg
+        );
+    };
+    assert!(started_item.id.starts_with("amsg_"));
+    assert_eq!(started_item.client_id, None);
+    assert_eq!(
+        started_item.content,
+        vec![UserInput::Text {
+            text: expected_text.clone(),
+            text_elements: Vec::new(),
+        }]
+    );
+
+    let completed = rx.recv().await.expect("completed user message event");
+    let EventMsg::ItemCompleted(ItemCompletedEvent {
+        item: TurnItem::UserMessage(completed_item),
+        ..
+    }) = &completed.msg
+    else {
+        panic!(
+            "expected a completed user message item, got {:?}",
+            completed.msg
+        );
+    };
+    assert_eq!(completed_item.id, started_item.id);
+    assert_eq!(completed_item.content, started_item.content);
+
+    // Upstream (>= 0.157) also surfaces the message through a UserMessage event.
+    let user_message = rx.recv().await.expect("user message event");
+    assert!(matches!(user_message.msg, EventMsg::UserMessage(_)));
+
+    assert!(rx.try_recv().is_err(), "no extra events expected");
 }
 
 #[tokio::test]
@@ -5420,6 +5493,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
 }
 
 #[tokio::test]
+#[ignore = "fork: analytics egress is disabled for internal deployment"]
 async fn emit_subagent_session_started_includes_fork_lineage_and_originator() {
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::ThreadArchivedNotification;
@@ -12236,6 +12310,9 @@ async fn make_remote_compaction_session(
     let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.base_url = Some(format!("{server_uri}/v1"));
     provider.supports_websockets = false;
+    // Fork: generic HTTP 400s are stream-retryable; pin the budget to zero so the
+    // previous-model rejection still drives the immediate compaction fallback.
+    provider.stream_max_retries = Some(0);
     make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),
         Vec::new(),

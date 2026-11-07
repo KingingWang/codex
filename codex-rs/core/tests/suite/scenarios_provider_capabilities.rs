@@ -18,7 +18,7 @@ web_search = "cached"
 standalone_web_search = false
 [features.multi_agent_v2]
 enabled = true
-tool_namespace = "collaboration"
+tool_namespace = "agent_tools"
 expose_spawn_agent_model_overrides = false
 [model_providers.custom]
 name = "Custom"
@@ -78,7 +78,7 @@ remote_compaction = "v2"
     let tools = body["tools"].as_array().expect("request tools");
     assert!(
         requests[0]
-            .tool_by_name("collaboration", "list_agents")
+            .tool_by_name("agent_tools", "list_agents")
             .is_some()
     );
     let web_search = tools

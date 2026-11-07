@@ -46,17 +46,22 @@ use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::McpAttribution;
 use codex_protocol::mcp::McpAttributionSource;
 use codex_protocol::mcp::McpAttributionStatus;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ToolResultMetadata;
@@ -97,6 +102,28 @@ use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
+
+#[test]
+fn gemini_session_headers_include_parent_and_reject_invalid_ids() {
+    let mut metadata = CodexResponsesMetadata::new(
+        "installation".into(),
+        "session".into(),
+        "thread".into(),
+        "session:2".into(),
+    );
+    let parent = codex_protocol::ThreadId::new();
+    metadata.parent_thread_id = Some(parent);
+    let headers = super::native_session_headers(&metadata).unwrap();
+    assert_eq!(headers["x-session-id"], "session");
+    assert_eq!(headers["x-session-affinity"], "session");
+    assert_eq!(headers["x-codex-window-id"], "session:2");
+    assert_eq!(
+        headers["x-parent-session-id"].to_str().unwrap(),
+        parent.to_string()
+    );
+    metadata.session_id = "invalid\nid".into();
+    assert!(super::native_session_headers(&metadata).is_err());
+}
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tracing::Event;
@@ -150,6 +177,210 @@ fn test_model_client_with_thread_id(
 
 fn test_model_provider() -> SharedModelProvider {
     test_model_client(SessionSource::Cli).state.provider.clone()
+}
+
+fn tool_search_function_call_fixture() -> serde_json::Value {
+    json!({
+        "type": "function_call",
+        "id": "fc_search",
+        "call_id": "search-1",
+        "namespace": "tool_search",
+        "name": "tool_search_tool",
+        "arguments": json!({"query": "spawn_agent", "limit": 2}).to_string(),
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn-1",
+            "create_time": 123.5,
+        },
+    })
+}
+
+#[test]
+fn tool_search_function_alias_preserves_ids_arguments_and_metadata() {
+    for encrypted_function_args in [serde_json::Value::Null, json!([])] {
+        let mut item = tool_search_function_call_fixture();
+        item["encrypted_function_args"] = encrypted_function_args;
+        let item = serde_json::from_value(item).expect("fixture item should parse");
+        let normalized = super::normalize_tool_search_function_call(item);
+        assert_eq!(
+            serde_json::to_value(normalized).expect("search call should serialize"),
+            json!({
+                "type": "tool_search_call",
+                "id": "fc_search",
+                "call_id": "search-1",
+                "execution": "client",
+                "arguments": {"query": "spawn_agent", "limit": 2},
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-1",
+                    "create_time": 123.5,
+                },
+            }),
+        );
+    }
+}
+
+#[test]
+fn tool_search_function_alias_preserves_other_calls() {
+    let base = tool_search_function_call_fixture();
+    let mut cases = Vec::new();
+    for (key, value) in [
+        ("namespace", serde_json::Value::Null),
+        ("namespace", json!("mcp__server")),
+        ("name", json!("other_tool")),
+        ("name", json!("tool_searchtool_search_tool")),
+        ("encrypted_function_args", json!(["opaque ciphertext"])),
+    ] {
+        let mut item = base.clone();
+        item[key] = value;
+        cases.push(item);
+    }
+    for arguments in [
+        "",
+        "{",
+        "{}",
+        r#"{"query":42}"#,
+        r#"{"query":"spawn_agent","limit":-1}"#,
+    ] {
+        let mut item = base.clone();
+        item["arguments"] = json!(arguments);
+        cases.push(item);
+    }
+    cases.push(json!({
+        "type": "tool_search_call",
+        "call_id": "search-1",
+        "execution": "client",
+        "arguments": {"query": "spawn_agent"},
+    }));
+
+    for item in cases {
+        let expected =
+            serde_json::from_value::<ResponseItem>(item).expect("fixture item should parse");
+        assert_eq!(
+            super::normalize_tool_search_function_call(expected.clone()),
+            expected,
+        );
+    }
+}
+
+#[test_case::test_case(false, WireApi::Responses, false; "native")]
+#[test_case::test_case(true, WireApi::Responses, false; "function alias")]
+#[test_case::test_case(true, WireApi::Responses, true; "partial function alias")]
+#[test_case::test_case(true, WireApi::Chat, false; "chat unchanged")]
+#[test_case::test_case(true, WireApi::Anthropic, false; "anthropic unchanged")]
+#[test_case::test_case(true, WireApi::Gemini, false; "gemini unchanged")]
+#[tokio::test]
+async fn tool_search_stream_mapping_preserves_wire_continuation_baseline(
+    use_function_alias: bool,
+    wire_api: WireApi,
+    empty_added_arguments: bool,
+) -> anyhow::Result<()> {
+    let function_call = serde_json::from_value(tool_search_function_call_fixture())?;
+    let wire_item = if use_function_alias {
+        function_call
+    } else {
+        super::normalize_tool_search_function_call(function_call)
+    };
+    let mut added_item = wire_item.clone();
+    if empty_added_arguments && let ResponseItem::FunctionCall { arguments, .. } = &mut added_item {
+        arguments.clear();
+    }
+    let normalize = wire_api == WireApi::Responses;
+    let expected_added = if normalize {
+        super::normalize_tool_search_function_call(added_item.clone())
+    } else {
+        added_item.clone()
+    };
+    let expected_done = if normalize {
+        super::normalize_tool_search_function_call(wire_item.clone())
+    } else {
+        wire_item.clone()
+    };
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(
+        create_oss_provider_with_base_url("https://example.com/v1", wire_api),
+        None,
+    );
+    let temp = TempDir::new()?;
+    let (last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
+    let mut stream = super::map_response_events(
+        None,
+        futures::stream::iter([
+            Ok(ResponseEvent::OutputItemAdded(added_item)),
+            Ok(ResponseEvent::OutputItemDone(wire_item.clone())),
+            Ok(ResponseEvent::Completed {
+                response_id: "response-search".to_string(),
+                token_usage: None,
+                usage_metadata: None,
+                end_turn: None,
+            }),
+        ]),
+        test_session_telemetry(),
+        started_inference_attempt(&temp)?,
+        client.state.provider.clone(),
+        Some(last_response_tx),
+    );
+    let mut delivered_added = Vec::new();
+    let mut delivered_done = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            ResponseEvent::OutputItemAdded(item) => delivered_added.push(item),
+            ResponseEvent::OutputItemDone(item) => delivered_done.push(item),
+            _ => {}
+        }
+    }
+    assert_eq!(delivered_added, vec![expected_added]);
+    assert_eq!(delivered_done, vec![expected_done.clone()]);
+    let last_response = last_response_rx.await?;
+    assert_eq!(last_response.items_added, vec![wire_item]);
+
+    if normalize {
+        let metadata = test_responses_metadata_for_client(
+            &client,
+            None,
+            format!("{}:0", client.state.thread_id),
+            None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let build_request = |prompt: &Prompt| {
+            client.build_responses_request(
+                prompt,
+                &test_model_info(),
+                None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                None,
+                &metadata,
+                false,
+            )
+        };
+        let previous = build_request(&Prompt::default())?;
+        let search_output = ResponseItem::ToolSearchOutput {
+            id: None,
+            call_id: Some("search-1".to_string()),
+            status: "completed".to_string(),
+            execution: "client".to_string(),
+            tools: Vec::new(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let current = build_request(&Prompt {
+            input: vec![expected_done, search_output.clone()],
+            ..Default::default()
+        })?;
+        let mut session = client.new_session();
+        session.websocket_session.last_request = Some(previous);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(last_response).expect("receiver should be open");
+        session.websocket_session.last_response_rx = Some(receiver);
+        let continuation = session.prepare_websocket_request(&current);
+        assert_eq!(
+            continuation
+                .ok()
+                .map(|continuation| (continuation.response_id, continuation.items)),
+            (!use_function_alias).then_some(("response-search".to_string(), vec![search_output])),
+            "rewritten aliases must resend full input; native search must retain incremental reuse",
+        );
+    }
+    Ok(())
 }
 
 #[test_case::test_case(None; "credential_auth")]
@@ -1211,6 +1442,198 @@ fn prefix_ids_track_thread_and_payload(responses_lite: bool) -> anyhow::Result<(
     Ok(())
 }
 
+#[test]
+fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::AgentMessage {
+                id: None,
+                author: "/root/worker".to_string(),
+                recipient: "/root".to_string(),
+                content: vec![AgentMessageInputContent::InputText {
+                    text: "Message Type: MESSAGE\nPayload:\nfrom worker".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::AgentMessage {
+                id: None,
+                author: "/root".to_string(),
+                recipient: "/root/worker".to_string(),
+                content: vec![AgentMessageInputContent::EncryptedContent {
+                    encrypted_content: "Message Type: NEW_TASK\nPayload:\nfrom parent".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        ReasoningSummary::None,
+        /*service_tier*/ None,
+        &test_responses_metadata_for_client(
+            &client,
+            /*turn_id*/ None,
+            format!("{}:0", client.state.thread_id),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        ),
+        /*include_internal*/ true,
+    )?;
+
+    assert_eq!(
+        request.input,
+        vec![
+            ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Message Type: MESSAGE\nPayload:\nfrom worker".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
+                    text: "Message Type: NEW_TASK\nPayload:\nfrom parent".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn stateless_responses_request_drops_unencrypted_reasoning_items() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let encrypted_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("rs_server".to_string())),
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "responses reasoning".to_string(),
+        }],
+        content: None,
+        encrypted_content: Some("encrypted-responses-reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let assistant_message = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
+        id: Some(ResponseItemId::from_server("msg_server".to_string())),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
+            text: "answer".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::Reasoning {
+                id: Some(ResponseItemId::new("rs")),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "chat completions reasoning".to_string(),
+                }],
+                content: None,
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            encrypted_reasoning.clone(),
+            assistant_message.clone(),
+        ],
+        ..Default::default()
+    };
+
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        ReasoningSummary::Auto,
+        /*service_tier*/ None,
+        &responses_metadata,
+        /*include_internal*/ true,
+    )?;
+
+    assert!(!request.store);
+    assert_eq!(request.input, vec![encrypted_reasoning, assistant_message]);
+
+    Ok(())
+}
+
+#[test]
+fn outbound_request_omits_reasoning_ids_synthesized_by_other_providers() {
+    let client = test_model_client(SessionSource::Cli);
+    // The Anthropic adapter labels thinking blocks by their index within a
+    // single response, so every turn reuses `reasoning_0`. Replaying that to
+    // the Responses API fails with "Expected an ID that begins with 'rs'".
+    let anthropic_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("reasoning_0".to_string())),
+        summary: Vec::new(),
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: "claude thinking".to_string(),
+        }]),
+        encrypted_content: Some("anthropic-signature".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let responses_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::from_server("rs_server".to_string())),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("responses-encrypted".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let mut input = vec![anthropic_reasoning.clone(), responses_reasoning.clone()];
+    client.prepare_response_items_for_request(&mut input);
+
+    let mut expected_anthropic = anthropic_reasoning;
+    expected_anthropic.set_id(/*new_id*/ None);
+    assert_eq!(input, vec![expected_anthropic, responses_reasoning]);
+
+    // The foreign ID is omitted rather than serialized as null, and the
+    // Anthropic signature survives so the item stays replayable to Anthropic.
+    assert_eq!(
+        serde_json::to_value(&input).expect("serialize request input"),
+        serde_json::json!([
+            {
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "claude thinking"}],
+                "encrypted_content": "anthropic-signature",
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_server",
+                "summary": [],
+                "content": null,
+                "encrypted_content": "responses-encrypted",
+            },
+        ])
+    );
+}
+
 fn test_session_telemetry() -> SessionTelemetry {
     SessionTelemetry::new(
         ThreadId::new(),
@@ -1274,17 +1697,92 @@ fn spawned_session_source() -> SessionSource {
     })
 }
 
+/// Chat Completions reads tools exclusively from `prompt.tools`. A prompt that
+/// still carries the full catalog (the incremental-tools gate keeps it there
+/// for `WireApi::Chat`) must convert with the declarations intact, even when
+/// the history already contains tool calls.
+#[test]
+fn chat_completions_request_keeps_full_catalog_with_tool_call_history() {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::FunctionCall {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                namespace: None,
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: "call-1".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("call-1".to_string()),
+                name: None,
+                namespace: None,
+                output: FunctionCallOutputPayload {
+                    body: codex_protocol::models::FunctionCallOutputBody::Text("ok".to_string()),
+                    success: None,
+                },
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        tools: vec![ToolSpec::Function(ResponsesApiTool {
+            name: "shell".to_string(),
+            description: "Execute a shell command".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::default(),
+            output_schema: None,
+        })]
+        .into(),
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+            provenance: None,
+        },
+        ..Default::default()
+    };
+
+    let request = client
+        .new_session()
+        .build_chat_completions_request(
+            &prompt,
+            &test_model_info(),
+            /*effort*/ None,
+            "test-session",
+        )
+        .expect("tool call history with a declared catalog must build");
+
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0]["function"]["name"], "shell");
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| message.tool_calls.is_some()),
+        "tool call history should survive conversion"
+    );
+    let system = request
+        .messages
+        .first()
+        .expect("base instructions become the system message");
+    assert_eq!(system.role, "system");
+    assert_eq!(system.content, Some(json!("base instructions")));
+}
+
 fn reasoning_effort_in_request(
     model_info: &ModelInfo,
     session_source: SessionSource,
     effort: ReasoningEffort,
 ) -> ReasoningEffort {
     let client = test_model_client(session_source);
-    client
+    let responses_effort = client
         .build_responses_request(
             &Prompt::default(),
             model_info,
-            Some(effort),
+            Some(effort.clone()),
             codex_protocol::config_types::ReasoningSummary::None,
             /*service_tier*/ None,
             &test_responses_metadata_for_client(
@@ -1299,8 +1797,20 @@ fn reasoning_effort_in_request(
         .expect("build responses request")
         .reasoning
         .expect("request should include reasoning")
-        .effort
-        .expect("request should include reasoning effort")
+        .effort;
+    let chat_effort = client
+        .new_session()
+        .build_chat_completions_request(
+            &Prompt::default(),
+            model_info,
+            Some(effort),
+            "test-session",
+        )
+        .expect("build chat completions request")
+        .reasoning_effort;
+
+    assert_eq!(chat_effort, responses_effort);
+    responses_effort.expect("request should include reasoning effort")
 }
 
 #[test]

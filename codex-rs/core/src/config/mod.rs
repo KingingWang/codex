@@ -121,6 +121,7 @@ use codex_protocol::models::PermissionProfile;
 pub use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ProfileWorkspaceRoot;
 use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::DenyReadValidator;
@@ -262,7 +263,7 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usiz
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
-const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
+const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "agent_tools";
 
 pub(crate) const HARD_MIN_MULTI_AGENT_V2_TIMEOUT_MS: i64 = 0;
 pub(crate) const HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS: i64 =
@@ -661,6 +662,10 @@ pub struct Config {
     /// Controls whether `model_auto_compact_token_limit` applies to the full
     /// active context or only tokens after the carried compaction-window prefix.
     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
+
+    /// Forces the `apply_patch` tool shape for the selected model, overriding
+    /// the provider catalog metadata.
+    pub model_apply_patch_tool_type: Option<ApplyPatchToolType>,
 
     /// Percentage of the usable context window that triggers turn-end compaction.
     /// Zero disables turn-end compaction.
@@ -1207,6 +1212,15 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+
+    /// Optional path to a script whose output is dynamically appended to the
+    /// end of each request input. The script runs fresh for every sampling
+    /// request and its output is never persisted to conversation history.
+    pub dynamic_context_script: Option<String>,
+
+    /// Timeout for `dynamic_context_script` execution.
+    /// Defaults to 5 seconds.
+    pub dynamic_context_script_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -1410,6 +1424,15 @@ pub struct MultiAgentV2Config {
 }
 
 impl MultiAgentV2Config {
+    /// The OpenAI-reserved collaboration namespace requires encrypted messages.
+    /// Migrate legacy configurations to our plaintext tool namespace.
+    pub(crate) fn effective_tool_namespace(&self) -> Option<&str> {
+        match self.tool_namespace.as_deref() {
+            Some("collaboration") => Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE),
+            namespace => namespace,
+        }
+    }
+
     fn defaults_for_max_concurrency(max_concurrent_threads_per_session: usize) -> Self {
         Self {
             max_concurrent_threads_per_session,
@@ -1779,6 +1802,7 @@ impl Config {
             }),
             personality: self.personality,
             model_catalog: self.model_catalog.clone(),
+            model_apply_patch_tool_type: self.model_apply_patch_tool_type.clone(),
         }
     }
 
@@ -2934,7 +2958,14 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let tool_namespace = base
         .and_then(|config| config.tool_namespace.as_ref())
         .cloned()
-        .or(default.tool_namespace);
+        .or(default.tool_namespace)
+        .map(|namespace| {
+            if namespace == "collaboration" {
+                DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE.to_string()
+            } else {
+                namespace
+            }
+        });
     let non_code_mode_only = base
         .and_then(|config| config.non_code_mode_only)
         .unwrap_or(default.non_code_mode_only);
@@ -4313,7 +4344,7 @@ impl Config {
         let compact_prompt = compact_prompt.or(file_compact_prompt);
         let review_model = override_review_model.or(cfg.review_model);
 
-        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
+        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(false);
         let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
 
         let log_dir = cfg
@@ -4535,6 +4566,7 @@ impl Config {
             service_tier,
             review_model,
             model_context_window: cfg.model_context_window,
+            model_apply_patch_tool_type: cfg.model_apply_patch_tool_type.clone(),
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg
                 .model_auto_compact_token_limit_scope
@@ -4754,7 +4786,7 @@ impl Config {
                 .feedback
                 .as_ref()
                 .and_then(|feedback| feedback.enabled)
-                .unwrap_or(true),
+                .unwrap_or(false),
             tool_suggest,
             tui_notifications: cfg
                 .tui
@@ -4844,6 +4876,10 @@ impl Config {
                 .map(|t| t.quick_dials.clone())
                 .unwrap_or_default(),
             otel,
+            dynamic_context_script: cfg.dynamic_context_script.clone(),
+            dynamic_context_script_timeout: std::time::Duration::from_secs(
+                cfg.dynamic_context_script_timeout_secs.unwrap_or(5),
+            ),
         };
         if let Some(message) = config.credential_masking_warning(config.permissions.permission_profile()) {
             tracing::warn!("{message}");

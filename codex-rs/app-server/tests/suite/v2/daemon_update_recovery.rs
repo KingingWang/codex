@@ -379,7 +379,7 @@ async fn managed_force_shutdown_exits_with_blocked_rollout_writer() -> Result<()
                 responses::ev_response_created("spawn-child"),
                 responses::ev_function_call_with_namespace(
                     "spawn-child",
-                    "collaboration",
+                    "agent_tools",
                     "spawn_agent",
                     r#"{"task_name":"child","message":"Wait here","fork_turns":"none"}"#,
                 ),
