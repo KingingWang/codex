@@ -708,7 +708,7 @@ async fn input_interrupts_wait_agent_and_is_sent_in_follow_up_request(input: Wai
     const WAIT_CALL_ID: &str = "wait-call";
     const INITIAL_PROMPT: &str = "wait for an agent";
     const STEER_PROMPT: &str = "stop waiting and continue";
-    const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+    const MULTI_AGENT_V2_NAMESPACE: &str = "agent_tools";
 
     let (release_wait, wait_gate) = oneshot::channel();
     let first_chunks = vec![
@@ -2649,7 +2649,9 @@ async fn terminal_compaction_error_does_not_retry_pending_input(
         CompactionFailurePoint::PreTurn => ev_message_item_done("initial", "first answer"),
         CompactionFailurePoint::MidTurn => ev_function_call("call-1", "test_tool", "{}"),
     };
-    let failure = responses::sse_failed("failed-compact", "insufficient_quota", "quota exhausted");
+    // Fork: quota-class failures are stream-retryable now, so this test uses a terminal
+    // invalid_prompt failure to preserve its terminal-compaction premise.
+    let failure = responses::sse_failed("failed-compact", "invalid_prompt", "invalid prompt");
     let mut streams = vec![
         vec![
             chunk(ev_response_created("initial")),
@@ -2755,10 +2757,7 @@ async fn terminal_compaction_error_does_not_retry_pending_input(
     wait_for_event(codex, |event| {
         match event {
             EventMsg::Error(error) => {
-                assert_eq!(
-                    error.codex_error_info,
-                    Some(CodexErrorInfo::UsageLimitExceeded)
-                );
+                assert_eq!(error.codex_error_info, Some(CodexErrorInfo::InvalidPrompt));
                 errors.push(error.clone());
             }
             EventMsg::TurnComplete(completed) => {

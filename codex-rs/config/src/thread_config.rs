@@ -4,6 +4,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::ConfigLayerSource;
+#[cfg(test)]
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use thiserror::Error;
@@ -282,9 +284,11 @@ mod tests {
                     name = "local"
                     base_url = "http://127.0.0.1:8061/api/codex"
                     wire_api = "responses"
+                    chat_stream = false
                     requires_openai_auth = false
                     supports_websockets = true
                     supports_standalone_web_search = true
+                    freeform_tool_support = "auto"
 
                     [features]
                     plugins = false
@@ -306,6 +310,7 @@ mod tests {
             gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            chat_stream: false,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -320,6 +325,7 @@ mod tests {
             project_id: None,
             location: None,
             credential_file: None,
+            freeform_tool_support: FreeformToolSupport::Auto,
             include_internal_metadata: false,
         }
     }

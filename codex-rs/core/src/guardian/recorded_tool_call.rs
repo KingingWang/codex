@@ -118,7 +118,8 @@ pub(crate) async fn review_tool_call(
                 "unsupported tool for direct review".into(),
             ));
         }
-        let source = parsed_call.direct_source();
+        let source =
+            parsed_call.direct_source(step.turn.config.multi_agent_v2.effective_tool_namespace());
         let mut invocation = ToolInvocation {
             session: Arc::clone(session),
             turn: Arc::clone(&step.turn),
