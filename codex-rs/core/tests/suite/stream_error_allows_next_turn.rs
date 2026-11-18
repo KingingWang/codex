@@ -1,4 +1,5 @@
 use codex_core::TurnInputRequest;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::protocol::EventMsg;
@@ -74,6 +75,7 @@ async fn continue_after_stream_error() {
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -88,6 +90,7 @@ async fn continue_after_stream_error() {
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 

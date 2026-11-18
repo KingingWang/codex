@@ -46,7 +46,7 @@ Scenario: A parent spawns a child before the selected environment is configured.
 05:message/user:
     Delegate waiting for the shared workspace, and report what the worker finds.
 -- request 2 (request; parent waits for the worker) --
-06:function_call/collaboration.spawn_agent:{"fork_turns":"none","message":"Wait for the shared workspace to become ready.","task_name":"worker"}
+06:function_call/agent_tools.spawn_agent:{"fork_turns":"none","message":"Wait for the shared workspace to become ready.","task_name":"worker"}
 07:function_call_output:{"task_name":"/root/worker"}
 
 ## Window 2 (after request 2: input diverged at item 02, settings changed (tools))
@@ -182,9 +182,9 @@ Scenario: A parent spawns a child before the selected environment is configured.
     </environment_context>
 05:message/user:
     Delegate waiting for the shared workspace, and report what the worker finds.
-06:function_call/collaboration.spawn_agent:{"fork_turns":"none","message":"Wait for the shared workspace to become ready.","task_name":"worker"}
+06:function_call/agent_tools.spawn_agent:{"fork_turns":"none","message":"Wait for the shared workspace to become ready.","task_name":"worker"}
 07:function_call_output:{"task_name":"/root/worker"}
-08:function_call/collaboration.wait_agent:{"timeout_ms":10000}
+08:function_call/agent_tools.wait_agent:{"timeout_ms":10000}
 09:function_call_output:{"message":"Wait completed.","timed_out":false}
 10:agent_message
 11:message/user:

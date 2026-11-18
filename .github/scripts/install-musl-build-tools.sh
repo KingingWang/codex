@@ -4,6 +4,9 @@ set -euo pipefail
 : "${TARGET:?TARGET environment variable is required}"
 : "${GITHUB_ENV:?GITHUB_ENV environment variable is required}"
 
+# shellcheck source=download-musl-archive.sh
+source "$(dirname "${BASH_SOURCE[0]}")/download-musl-archive.sh"
+
 apt_update_args=()
 if [[ -n "${APT_UPDATE_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
@@ -35,8 +38,12 @@ esac
 libcap_version="2.75"
 libcap_sha256="de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632"
 libcap_tarball_name="libcap-${libcap_version}.tar.xz"
-libcap_download_url="https://github.com/openai/codex/releases/download/libcap-v${libcap_version}/${libcap_tarball_name}"
-libcap_debian_url="https://deb.debian.org/debian/pool/main/libc/libcap2/libcap2_${libcap_version}.orig.tar.xz"
+libcap_download_urls=(
+  "https://github.com/openai/codex/releases/download/libcap-v${libcap_version}/${libcap_tarball_name}"
+  "https://deb.debian.org/debian/pool/main/libc/libcap2/libcap2_${libcap_version}.orig.tar.xz"
+  "https://cdn.kernel.org/pub/linux/libs/security/linux-privs/libcap2/${libcap_tarball_name}"
+  "https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2/${libcap_tarball_name}"
+)
 
 # Use the musl toolchain as the Rust linker to avoid Zig injecting its own CRT.
 if command -v "${arch}-linux-musl-gcc" >/dev/null; then
@@ -64,14 +71,11 @@ if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
   mkdir -p "${libcap_src_root}" "${libcap_prefix}/lib" "${libcap_prefix}/include/sys" "${libcap_prefix}/include/linux" "${libcap_pkgconfig_dir}"
   libcap_tarball="${libcap_root}/${libcap_tarball_name}"
 
-  if ! curl -fsSL --connect-timeout 10 --max-time 60 "${libcap_download_url}" -o "${libcap_tarball}"; then
-    curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 "${libcap_debian_url}" -o "${libcap_tarball}"
-  fi
-  echo "${libcap_sha256}  ${libcap_tarball}" | sha256sum -c -
+  download_musl_archive "${libcap_sha256}" "${libcap_tarball}" "${libcap_download_urls[@]}"
 
   tar -xJf "${libcap_tarball}" -C "${libcap_src_root}"
   libcap_source_dir="${libcap_src_root}/libcap-${libcap_version}"
-  make -C "${libcap_source_dir}/libcap" -j"$(nproc)" \
+  make -C "${libcap_source_dir}/libcap" -j"${CARGO_BUILD_JOBS:-1}" \
     CC="${musl_linker}" \
     AR=ar \
     RANLIB=ranlib

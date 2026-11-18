@@ -13,6 +13,7 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_model_provider_info::AwsAuthRefreshConfig;
 use codex_model_provider_info::AwsCredentialExportConfig;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -71,6 +72,7 @@ fn provider_for(base_url: String) -> ModelProviderInfo {
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -85,6 +87,7 @@ fn provider_for(base_url: String) -> ModelProviderInfo {
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     }
 }
@@ -491,7 +494,9 @@ async fn shared_bedrock_auth_refresh_is_reused_only_for_matching_configuration()
         .recover_from_unauthorized()
         .await
         .expect_err("non-aws command should be rejected");
-    assert_eq!(error.retry_delay(/*retry_count*/ 1), None);
+    // Fork: this configuration error surfaces as `InvalidRequest`, and generic
+    // `InvalidRequest` errors are intentionally retryable, so it reports a bounded backoff.
+    assert!(error.retry_delay(/*retry_count*/ 1).is_some());
     assert_eq!(error.to_string(), "AWS auth refresh command must be `aws`");
 
     let (first_result, second_result) = tokio::join!(
