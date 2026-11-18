@@ -388,13 +388,20 @@ be loaded. This covers turn start/steer, review, compaction, manual queue start,
 updates. Realtime connections use separate routing configuration and are not checked here.
 Interrupt, realtime stop, and goal pause/clear remain available.
 
-Resume and input use the thread's saved provider even when a different provider is the default.
-A cold resume resolves the saved provider from configuration. A loaded thread uses its retained
-provider configuration and checks current managed policy before accepting input. The JSON-RPC
-error's `data` contains `modelProviderNotConfigured` for a missing provider or
-`modelProviderPolicyConflict` for a mandatory-policy conflict. Clients can use `thread/read`
-to display history when input is blocked. A resume request that explicitly selects a
-different provider cannot change the thread's saved provider.
+Resume and input RPCs keep a thread's saved provider route. This fork does not require that route
+to equal the current configured provider, including profile and app-server launch overrides,
+because Codex core routes a turn through the model catalog provider whenever the model declares
+one and treats `model_provider` as the fallback for models that do not. Saved and requested
+providers are still rejected when managed requirements conflict or when current configuration no
+longer defines them. The JSON-RPC error's `data` contains `ModelProviderError`:
+`modelProviderNotConfigured` identifies a missing provider and `modelProviderPolicyConflict`
+identifies a mandatory-policy conflict. `modelProviderMismatch` (`modelProvider` and
+`currentModelProvider`) remains in the schema for clients built against upstream, but this fork no
+longer emits it. Clients can still use `thread/read` to display history and disable the composer
+with the error's explanation. Changing the resume request's provider does not bypass validation of
+the saved provider. Input is also rejected when the current provider configuration cannot be
+loaded. Older clients retain their normal error fallback for unrecognized structured error
+variants.
 
 ## Managed network requirements
 

@@ -6,13 +6,13 @@ Scenario: A worker inherits the parent prefix, then receives its own window hint
 
 ## Window 1
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=2c5684dede3a1a9c):
+00:additional_tools/developer (2; hash=ea3098f0e2a578ae):
         - namespace/functions; hash=c0e72eb3b93fb0da
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/new_context
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=9d82986c8f646fd5
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -55,18 +55,18 @@ Scenario: A worker inherits the parent prefix, then receives its own window hint
 11:message/user:
     Have a worker check both results.
 -- request 3 (turn) --
-12:function_call/collaboration.spawn_agent:{"fork_turns":"all","message":"Check both inherited results.","task_name":"worker"}
+12:function_call/agent_tools.spawn_agent:{"fork_turns":"all","message":"Check both inherited results.","task_name":"worker"}
 13:function_call_output:{"task_name":"/root/worker"}
 
 ## Window 2 (after request 3: input diverged at item 13)
 -- request 4 (turn) --
-00:additional_tools/developer (2; hash=2c5684dede3a1a9c):
+00:additional_tools/developer (2; hash=ea3098f0e2a578ae):
         - namespace/functions; hash=c0e72eb3b93fb0da
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/new_context
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=9d82986c8f646fd5
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -107,7 +107,7 @@ Scenario: A worker inherits the parent prefix, then receives its own window hint
     The second result is ready.
 11:message/user:
     Have a worker check both results.
-12:function_call/collaboration.spawn_agent:{"fork_turns":"all","message":"Check both inherited results.","task_name":"worker"}
+12:function_call/agent_tools.spawn_agent:{"fork_turns":"all","message":"Check both inherited results.","task_name":"worker"}
 13:function_call_output:aborted
 14:message/developer:
     You are now a newly spawned child agent. The preceding conversation is inherited parent context. Follow ...are not inherited. Report your result to your parent. [hash=0e586a5d405d39db]

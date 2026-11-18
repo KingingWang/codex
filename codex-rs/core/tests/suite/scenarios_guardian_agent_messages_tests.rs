@@ -71,7 +71,7 @@ async fn native_agent_review_requires_openai_on_start_and_resume(
         let call_id = format!("send-{phase}");
         let mut call = responses::ev_function_call_with_namespace(
             &call_id,
-            "collaboration",
+            "agent_tools",
             "send_message",
             r#"{"target":"/root/missing","message":"opaque-message"}"#,
         );

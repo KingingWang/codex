@@ -7102,3 +7102,53 @@ async fn thread_resume_recovers_after_provider_configuration_is_restored() -> Re
     assert_eq!(resumed.model, "gpt-5.2-codex");
     Ok(())
 }
+
+/// Fork (Codez): a saved route stays resumable while its provider definition exists, even when the
+/// default selection points at another provider. Per-model catalog providers make the default a
+/// fallback for models without their own provider, not a precondition for continuing a chat.
+#[tokio::test]
+async fn thread_resume_keeps_saved_provider_when_default_selection_differs() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(home.path())?;
+    let thread_id = create_fake_rollout(
+        home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved history",
+        Some("old_provider"),
+        /*git_info*/ None,
+    )?;
+    let config_path = home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    let server_uri = server.uri();
+    std::fs::write(
+        &config_path,
+        format!(
+            "{config}\n[model_providers.old_provider]\nname = 'Original provider'\nbase_url = '{server_uri}/v1'\n"
+        ),
+    )?;
+    let mut client = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build_initialized()
+        .await?;
+    let id = client
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let resumed: ThreadResumeResponse = client.read_response(id).await?;
+    assert_eq!(resumed.model_provider, "old_provider");
+    // The default selection is untouched; the resumed thread reports its own retained route.
+    assert!(std::fs::read_to_string(&config_path)?.contains("model_provider = \"mock_provider\""));
+    let id = client
+        .send_raw_request(
+            "thread/read",
+            Some(json!({"threadId": thread_id, "includeTurns": false})),
+        )
+        .await?;
+    let read: codex_app_server_protocol::ThreadReadResponse = client.read_response(id).await?;
+    assert_eq!(read.thread.model_provider, "old_provider");
+    Ok(())
+}

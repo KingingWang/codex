@@ -17,6 +17,7 @@ use codex_mcp::McpBinding;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_model_provider_info::GCP_PROVIDER_ID;
+use codex_model_provider_info::WireApi;
 use codex_otel::SessionTelemetry;
 use codex_plugin::ExecutorPluginHookSource;
 use codex_protocol::items::ModelInvocationContext;
@@ -74,10 +75,37 @@ impl StepContext {
         }
     }
 
+    /// Whether the active model and provider wire protocol can carry tool
+    /// declarations as history items. Chat Completions, Anthropic, and Gemini
+    /// converters read tools exclusively from `Prompt.tools`.
+    pub(crate) fn incremental_tools_supported(&self) -> bool {
+        self.incremental_tools_feature().is_some()
+            && matches!(self.turn.provider.info().wire_api, WireApi::Responses)
+    }
+
     /// Whether new context windows should record tool declarations in history.
     pub(crate) fn incremental_tools_enabled(&self) -> bool {
-        self.incremental_tools_feature()
-            .is_some_and(|feature| self.turn.config.features.enabled(feature))
+        let Some(feature) = self.incremental_tools_feature() else {
+            return false;
+        };
+        if !self.turn.config.features.enabled(feature) {
+            return false;
+        }
+        // Incremental tools would silently drop the whole tool catalog on
+        // non-Responses providers, so ignore the feature there.
+        let wire_api = self.turn.provider.info().wire_api;
+        if !matches!(wire_api, WireApi::Responses) {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    wire_api = %wire_api,
+                    "ignoring incremental tools: only the Responses wire API supports \
+                     tool declarations in history"
+                );
+            });
+            return false;
+        }
+        true
     }
 
     /// Pairs the step's environments with access using current session and originating-turn grants.

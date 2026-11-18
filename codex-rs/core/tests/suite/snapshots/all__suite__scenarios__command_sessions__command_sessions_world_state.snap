@@ -6,7 +6,7 @@ Scenario: A Code Mode script drops its command handle. WorldState retains it whi
 
 ## Window 1
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=08fdf601acba9636):
+00:additional_tools/developer (3; hash=1d155bda3f921d0c):
         - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
@@ -14,7 +14,7 @@ Scenario: A Code Mode script drops its command handle. WorldState retains it whi
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=132d0256c7f80203
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=ffc8ee5e5467de4d
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -58,7 +58,7 @@ Scenario: A Code Mode script drops its command handle. WorldState retains it whi
 
 ## Window 2 (after request 3: settings changed (model))
 -- request 4 (turn) --
-00:additional_tools/developer (3; hash=08fdf601acba9636):
+00:additional_tools/developer (3; hash=1d155bda3f921d0c):
         - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
@@ -66,7 +66,7 @@ Scenario: A Code Mode script drops its command handle. WorldState retains it whi
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=132d0256c7f80203
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=ffc8ee5e5467de4d
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -130,7 +130,7 @@ Scenario: A Code Mode script drops its command handle. WorldState retains it whi
 
 ## Window 3 (after request 5: input diverged at item 00, settings changed (model))
 -- request 6 (turn) --
-00:additional_tools/developer (3; hash=d5796ee97b1e1527):
+00:additional_tools/developer (3; hash=0d68075c7cd4069b):
         - namespace/functions; hash=f6f779209c4af0f3
           - custom/exec
           - function/wait
@@ -138,7 +138,7 @@ Scenario: A Code Mode script drops its command handle. WorldState retains it whi
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=132d0256c7f80203
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=ffc8ee5e5467de4d
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents

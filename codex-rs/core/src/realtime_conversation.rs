@@ -1470,6 +1470,7 @@ struct PreparedRealtimeConversationStart {
     session_config: RealtimeSessionConfig,
     transport: ConversationStartTransport,
     auth_context: codex_model_provider::ProviderAuthContext,
+    model_client: ModelClient,
 }
 
 #[derive(Clone, Copy)]
@@ -1485,10 +1486,12 @@ async fn prepare_realtime_start(
     sess.services
         .model_client
         .validate_required_cyber_access_program(/*programs*/ None)?;
-    let provider = sess.provider().await;
-    let auth_manager = sess
-        .services
-        .model_client
+    // Resolve the per-model provider (if any) so realtime requests target the
+    // same provider as regular text turns.
+    let turn_context = sess.new_default_turn().await;
+    let provider = turn_context.provider.info().clone();
+    let model_client = sess.model_client_for_turn(&turn_context);
+    let auth_manager = model_client
         .auth_manager()
         .unwrap_or_else(|| Arc::clone(&sess.services.auth_manager));
     let config = sess.get_config().await;
@@ -1678,6 +1681,7 @@ async fn prepare_realtime_start(
         version,
         session_config,
         transport,
+        model_client,
     })
 }
 
@@ -1902,6 +1906,7 @@ async fn handle_start_inner(
         version,
         session_config,
         transport,
+        model_client,
     } = prepared_start;
     sess.initialize_realtime_history()
         .or_cancel(&attachment_control.token)
@@ -1935,7 +1940,7 @@ async fn handle_start_inner(
         codex_response_handoff_channel_prefixes,
         realtime_call_api_provider,
         session_config,
-        model_client: sess.services.model_client.clone(),
+        model_client,
         sdp,
         existing_call_id,
     };

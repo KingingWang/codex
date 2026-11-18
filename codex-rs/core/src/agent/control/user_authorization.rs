@@ -290,8 +290,7 @@ impl LocalAgentControl {
                     .config()
                     .await
                     .multi_agent_v2
-                    .tool_namespace
-                    .as_deref(),
+                    .effective_tool_namespace(),
             )
         } else {
             Vec::new()

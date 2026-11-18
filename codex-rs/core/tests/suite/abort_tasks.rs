@@ -156,7 +156,7 @@ async fn start_active_tree(
             ev_response_created(name),
             ev_function_call_with_namespace(
                 name,
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({"message": message, "task_name": name, "fork_turns": "none"}).to_string(),
             ),

@@ -442,6 +442,37 @@ impl ConfigManager {
         Ok(CloudStartupConfig { bootstrap, config })
     }
 
+    /// Admits resumed threads and input on the thread's own retained provider route.
+    pub(crate) async fn check_thread_model_provider_for_input(
+        &self,
+        current: &Config,
+    ) -> std::io::Result<()> {
+        self.check_thread_model_provider(current).await?;
+        let configured = self
+            .load_latest_config(Some(current.cwd.to_path_buf()))
+            .await?;
+        // Fork (Codez): the retained route stays authoritative, so the currently selected default
+        // provider no longer gates input. Codex core resolves the per-turn provider from the model
+        // catalog entry whenever the model declares one (`TurnContext`: "If the model catalog entry
+        // specifies a provider, use it instead of the session-level provider"), which makes
+        // `model_provider` a fallback for models without their own provider. Requiring it to equal
+        // the thread identity rejected every chat whose model routes to another configured
+        // provider. A provider whose definition disappeared is still rejected, and managed
+        // requirements keep their own conflict check above.
+        if !configured
+            .model_providers
+            .contains_key(&current.model_provider_id)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                ModelProviderError::ModelProviderNotConfigured {
+                    model_provider: current.model_provider_id.clone(),
+                },
+            ));
+        }
+        Ok(())
+    }
+
     /// Installs local policy before cloud access; failed policy loads block traffic while
     /// non-strict startup remains available for configuration repair.
     pub(crate) async fn load_startup_config(
@@ -531,7 +562,7 @@ impl ConfigManager {
         &self,
         saved_provider: Option<&str>,
         request_overrides: Option<HashMap<String, serde_json::Value>>,
-        mut typesafe_overrides: ConfigOverrides,
+        typesafe_overrides: ConfigOverrides,
         cwd: Option<PathBuf>,
     ) -> std::io::Result<Config> {
         let requested_provider = typesafe_overrides.model_provider.clone().or_else(|| {
@@ -541,9 +572,6 @@ impl ConfigManager {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         });
-        if let Some(saved) = saved_provider {
-            typesafe_overrides.model_provider = Some(saved.to_owned());
-        }
         self.load_with_validation(
             &self.current_cli_overrides(),
             request_overrides,
@@ -555,7 +583,11 @@ impl ConfigManager {
                     .or(saved_provider)
                     .or(config.model_provider.as_deref())
                     .unwrap_or("openai");
-                // Validate the saved route even when a client sends a provider override.
+                // Validate the saved route even when a client sends a provider override. Managed
+                // requirements and missing definitions still reject; fork (Codez) drops the
+                // upstream rule that the saved provider must equal the current selection, because
+                // per-model catalog providers make the default selection a fallback rather than
+                // the route a retained thread actually uses.
                 for provider in [
                     saved_provider.unwrap_or(requested_provider),
                     requested_provider,
@@ -582,14 +614,6 @@ impl ConfigManager {
                             },
                         ));
                     }
-                }
-                if let Some(saved) = saved_provider
-                    && saved != requested_provider
-                {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("Cannot change this thread's model provider from `{saved}` to `{requested_provider}` on resume."),
-                    ));
                 }
                 Ok(())
             },

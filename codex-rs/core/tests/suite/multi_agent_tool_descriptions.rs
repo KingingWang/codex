@@ -29,19 +29,19 @@ const CATALOG_PARAMETERS: &str = r#"{
     "title": "Catalog parameters",
     "properties": {
         "catalog_limit": {"type": "integer", "description": "Catalog limit."},
-        "message": {"type": "string", "description": "Catalog message.", "encrypted": false}
+        "message": {"type": "string", "description": "Catalog message.", "encrypted": true}
     },
     "required": ["catalog_limit"],
     "additionalProperties": false,
     "$defs": {"unused": {"type": "string"}}
 }"#;
 
-// The existing JsonSchema subset retains supported fields and drops unknown keywords.
+// V2 retains supported fields, but never advertises encrypted parameters.
 const EXPECTED_CATALOG_PARAMETERS: &str = r#"{
     "type": "object",
     "properties": {
         "catalog_limit": {"type": "integer", "description": "Catalog limit."},
-        "message": {"type": "string", "description": "Catalog message.", "encrypted": false}
+        "message": {"type": "string", "description": "Catalog message."}
     },
     "required": ["catalog_limit"],
     "additionalProperties": false,
@@ -101,7 +101,7 @@ fn all_tool_messages(message: Value) -> Value {
     "spawn_agent": {"parameters": r#"{"type":"object"}"#},
     "send_message": {"parameters": r#"{"type":"object"}"#},
     "followup_task": {"parameters": r#"{"type":"object"}"#}
-}}), Exposure::Namespaced, None; "missing_encrypted_parameters_fall_back")]
+}}), Exposure::Namespaced, None; "missing_message_parameters_fall_back")]
 #[test_case(json!({"multi_agent": {"send_message": {"parameters": CATALOG_PARAMETERS}}}), Exposure::Namespaced, Some(EXPECTED_CATALOG_PARAMETERS); "sparse_parameters")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
@@ -248,9 +248,6 @@ async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
                 && tool_messages["multi_agent"][name]["parameters"].is_string()
             {
                 expected_tool["parameters"] = serde_json::from_str(parameters)?;
-                if matches!(name, "spawn_agent" | "send_message" | "followup_task") {
-                    expected_tool["parameters"]["properties"]["message"]["encrypted"] = json!(true);
-                }
                 if matches!(exposure, Exposure::CodeMode) {
                     let description = expected_tool["description"].as_str().expect("description");
                     let (prefix, signature) =

@@ -15,6 +15,7 @@ use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
 use codex_features::Feature;
 use codex_history::RolloutItem;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ContentItem;
@@ -52,7 +53,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agent_tools";
 
 #[derive(Clone, Copy, Default)]
 enum HostAccountingBehavior {
@@ -788,7 +789,7 @@ async fn restates_the_current_remainder_after_compaction() -> Result<()> {
         ],
     )
     .await;
-    let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    let mut model_provider = ModelProviderInfo::create_openai_provider(None);
     model_provider.name = "OpenAI-compatible test provider".to_string();
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;

@@ -38,7 +38,7 @@ use wiremock::matchers::path;
 #[path = "multi_agent_restore_tests.rs"]
 mod restore_tests;
 
-const COLLABORATION_NAMESPACE: &str = "collaboration";
+const COLLABORATION_NAMESPACE: &str = "agent_tools";
 const SPAWN_CALL_ID: &str = "spawn-worker";
 const NESTED_CALL_ID: &str = "spawn-grandchild";
 const QUEUE_CALL_ID: &str = "queue-worker-message";

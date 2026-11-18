@@ -20,7 +20,7 @@ Scenario: Agent follow-ups interrupt at a reasoning boundary, preserve encrypted
     Child agents can also spawn their own sub-agents.
 
     When you provide a response in the final channel, that content is immediately delivered back to your parent agent.
-    <OMITTED 15 LINES; ~225 TOKENS; hash=fa366829bdb214be>
+    <OMITTED 15 LINES; ~217 TOKENS; hash=2444efbe5aee54d9>
     - All agents use the same current working directory.
     - As a result, edits made by one agent are immediately visible to all other agents.
 
