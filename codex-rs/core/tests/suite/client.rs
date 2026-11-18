@@ -22,6 +22,7 @@ use codex_login::auth::BedrockApiKeyAuth;
 use codex_login::default_client::originator;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
+use codex_model_provider_info::FreeformToolSupport;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
@@ -551,8 +552,7 @@ async fn non_openai_responses_requests_include_item_ids_without_passthrough_meta
         ],
     )
     .await;
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.name = "Test Responses".to_string();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -1825,9 +1825,7 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
     )
     .await;
     let auth_fixture = ProviderAuthCommandFixture::new(&["command-token"]).unwrap();
-    let mut provider = built_in_model_providers(/*openai_base_url*/ None)
-        .remove(AMAZON_BEDROCK_PROVIDER_ID)
-        .expect("Amazon Bedrock provider should be built in");
+    let mut provider = ModelProviderInfo::create_amazon_bedrock_provider(None);
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.auth = Some(auth_fixture.auth());
     provider.aws = None;
@@ -1869,6 +1867,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -1883,6 +1882,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -2040,8 +2040,7 @@ async fn chatgpt_auth_sends_correct_request() {
     )
     .await;
 
-    let mut model_provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut model_provider = ModelProviderInfo::create_openai_provider(None);
     model_provider.base_url = Some(format!("{}/api/codex", server.uri()));
     model_provider.supports_websockets = false;
     let mut builder = test_codex()
@@ -2137,7 +2136,7 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
     let model_provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
         supports_websockets: false,
-        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+        ..ModelProviderInfo::create_openai_provider(None)
     };
 
     // Init session
@@ -3384,6 +3383,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -3398,6 +3398,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -3624,8 +3625,7 @@ async fn token_count_includes_rate_limits_snapshot() {
         .mount(&server)
         .await;
 
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
 
@@ -3763,8 +3763,14 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         .mount(&server)
         .await;
 
-    let mut builder = test_codex();
-    let codex_fixture = builder.build(&server).await?;
+    // Fork: usage-limit 429s are stream-retryable; disable retries so this rate-limit
+    // event assertion keeps its single-request terminal premise.
+    let codex_fixture = test_codex()
+        .with_config(|config| {
+            config.model_provider.stream_max_retries = Some(0);
+        })
+        .build(&server)
+        .await?;
     let codex = codex_fixture.codex.clone();
 
     let expected_limits = json!({
@@ -4234,6 +4240,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         )])),
         env_key_instructions: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
             "Value".into(),
@@ -4250,6 +4257,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 
@@ -4325,6 +4333,7 @@ async fn env_var_overrides_loaded_auth() {
         gateway_oauth: None,
         aws: None,
         wire_api: WireApi::Responses,
+        chat_stream: false,
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
             "Value".into(),
@@ -4341,6 +4350,7 @@ async fn env_var_overrides_loaded_auth() {
         project_id: None,
         location: None,
         credential_file: None,
+        freeform_tool_support: FreeformToolSupport::Auto,
         include_internal_metadata: false,
     };
 

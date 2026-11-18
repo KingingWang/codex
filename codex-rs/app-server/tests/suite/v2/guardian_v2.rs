@@ -506,7 +506,7 @@ async fn parent_response(
                     responses::ev_response_created(call_id),
                     responses::ev_function_call_with_namespace(
                         call_id,
-                        "collaboration",
+                        "agent_tools",
                         tool_name,
                         &arguments.to_string(),
                     ),

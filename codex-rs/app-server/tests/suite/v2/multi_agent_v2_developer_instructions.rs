@@ -45,7 +45,7 @@ use tokio::time::timeout;
 const READ_TIMEOUT: Duration = Duration::from_secs(25);
 #[cfg(not(windows))]
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
-const NAMESPACE: &str = "collaboration";
+const NAMESPACE: &str = "agent_tools";
 const PARENT_INSTRUCTIONS: &str = "parent-only developer instructions";
 const CHILD_INSTRUCTIONS: &str = "child-only developer instructions";
 const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";

@@ -367,7 +367,7 @@ async fn thread_delete_removes_persisted_boards_even_with_agent_feature_disabled
         responses::sse(vec![
             responses::ev_function_call_with_namespace(
                 "post",
-                "collaboration",
+                "agent_tools",
                 "post",
                 &json!({"new_channel_name":"design", "text":"Persist this decision"}).to_string(),
             ),

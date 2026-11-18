@@ -224,14 +224,14 @@ async fn thread_revert_preserves_model_selected_multi_agent_version(restart: boo
                 .expect("tools")
                 .iter()
                 .filter_map(|tool| tool["name"].as_str())
-                .filter(|name| matches!(*name, "collaboration" | "multi_agent_v1"))
+                .filter(|name| matches!(*name, "agent_tools" | "multi_agent_v1"))
                 .map(str::to_owned)
                 .collect::<Vec<_>>(),
         );
     }
     assert_eq!(
         multi_agent_namespaces,
-        vec![vec!["collaboration"], vec!["collaboration"]]
+        vec![vec!["agent_tools"], vec!["agent_tools"]]
     );
     Ok(())
 }

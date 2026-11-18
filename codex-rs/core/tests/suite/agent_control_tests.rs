@@ -431,7 +431,7 @@ async fn host_threads_preserve_lineage_settings_and_resume_routing() -> anyhow::
                 responses::sse(vec![
                     responses::ev_function_call_with_namespace(
                         "post",
-                        "collaboration",
+                        "agent_tools",
                         "post",
                         &arguments.to_string(),
                     ),
@@ -934,7 +934,7 @@ async fn collaboration_tools_dispatch_to_the_host_controller() -> anyhow::Result
     ] {
         events.push(responses::ev_function_call_with_namespace(
             call,
-            "collaboration",
+            "agent_tools",
             name,
             &arguments.to_string(),
         ));
@@ -975,7 +975,7 @@ async fn host_mailbox_notifies_waiting_agent_and_delivers_once() -> anyhow::Resu
             responses::ev_response_created("waiting"),
             responses::ev_function_call_with_namespace(
                 "wait-mail",
-                "collaboration",
+                "agent_tools",
                 "wait_agent",
                 r#"{"timeout_ms":10000}"#,
             ),

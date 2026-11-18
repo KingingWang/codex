@@ -4,14 +4,12 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use codex_app_server::in_process;
-use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadQueueAddParams;
 use codex_app_server_protocol::ThreadQueueAddResponse;
 use codex_app_server_protocol::ThreadQueueListParams;
@@ -128,7 +126,7 @@ base_url = "{}/v1"
     } else {
         requirements.replace(gateway.uri(), &other.uri())
     };
-    std::fs::write(requirements_path, updated)?;
+    std::fs::write(&requirements_path, updated)?;
     let provider_error =
         codex_app_server_protocol::ModelProviderError::ModelProviderPolicyConflict {
             model_provider: "gateway".into(),
@@ -267,7 +265,82 @@ base_url = "{}/v1"
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malformed_system_defaults_do_not_block_existing_thread_turn() -> Result<()> {
+async fn retained_thread_provider_survives_default_selection_change() -> Result<()> {
+    let provider = MockServer::start().await;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+    let path = home.path().join("config.toml");
+    let original = std::fs::read_to_string(&path)?;
+    let mut server = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build_initialized()
+        .await?;
+    let started = server.start_thread(ThreadStartParams::default()).await?;
+    let requests = responses::mount_sse_once(
+        &provider,
+        responses::sse(vec![responses::ev_completed("retained")]),
+    )
+    .await;
+    // Fork (Codez): moving the default selection away from this thread's provider must not block
+    // it. Codex core routes the turn through the model catalog provider when the model declares
+    // one, so the default selection is a fallback rather than the thread's route.
+    std::fs::write(
+        &path,
+        original.replace(
+            "model_provider = \"mock_provider\"",
+            "model_provider = \"openai\"",
+        ),
+    )?;
+    let params = TurnStartParams {
+        thread_id: started.thread.id.clone(),
+        input: vec![UserInput::Text {
+            text: "Continue on the retained provider.".into(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    let id = server.send_turn_start_request(params.clone()).await?;
+    let _: TurnStartResponse = server.read_response(id).await?;
+    server
+        .read_stream_until_notification_message("turn/completed")
+        .await?;
+    assert_eq!(requests.requests().len(), 1);
+    let id = server
+        .send_raw_request(
+            "thread/read",
+            Some(json!({"threadId": started.thread.id, "includeTurns": false})),
+        )
+        .await?;
+    let read: codex_app_server_protocol::ThreadReadResponse = server.read_response(id).await?;
+    assert_eq!(read.thread.model_provider, "mock_provider");
+    // Losing the retained definition still rejects input with structured data and sends no
+    // inference traffic, so a deleted provider never silently reroutes an existing chat.
+    let without_definition = std::fs::read_to_string(&path)?.replace(
+        "[model_providers.mock_provider]",
+        "[model_providers.retired_provider]",
+    );
+    std::fs::write(&path, without_definition)?;
+    let id = server.send_turn_start_request(params).await?;
+    let error = server
+        .read_stream_until_error_message(RequestId::Integer(id))
+        .await?;
+    let expected = codex_app_server_protocol::ModelProviderError::ModelProviderNotConfigured {
+        model_provider: "mock_provider".into(),
+    };
+    assert_eq!(
+        error.error,
+        JSONRPCErrorError {
+            code: -32600,
+            message: expected.to_string(),
+            data: Some(serde_json::to_value(expected)?),
+        }
+    );
+    assert_eq!(requests.requests().len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_system_defaults_reject_input_until_provider_can_be_resolved() -> Result<()> {
     let provider = MockServer::start().await;
     let home = TempDir::new()?;
     MockResponsesConfig::new(&provider.uri()).write(home.path())?;
@@ -282,7 +355,7 @@ async fn malformed_system_defaults_do_not_block_existing_thread_turn() -> Result
             .build()
             .await?,
     );
-    let mut client = in_process::start(InProcessStartArgs {
+    let client = in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
         config,
         cli_overrides: Vec::new(),
@@ -337,23 +410,9 @@ async fn malformed_system_defaults_do_not_block_existing_thread_turn() -> Result
             },
         })
         .await?
-        .expect("turn/start should succeed");
-    let _: TurnStartResponse = serde_json::from_value(response)?;
-    timeout(Duration::from_secs(/*secs*/ 60), async {
-        loop {
-            let Some(event) = client.next_event().await else {
-                anyhow::bail!("app-server stopped before turn/completed");
-            };
-            if let InProcessServerEvent::ServerNotification(notification) = event
-                && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
-                && completed.thread_id == started.thread.id
-            {
-                return Ok::<(), anyhow::Error>(());
-            }
-        }
-    })
-    .await??;
-    assert_eq!(requests.requests().len(), 1);
+        .expect_err("cannot verify the selected provider from malformed configuration");
+    assert_eq!(response.code, -32600);
+    assert!(requests.requests().is_empty());
     client.shutdown().await?;
     Ok(())
 }

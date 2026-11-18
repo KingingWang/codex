@@ -40,6 +40,13 @@ pub type Result<T> = std::result::Result<T, CodexErr>;
 /// Limit UI error messages to a reasonable size while keeping useful context.
 const ERROR_MESSAGE_UI_MAX_BYTES: usize = 2 * 1024;
 
+/// Upper bound for locally computed retry delays.
+///
+/// Retry budgets are user configurable and uncapped, so exponential backoff must be bounded;
+/// otherwise a large `stream_max_retries` would sleep for effectively forever between attempts.
+/// Server-advised delays are honored as-is and are not subject to this bound.
+const MAX_LOCAL_RETRY_DELAY: Duration = Duration::from_secs(60);
+
 #[derive(Error, Debug)]
 pub enum SandboxErr {
     /// Error from sandbox execution
@@ -456,14 +463,15 @@ impl CodexErr {
     /// Returns the delay before the given retry attempt, or `None` for a terminal error.
     ///
     /// The first retry is attempt one. Retryable errors use server advice when available and
-    /// otherwise use exponential backoff with jitter. Callers enforce their own retry budgets.
+    /// otherwise use exponential backoff with jitter, capped at 60 seconds.
+    /// Callers enforce their own retry budgets.
     pub fn retry_delay(&self, retry_count: u64) -> Option<Duration> {
         match self.retry_policy() {
             RetryPolicy::Never => None,
             RetryPolicy::ServerDirected => self.server_retry_delay(),
             RetryPolicy::Backoff | RetryPolicy::FallBackToHttp => Some(
                 self.server_retry_delay()
-                    .unwrap_or_else(|| backoff(retry_count)),
+                    .unwrap_or_else(|| backoff(retry_count).min(MAX_LOCAL_RETRY_DELAY)),
             ),
         }
     }
@@ -484,10 +492,7 @@ impl CodexErr {
             | CodexErrorDetails::Interrupted
             | CodexErrorDetails::EnvVar(_)
             | CodexErrorDetails::Fatal(_)
-            | CodexErrorDetails::UsageNotIncluded
-            | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()
-            | CodexErrorDetails::InvalidRequest(_)
             | CodexErrorDetails::InvalidAudioInput { .. }
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
@@ -505,20 +510,25 @@ impl CodexErr {
             | CodexErrorDetails::AgentLimitReached { .. }
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent
-            | CodexErrorDetails::UsageLimitReached(_)
-            | CodexErrorDetails::FlexUnavailable
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::BioPolicy { .. }
             | CodexErrorDetails::WorkspaceAccessDenied(_)
             | CodexErrorDetails::AccessProgramNotEnabled(_)
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => RetryPolicy::Never,
-            CodexErrorDetails::ServerOverloaded
-            | CodexErrorDetails::PolicyCapacityUnavailable
-            | CodexErrorDetails::RetryLimit(_) => RetryPolicy::ServerDirected,
+            // Fork: keep upstream 429s, overloaded responses, retry limits, and generic
+            // gateway 400s retryable. Server advice still wins over exponential backoff.
+            CodexErrorDetails::PolicyCapacityUnavailable => RetryPolicy::ServerDirected,
             CodexErrorDetails::WebsocketMessageTooLarge => RetryPolicy::FallBackToHttp,
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
+            | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::ServerOverloaded
+            | CodexErrorDetails::UsageNotIncluded
+            | CodexErrorDetails::QuotaExceeded
+            | CodexErrorDetails::UsageLimitReached(_)
+            | CodexErrorDetails::FlexUnavailable
+            | CodexErrorDetails::RetryLimit(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
             | CodexErrorDetails::UnexpectedStatus(_)
