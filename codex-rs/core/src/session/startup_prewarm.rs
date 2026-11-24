@@ -377,6 +377,14 @@ async fn schedule_startup_prewarm_inner(
     let startup_turn_context = session
         .new_startup_prewarm_turn_with_sub_id(INITIAL_SUBMIT_ID.to_owned())
         .await;
+    // Honor a per-model provider override without discarding the session when
+    // the provider is unchanged. The preconnect below must stay in the same
+    // session as the generate=false warmup and the subsequent generation.
+    if !client_session.has_same_provider(&startup_turn_context.provider) {
+        client_session = session
+            .model_client_for_turn(&startup_turn_context)
+            .new_session();
+    }
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_create_turn_context",
         prewarm_started_at.elapsed(),
@@ -511,6 +519,14 @@ async fn schedule_startup_prewarm_inner(
     let responses_metadata = session
         .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Prewarm)
         .await;
+    // Restoration may select a different model provider after the provisional
+    // handshake. Switch only in that case; replacing an equivalent session
+    // would lose the preconnected socket and its continuation state.
+    if !client_session.has_same_provider(&step_context.turn.provider) {
+        client_session = session
+            .model_client_for_turn(&step_context.turn)
+            .new_session();
+    }
     let websocket_warmup_started_at = Instant::now();
     // Prewarm establishes the request baseline before the first turn can change effort.
     client_session

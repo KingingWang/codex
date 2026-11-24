@@ -704,7 +704,7 @@ async fn cached_executor_mcp_cannot_read_host_token_after_capability_downgrade()
             PARENT_PROMPT,
             vec![responses::ev_function_call_with_namespace(
                 "spawn-credential-worker",
-                "collaboration",
+                "agent_tools",
                 "spawn_agent",
                 &json!({"task_name": "worker", "message": CHILD_PROMPT, "fork_turns": "none"})
                     .to_string(),

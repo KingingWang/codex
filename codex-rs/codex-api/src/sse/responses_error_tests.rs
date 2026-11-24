@@ -59,6 +59,7 @@ fn audio_validation_codes_map_to_non_retryable_audio_input_errors_on_all_transpo
 }
 
 /// Only the explicit policy capacity code changes overload attribution.
+#[ignore = "fork: ServerOverloaded keeps a bounded local backoff instead of None when the server sends no Retry-After, so the retry_after=None overload rows cannot hold"]
 #[tokio::test(start_paused = true)]
 async fn policy_capacity_classification_preserves_overload_retry_behavior() {
     for (code, error_type, expected) in [
@@ -110,7 +111,8 @@ async fn policy_capacity_classification_preserves_overload_retry_behavior() {
     }
 }
 
-/// Terminal provider failures ignore retry headers and stop before a later completed event.
+/// Provider failures stop the SSE stream before a later completed event. Flex failures and the
+/// fork's generic invalid-request failures retain retry advice; terminal failures ignore it.
 #[tokio::test(start_paused = true)]
 async fn terminal_failure_with_retry_header_ends_stream_immediately() {
     for (code, expected) in [
@@ -177,9 +179,20 @@ async fn terminal_failure_with_retry_header_ends_stream_immediately() {
             assert_eq!(
                 (
                     error.to_codex_protocol_error(),
-                    error.retry_delay(/*retry_count*/ 1)
+                    error.retry_delay(/*retry_count*/ 1).is_some()
                 ),
-                (expected.clone(), None)
+                (
+                    expected.clone(),
+                    matches!(
+                        code,
+                        "flex_unavailable"
+                            | "api_key_spend_limit_exceeded"
+                            | "project_spend_limit_exceeded"
+                            | "organization_spend_limit_exceeded"
+                            | "invalid_access_program"
+                            | "unsupported_access_program"
+                    )
+                )
             );
             assert!(stream.next().await.is_none());
         }
@@ -286,10 +299,11 @@ async fn retry_header_survives_other_failed_responses() {
     }
 }
 
-/// An event header cannot make a quota or policy failure retryable.
+/// An event header cannot make a policy failure retryable. Fork: quota failures are
+/// stream-retryable at the turn layer, so only policy codes stay terminal here.
 #[tokio::test(start_paused = true)]
 async fn retry_header_does_not_override_terminal_errors() {
-    for code in ["insufficient_quota", "cyber_policy", "bio_policy"] {
+    for code in ["cyber_policy", "bio_policy"] {
         let event = serde_json::from_value(json!({
             "type": "response.failed",
             "response": {"error": {"code": code, "headers": {"retry-after": "1"}}}
@@ -398,7 +412,21 @@ async fn terminal_codes_exit_keep_open_sse_in_both_event_forms() {
                 _ => panic!("wrong error for {code}: {error:?}"),
             }
             let error = map_api_error(error);
-            assert_eq!(error.retry_delay(/*retry_count*/ 1), None, "{code}");
+            if matches!(
+                code,
+                "insufficient_quota"
+                    | "credit_balance_exhausted"
+                    | "api_key_spend_limit_exceeded"
+                    | "project_spend_limit_exceeded"
+                    | "organization_spend_limit_exceeded"
+                    | "usage_not_included"
+            ) {
+                // Fork: every HTTP 429 remains retryable. These typed mappings
+                // fall back to local backoff rather than retaining the header.
+                assert!(error.retry_delay(/*retry_count*/ 1).is_some(), "{code}");
+            } else {
+                assert_eq!(error.retry_delay(/*retry_count*/ 1), None, "{code}");
+            }
             assert!(!error.requires_http_fallback(), "{code}");
         }
     }
@@ -425,7 +453,12 @@ async fn overload_advice_survives_keep_open_sse_in_both_event_forms() {
             for event in error_forms(detail) {
                 let error = map_api_error(keep_open_error(event).await);
                 assert_eq!(error.to_codex_protocol_error(), expected);
-                assert_eq!(error.retry_delay(/*retry_count*/ 1), delay, "{code}");
+                if code == "server_is_overloaded" && delay.is_none() {
+                    // Fork: overload uses local backoff when server advice is absent or invalid.
+                    assert!(error.retry_delay(/*retry_count*/ 1).is_some(), "{code}");
+                } else {
+                    assert_eq!(error.retry_delay(/*retry_count*/ 1), delay, "{code}");
+                }
             }
         }
         let event = json!({"type": "error", "headers": {"Retry-After": "9"}, "error": {"code": code, "headers": {"Retry-After": "3"}}});

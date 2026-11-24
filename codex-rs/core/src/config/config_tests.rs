@@ -1280,6 +1280,7 @@ region = "us-west-2"
 }
 
 #[tokio::test]
+#[ignore = "fork: built-in Amazon Bedrock providers are disabled for internal deployment"]
 async fn load_config_applies_amazon_bedrock_transport_overrides() {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
@@ -7042,7 +7043,7 @@ fn local_dev_builds_force_file_mcp_oauth_store_modes() {
 }
 
 #[tokio::test]
-async fn feedback_enabled_defaults_to_true() -> std::io::Result<()> {
+async fn feedback_enabled_defaults_to_false_for_internal_deployment() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         feedback: Some(FeedbackConfigToml::default()),
@@ -7056,7 +7057,8 @@ async fn feedback_enabled_defaults_to_true() -> std::io::Result<()> {
     )
     .await?;
 
-    assert_eq!(config.feedback_enabled, true);
+    // DISABLED: Internal deployment - feedback telemetry defaults to disabled
+    assert_eq!(config.feedback_enabled, false);
 
     Ok(())
 }
@@ -10667,7 +10669,7 @@ async fn legacy_profile_selection_is_rejected() -> std::io::Result<()> {
 }
 
 #[tokio::test]
-async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<()> {
+async fn metrics_exporter_defaults_to_none_when_missing() -> std::io::Result<()> {
     let fixture = create_test_fixture()?;
 
     let config = Config::load_from_base_config_with_overrides(
@@ -10680,7 +10682,8 @@ async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<
     )
     .await?;
 
-    assert_eq!(config.otel.metrics_exporter, OtelExporterKind::Statsig);
+    // DISABLED: Internal deployment - metrics exporter defaults to None
+    assert_eq!(config.otel.metrics_exporter, OtelExporterKind::None);
     assert!(config.otel.log_sse_deltas);
     assert!(!config.otel.agent_response_logging_enabled());
     assert!(!config.otel.guardian_assessment_logging_enabled());
@@ -13531,6 +13534,31 @@ default_wait_timeout_ms = 2500
         "features.multi_agent_v2.default_wait_timeout_ms must be at most features.multi_agent_v2.max_wait_timeout_ms"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_migrates_the_reserved_collaboration_namespace() -> std::io::Result<()> {
+    for namespace in ["", "tool_namespace = \"collaboration\""] {
+        let codex_home = TempDir::new()?;
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!("[features.multi_agent_v2]\nenabled = true\n{namespace}\n"),
+        )?;
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .build()
+            .await?;
+        assert_eq!(
+            config.multi_agent_v2.tool_namespace.as_deref(),
+            Some("agent_tools")
+        );
+        assert_eq!(
+            config.multi_agent_v2.effective_tool_namespace(),
+            Some("agent_tools")
+        );
+    }
     Ok(())
 }
 

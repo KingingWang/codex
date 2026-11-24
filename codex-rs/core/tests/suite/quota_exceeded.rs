@@ -4,8 +4,9 @@ use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
@@ -27,11 +28,11 @@ async fn quota_exceeded_emits_single_error_event(
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex();
 
-    mount_sse_once(
-        &server,
-        sse(vec![
+    // Fork: quota-class failures are stream-retryable, so the first failure is retried
+    // once within the stream budget before the terminal error event is emitted.
+    let failure = || {
+        sse_response(sse(vec![
             ev_response_created("resp-1"),
             json!({
                 "type": "response.failed",
@@ -43,11 +44,17 @@ async fn quota_exceeded_emits_single_error_event(
                     }
                 }
             }),
-        ]),
-    )
-    .await;
+        ]))
+    };
+    let response_mock = mount_response_sequence(&server, vec![failure(), failure()]).await;
 
-    let test = builder.build_with_auto_env(&server).await?;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -57,6 +64,7 @@ async fn quota_exceeded_emits_single_error_event(
         .await?;
 
     let mut error_events = 0;
+    let mut stream_error_events = 0;
 
     loop {
         let event = wait_for_event(&test.codex, |_| true).await;
@@ -67,20 +75,18 @@ async fn quota_exceeded_emits_single_error_event(
                 assert_eq!(err.message, expected_message);
                 assert_eq!(err.codex_error_info, Some(expected.clone()));
             }
+            EventMsg::StreamError(_) => stream_error_events += 1,
             EventMsg::TurnComplete(_) => break,
             _ => {}
         }
     }
 
     assert_eq!(error_events, 1, "expected exactly one Codex:Error event");
-    let requests = server.received_requests().await.expect("recorded requests");
     assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request.url.path().ends_with("/responses"))
-            .count(),
-        1
+        stream_error_events, 1,
+        "expected one stream-error retry notice"
     );
+    assert_eq!(response_mock.requests().len(), 2);
 
     Ok(())
 }

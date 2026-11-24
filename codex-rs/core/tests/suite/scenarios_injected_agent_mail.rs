@@ -294,7 +294,16 @@ async fn injected_agent_message_interrupting_sampling_survives_mid_turn_compacti
     let test = test_codex()
         .with_model("gpt-5.4")
         .with_config(move |config| {
-            config.model_provider.name = "OpenAI (test)".to_string();
+            // Native agent messages use the OpenAI Responses path. Custom providers
+            // intentionally flatten them for compatibility; that path has unit coverage.
+            config.model_provider.name = "OpenAI".to_string();
+            config.model_provider.capabilities =
+                Some(codex_model_provider_info::ModelProviderCapabilities {
+                    remote_compaction: Some(
+                        codex_model_provider_info::RemoteCompactionSupport::Unsupported,
+                    ),
+                    ..Default::default()
+                });
             config.model_provider.base_url = Some(base_url);
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);

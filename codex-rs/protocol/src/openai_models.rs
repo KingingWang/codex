@@ -338,6 +338,7 @@ pub enum ConfigShellToolType {
 #[serde(rename_all = "snake_case")]
 pub enum ApplyPatchToolType {
     Freeform,
+    Function,
 }
 
 #[derive(
@@ -534,6 +535,11 @@ pub struct ModelInfo {
     /// When absent, preserve the runtime's `multi_agent_v2.non_code_mode_only` setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_tools_in_code_mode: Option<bool>,
+    /// Optional model provider ID. When set, switching to this model will also
+    /// switch the active provider to the one identified by this key in
+    /// `model_providers`. When absent, the current provider is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// Where model metadata was obtained during local catalog resolution.
@@ -718,7 +724,8 @@ pub struct ToolMessage {
     /// Uses the harness's supported schema subset; unrecognized keywords are ignored.
     /// Missing, null, invalid or unsupported structures, or a root without `type: "object"`
     /// retains the harness parameters. Schema semantics must remain API-compatible.
-    /// Overrides must declare harness-encrypted properties so their annotations can be retained.
+    /// Multi-Agent V2 overrides must retain built-in message parameters; encryption annotations
+    /// are removed so messages can be read by other providers.
     /// Argument handling is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<String>,
@@ -1252,6 +1259,7 @@ mod tests {
             multi_agent_version: None,
             multi_agent_reasoning_effort: None,
             multi_agent_tools_in_code_mode: None,
+            provider: None,
         }
     }
     #[test]

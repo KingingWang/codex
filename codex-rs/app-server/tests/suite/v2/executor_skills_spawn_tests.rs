@@ -153,7 +153,7 @@ async fn spawned_agent_inherits_selected_executor_skill(
             } else if parent && !completed("spawn-worker") {
                 responses::ev_function_call_with_namespace(
                     "spawn-worker",
-                    "collaboration",
+                    "agent_tools",
                     "spawn_agent",
                     &json!({
                         "task_name": "worker",

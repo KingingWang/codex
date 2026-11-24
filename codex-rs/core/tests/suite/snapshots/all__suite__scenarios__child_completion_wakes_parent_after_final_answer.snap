@@ -16,7 +16,7 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=2cefe21beec1e2d2):
+00:additional_tools/developer (3; hash=eec40be661134018):
         - namespace/functions; hash=1377b145cdccf5b4
           - custom/exec
           - function/wait
@@ -24,7 +24,7 @@ Settings:
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=9d82986c8f646fd5
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -44,7 +44,7 @@ Settings:
     Ask a worker to check the release, then finish your turn.
 06:configuration_update:reasoning={"effort":"medium"}
 -- request 2 (turn) --
-07:function_call/collaboration.spawn_agent:{"fork_turns":"none","message":"Check whether the release is ready.","task_name":"worker"}
+07:function_call/agent_tools.spawn_agent:{"fork_turns":"none","message":"Check whether the release is ready.","task_name":"worker"}
 08:function_call_output:{"task_name":"/root/worker"}
 -- request 3 (turn) --
 09:message/assistant:
@@ -54,14 +54,14 @@ Settings:
 ## Window 2 (after request 3: input diverged at item 00)
 Settings: same as window 1
 -- request 4 (turn) --
-00:additional_tools/developer (3; hash=72728edaee929e95):
+00:additional_tools/developer (3; hash=638da3b77c003cc9):
         - namespace/functions; hash=d0883eefc88509b7
           - custom/exec
           - function/wait
           - function/request_user_input
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
+        - namespace/agent_tools: Tools for spawning and managing sub-agents.; hash=9d82986c8f646fd5
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
