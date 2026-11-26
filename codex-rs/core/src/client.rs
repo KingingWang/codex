@@ -1975,10 +1975,7 @@ fn flatten_agent_messages_for_responses(
         .into_iter()
         .filter_map(|item| {
             let ResponseItem::AgentMessage {
-                id,
-                author,
-                content,
-                ..
+                author, content, ..
             } = item
             else {
                 return Some(item);
@@ -1997,7 +1994,8 @@ fn flatten_agent_messages_for_responses(
             Some(ResponseItem::Message {
                 status: None,
                 encrypted_content: None,
-                id,
+                // The converted message must not reuse an `amsg_` ID on the Responses wire.
+                id: None,
                 role: role.to_string(),
                 content: vec![content],
                 phase: None,

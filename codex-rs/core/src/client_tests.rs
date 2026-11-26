@@ -1481,13 +1481,29 @@ fn prefix_ids_track_thread_and_payload(responses_lite: bool) -> anyhow::Result<(
     Ok(())
 }
 
-#[test]
-fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> {
+#[test_case::test_case(false; "missing_ids")]
+#[test_case::test_case(true; "prefixed_ids")]
+fn non_openai_responses_requests_flatten_agent_messages(with_ids: bool) -> anyhow::Result<()> {
     let client = test_model_client(SessionSource::Cli);
+    let ordinary_message = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
+        id: Some(ResponseItemId::with_suffix("msg", "server")),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
+            text: "ordinary answer".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
     let prompt = Prompt {
         input: vec![
             ResponseItem::AgentMessage {
-                id: None,
+                id: with_ids.then(|| {
+                    ResponseItemId::with_suffix("amsg", "01a2171c-b9f7-7713-9019-61b156ef4292")
+                }),
                 author: "/root/worker".to_string(),
                 recipient: "/root".to_string(),
                 content: vec![AgentMessageInputContent::InputText {
@@ -1496,7 +1512,9 @@ fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> 
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::AgentMessage {
-                id: None,
+                id: with_ids.then(|| {
+                    ResponseItemId::with_suffix("amsg", "01a2171c-b9f7-7713-9019-61b156ef4293")
+                }),
                 author: "/root".to_string(),
                 recipient: "/root/worker".to_string(),
                 content: vec![AgentMessageInputContent::EncryptedContent {
@@ -1504,10 +1522,12 @@ fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> 
                 }],
                 internal_chat_message_metadata_passthrough: None,
             },
+            ordinary_message.clone(),
         ],
         ..Default::default()
     };
-    let request = client.build_responses_request(
+    let original_input = prompt.input.clone();
+    let mut request = client.build_responses_request(
         &prompt,
         &test_model_info(),
         /*effort*/ None,
@@ -1522,10 +1542,11 @@ fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> 
         ),
         /*include_internal*/ true,
     )?;
+    client.prepare_response_items_for_request(&mut request.input);
 
-    assert!(request.input.len() >= 2);
+    assert!(request.input.len() >= 3);
     assert_eq!(
-        &request.input[request.input.len() - 2..],
+        &request.input[request.input.len() - 3..],
         &[
             ResponseItem::Message {
                 status: None,
@@ -1551,9 +1572,156 @@ fn non_openai_responses_requests_flatten_agent_messages() -> anyhow::Result<()> 
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
             },
+            ordinary_message,
         ]
     );
+    let body = serde_json::to_value(&request)?;
+    let input = body["input"].as_array().expect("request input");
+    for item in &input[input.len() - 3..input.len() - 1] {
+        assert_eq!(item["type"], "message");
+        assert!(item.get("id").is_none(), "converted message ID is omitted");
+    }
+    assert_eq!(input.last().expect("ordinary message")["id"], "msg_server");
+    assert_eq!(prompt.input, original_input);
 
+    Ok(())
+}
+
+#[test]
+fn openai_responses_requests_preserve_native_agent_messages() -> anyhow::Result<()> {
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(None),
+        /*auth_manager*/ None,
+    );
+    let message = ResponseItem::AgentMessage {
+        id: Some(ResponseItemId::with_suffix(
+            "amsg",
+            "01a2171c-b9f7-7713-9019-61b156ef4292",
+        )),
+        author: "/root/worker".to_string(),
+        recipient: "/root".to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: "worker update".to_string(),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let prompt = Prompt {
+        input: vec![message.clone()],
+        ..Default::default()
+    };
+    let mut request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        ReasoningSummary::None,
+        /*service_tier*/ None,
+        &test_responses_metadata_for_client(
+            &client,
+            /*turn_id*/ None,
+            format!("{}:0", client.state.thread_id),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        ),
+        /*include_internal*/ true,
+    )?;
+    client.prepare_response_items_for_request(&mut request.input);
+
+    assert_eq!(request.input.last(), Some(&message));
+    assert_eq!(prompt.input, vec![message]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_openai_responses_http_omits_converted_agent_message_ids() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\"}}\n\n",
+                )),
+        )
+        .expect(/*requests*/ 2)
+        .mount(&server)
+        .await;
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(
+        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses),
+        /*auth_manager*/ None,
+    );
+    let message = ResponseItem::AgentMessage {
+        id: Some(ResponseItemId::with_suffix(
+            "amsg",
+            "01a2171c-b9f7-7713-9019-61b156ef4292",
+        )),
+        author: "/root/worker".to_string(),
+        recipient: "/root".to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: "worker update".to_string(),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let prompt = Arc::new(Prompt {
+        input: vec![message.clone()],
+        base_instructions: BaseInstructions {
+            text: String::new(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let mut session = client.new_session();
+    for _ in 0..2 {
+        let mut stream = session
+            .stream(
+                &prompt,
+                &test_model_info(),
+                &test_session_telemetry(),
+                /*effort*/ None,
+                ReasoningSummary::None,
+                /*service_tier*/ None,
+                &responses_metadata,
+                &InferenceTraceContext::disabled(),
+            )
+            .await?;
+        let mut completed = false;
+        while let Some(event) = stream.next().await {
+            if let ResponseEvent::Completed { response_id, .. } = event? {
+                assert_eq!(response_id, "resp-1");
+                completed = true;
+            }
+        }
+        assert!(completed);
+    }
+
+    let requests = server.received_requests().await.expect("received requests");
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let body: serde_json::Value = serde_json::from_slice(&request.body)?;
+        assert_eq!(
+            body["input"],
+            json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "worker update"}],
+            }])
+        );
+    }
+    assert_eq!(prompt.input, vec![message]);
     Ok(())
 }
 

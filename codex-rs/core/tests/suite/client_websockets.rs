@@ -34,6 +34,7 @@ use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::AudioReference;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -2136,6 +2137,103 @@ async fn responses_websocket_uses_incremental_create_on_prefix() {
         serde_json::to_value(&prompt_two.input[2..]).expect("serialize incremental items")
     );
 
+    assert_continuation_metrics(
+        &harness.session_telemetry,
+        &[
+            (["full", "no_previous_request", "generation"], 1),
+            (["incremental", "incremental", "generation"], 1),
+        ],
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_openai_responses_websocket_flattens_agent_messages_and_continues() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server(vec![vec![
+        vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg_1", "assistant output"),
+            ev_completed("resp-1"),
+        ],
+        vec![ev_response_created("resp-2"), ev_completed("resp-2")],
+    ]])
+    .await;
+    let harness = websocket_harness(&server).await;
+    let mut client_session = harness.client.new_session();
+    let worker_message = ResponseItem::AgentMessage {
+        id: Some(ResponseItemId::with_suffix(
+            "amsg",
+            "01a2171c-b9f7-7713-9019-61b156ef4292",
+        )),
+        author: "/root/worker".to_string(),
+        recipient: "/root".to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: "worker update".to_string(),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let parent_message = ResponseItem::AgentMessage {
+        id: Some(ResponseItemId::with_suffix(
+            "amsg",
+            "01a2171c-b9f7-7713-9019-61b156ef4293",
+        )),
+        author: "/root".to_string(),
+        recipient: "/root/worker".to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: "continue the task".to_string(),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let prompt_one = prompt_with_input(vec![worker_message.clone()]);
+    let prompt_two = prompt_with_input(vec![
+        worker_message.clone(),
+        assistant_message_item("1", "assistant output"),
+        parent_message.clone(),
+    ]);
+
+    stream_until_complete_with_model_info(
+        &mut client_session,
+        &harness,
+        &prompt_one,
+        &harness.model_info,
+        "resp-1",
+    )
+    .await;
+    stream_until_complete_with_model_info(
+        &mut client_session,
+        &harness,
+        &prompt_two,
+        &harness.model_info,
+        "resp-2",
+    )
+    .await;
+
+    let connection = server.single_connection();
+    assert_eq!(connection.len(), 2);
+    let first = connection.first().expect("first request").body_json();
+    let second = connection.get(1).expect("second request").body_json();
+    assert_eq!(
+        first["input"],
+        json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "worker update"}],
+        }])
+    );
+    assert_eq!(second["previous_response_id"], "resp-1");
+    assert_eq!(
+        second["input"],
+        json!([{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "continue the task"}],
+        }])
+    );
+    assert_eq!(prompt_one.input, vec![worker_message.clone()]);
+    assert_eq!(prompt_two.input[0], worker_message);
+    assert_eq!(prompt_two.input[2], parent_message);
     assert_continuation_metrics(
         &harness.session_telemetry,
         &[
